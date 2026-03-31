@@ -1,0 +1,39 @@
+[project]
+name = "smile-characterization"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "annotated-doc==0.0.4",
+    "click==8.3.1",
+    "colorama==0.4.6",
+    "contourpy==1.3.3",
+    "cycler==0.12.1",
+    "fonttools==4.62.1",
+    "ftd3xx==1.0",
+    "kiwisolver==1.5.0",
+    "markdown-it-py==4.0.0",
+    "matplotlib==3.10.8",
+    "mdurl==0.1.2",
+    "numpy==2.4.4",
+    "opencv-python==4.13.0.92",
+    "packaging==26.0",
+    "pandas==3.0.2",
+    "pillow==12.1.1",
+    "pygments==2.20.0",
+    "pyparsing==3.3.2",
+    "pyqt6==6.11.0",
+    "pyqt6-qt6==6.11.0",
+    "pyqt6-sip==13.11.1",
+    "python-dateutil==2.9.0.post0",
+    "pyvisa==1.16.2",
+    "pyyaml==6.0.3",
+    "rich==14.3.3",
+    "shellingham==1.5.4",
+    "six==1.17.0",
+    "termcolor==3.3.0",
+    "typer==0.24.1",
+    "typing-extensions==4.15.0",
+    "tzdata==2025.3",
+]
