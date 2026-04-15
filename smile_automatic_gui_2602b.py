@@ -3,20 +3,17 @@
 #      ROI spinboxes vertical; buffer acq + secondary storage moved into sample info box;
 #      profiling: add remaining sleep + k_setup; hoist smu setup outside pixel loop
 
-GUI_VERSION = "20260323_v1"
+GUI_VERSION = "20260415_v1"
 
 import sys
 import time
 import os
 import csv
 import json
-import queue
-import threading
 import datetime
 import random
 import struct
 import numpy as np
-import pyvisa
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication,
@@ -96,158 +93,9 @@ class NoWheelComboBox(QComboBox):
 # =============================================================================
 
 
-class _PM400Sim:
-    def __init__(self, resource_id):
-        print(f"[SIM] PM400 @ {resource_id}")
-        self._arr_n_samples = 0
-        self._arr_delta_t_us = 100
-
-    def set_wavelength(self, wl):
-        pass
-
-    def set_power_unit(self, unit="W"):
-        pass
-
-    def set_auto_range(self, enable):
-        pass
-
-    def set_range(self, upper_limit):
-        pass
-
-    def set_averaging(self, count):
-        pass
-
-    def measure(self):
-        return random.random() * 1e-6
-
-    def display_off(self):
-        pass
-
-    def display_on(self):
-        pass
-
-    def start_continuous(self):
-        pass
-
-    def stop_continuous(self):
-        pass
-
-    def fetch_latest(self):
-        return random.random() * 1e-6
-
-    def abort(self):
-        pass
-
-    def configure_array_mode(self, window_ms, delta_t_us=100):
-        delta_t_us = max(100, int(round(delta_t_us / 100.0)) * 100)
-        n = max(1, min(int(window_ms / (delta_t_us / 1000.0)), 10000))
-        self._arr_n_samples = n
-        self._arr_delta_t_us = delta_t_us
-        return n, delta_t_us
-
-    def start_array(self):
-        pass
-
-    def poll_array_complete(self, timeout_s=5.0):
-        return True
-
-    def fetch_array(self, n_samples, start_offset=0):
-        return [random.random() * 1e-6 for _ in range(n_samples)]
-
-    def get_config_dict(self):
-        return {"sim": True}
-
-    def close(self):
-        pass
-
-
-class _Keithley2602BSim:
-    def __init__(self, resource_id):
-        print(f"[SIM] Keithley2602B @ {resource_id}")
-        self._n_pts = 10
-        self._buf_a = []
-        self._buf_b = []
-
-    def configure_channel(
-        self,
-        ch,
-        compliance=0.1,
-        nplc=1.0,
-        high_c=False,
-        zero_delays=False,
-        range_i=1e-3,
-    ):
-        pass
-
-    def set_voltage(self, ch, voltage):
-        pass
-
-    def enable_output(self, ch, enable):
-        pass
-
-    def display_off(self):
-        pass
-
-    def display_on(self):
-        pass
-
-    def setup_buffers(self, timestamps=False):
-        self._buf_a = []
-        self._buf_b = []
-
-    def clear_buffers(self):
-        self._buf_a = []
-        self._buf_b = []
-
-    def clear_buffers_only(self):
-        self._buf_a = []
-        self._buf_b = []
-
-    def measure_both_to_buffer(self):
-        self._buf_a.append(random.gauss(100e-6, 1e-6))
-        self._buf_b.append(random.gauss(10e-3, 0.1e-3))
-
-    def measure_burst(self, n):
-        for _ in range(n):
-            self._buf_a.append(random.gauss(100e-6, 1e-6))
-            self._buf_b.append(random.gauss(10e-3, 0.1e-3))
-
-    def measure_burst_fire(self, n):
-        self.measure_burst(n)  # sim: no async, just fill immediately
-
-    def measure_burst_join(self):
-        pass  # sim: nothing to wait for
-
-    def read_buffers(self, n=None):
-        a = self._buf_a[:n] if n is not None else list(self._buf_a)
-        b = self._buf_b[:n] if n is not None else list(self._buf_b)
-        return a, b
-
-    def configure_hardware_trigger(self, count):
-        self._n_pts = count
-
-    def start_hardware_trigger(self):
-        pass
-
-    def abort_trigger(self):
-        pass
-
-    def measure_instant(self):
-        return random.gauss(100e-6, 1e-6), random.gauss(10e-3, 0.1e-3)
-
-    def read_buffer_with_timestamps(self):
-        n = max(1, self._n_pts)
-        ia = [random.gauss(100e-6, 1e-6) for _ in range(n)]
-        ib = [random.gauss(10e-3, 0.1e-3) for _ in range(n)]
-        ta = [i * 0.001 for i in range(n)]
-        tb = [i * 0.001 for i in range(n)]
-        return ia, ib, ta, tb
-
-    def get_config_dict(self):
-        return {"sim": True}
-
-    def close(self):
-        pass
+from instruments.sim import PM400Sim as _PM400Sim
+from instruments.sim import Keithley2602BSim as _Keithley2602BSim
+from instruments.sim import SmileFPGASim as _SmileFPGASim
 
 
 # =============================================================================
@@ -262,15 +110,6 @@ def steady_state_mean(arr, tail_pct=20.0):
     n = max(1, int(len(arr) * tail_pct / 100.0))
     v = float(np.mean(arr[-n:]))
     return f"{v:.6e}"
-
-
-def steady_state_stats(arr, tail_pct=20.0):
-    """Returns (mean_str, std_str) of the last tail_pct% of arr."""
-    if not arr:
-        return "nan", "nan"
-    n = max(1, int(len(arr) * tail_pct / 100.0))
-    tail = np.array(arr[-n:], dtype=np.float64)
-    return f"{float(tail.mean()):.6e}", f"{float(tail.std()):.6e}"
 
 
 def generate_timing_ratio_matrix(timing_json_path, output_txt_path=None):
@@ -360,9 +199,9 @@ class ArrayMapWidget(QLabel):
 import smile_postprocess as _postprocess
 
 ACCEPTABLE_VERSIONS = {
-    "instrumentlib": {"20260322_v1"},
-    "smile_postprocess": {"20260322_v1"},
-    "gui": {"20260323_v1"},
+    "instrumentlib": {"20260415_v1"},
+    "smile_postprocess": {"20260415_v1"},
+    "gui": {"20260415_v1"},
 }
 
 
@@ -462,7 +301,7 @@ def _write_readme(run_dir, cfg, versions):
     lines += ["", "(Full settings in raw_data/*_config.json)"]
 
     readme_path = Path(run_dir) / "README.txt"
-    with open(readme_path, "w") as f:
+    with open(readme_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
 
@@ -498,7 +337,12 @@ class MeasurementWorker(QThread):
 
     def __init__(self, setup_config, device_addresses):
         super().__init__()
-        self.cfg = setup_config
+        from measurement.config import MeasurementConfig
+
+        if isinstance(setup_config, dict):
+            self.cfg = MeasurementConfig.from_gui_dict(setup_config)
+        else:
+            self.cfg = setup_config
         self.addrs = device_addresses
         self.is_running = True
         self._last_pixel_emit_t = 0.0
@@ -526,12 +370,12 @@ class MeasurementWorker(QThread):
         return [(int(p[0]), int(p[1])) for p in pixels]
 
     def generate_pixel_sequence(self):
-        if self.cfg["roi_enabled"]:
-            x1, y1 = self.cfg["roi_x1"], self.cfg["roi_y1"]
-            x2, y2 = self.cfg["roi_x2"], self.cfg["roi_y2"]
+        if self.cfg.roi_enabled:
+            x1, y1 = self.cfg.roi_x1, self.cfg.roi_y1
+            x2, y2 = self.cfg.roi_x2, self.cfg.roi_y2
             ranges = [((min(x1, x2), max(x1, x2) + 1), (min(y1, y2), max(y1, y2) + 1))]
         else:
-            quad = self.cfg["quadrant"]
+            quad = self.cfg.quadrant
             ranges = []
             if quad == "TL":
                 ranges.append(((0, 256), (0, 256)))
@@ -550,7 +394,7 @@ class MeasurementWorker(QThread):
                 for x in range(x_range[0], x_range[1]):
                     pixels.append((x, y))
 
-        if self.cfg.get("snake_scan"):
+        if self.cfg.snake_scan:
             y_rows = {}
             for x, y in pixels:
                 y_rows.setdefault(y, []).append(x)
@@ -562,83 +406,12 @@ class MeasurementWorker(QThread):
                 snaked.extend((x, y_val) for x in row_x)
             pixels = snaked
 
-        if self.cfg["random_mode"]:
+        if self.cfg.random_mode:
             random.shuffle(pixels)
-        nth = self.cfg["nth_pixel"]
+        nth = self.cfg.nth_pixel
         if nth > 1:
             pixels = pixels[::nth]
         return pixels
-
-    def get_smile_config_and_buffer(self, log_x, log_y, bit_val):
-        quad_config = {"tl_pixen": 0, "tr_pixen": 0, "bl_pixen": 0, "br_pixen": 0}
-        hw_buffer = [0] * (256 * 256)
-        local_x, local_y, valid_pixel = 0, 0, False
-        if 0 <= log_x < 256 and 0 <= log_y < 256:
-            quad_config["tl_pixen"] = 1
-            local_x, local_y, valid_pixel = log_x, log_y, True
-        elif 256 <= log_x < 512 and 0 <= log_y < 256:
-            quad_config["tr_pixen"] = 1
-            local_x, local_y, valid_pixel = 255 - (log_x - 256), log_y, True
-        elif 0 <= log_x < 256 and 256 <= log_y < 512:
-            quad_config["bl_pixen"] = 1
-            local_x, local_y, valid_pixel = log_x, 255 - (log_y - 256), True
-        elif 256 <= log_x < 512 and 256 <= log_y < 512:
-            quad_config["br_pixen"] = 1
-            local_x, local_y, valid_pixel = (
-                255 - (log_x - 256),
-                255 - (log_y - 256),
-                True,
-            )
-        if valid_pixel and 0 <= local_x < 256 and 0 <= local_y < 256:
-            hw_buffer[local_y * 256 + local_x] = bit_val
-        return quad_config, hw_buffer
-
-    def get_direct_config_and_chunks(self, log_x, log_y, bit_val, full_display=False):
-        quad_config = {"tl_pixen": 0, "tr_pixen": 0, "bl_pixen": 0, "br_pixen": 0}
-        local_x, local_y, valid_pixel = 0, 0, False
-        if 0 <= log_x < 256 and 0 <= log_y < 256:
-            quad_config["tl_pixen"] = 1
-            local_x, local_y, valid_pixel = log_x, log_y, True
-        elif 256 <= log_x < 512 and 0 <= log_y < 256:
-            quad_config["tr_pixen"] = 1
-            local_x, local_y, valid_pixel = 255 - (log_x - 256), log_y, True
-        elif 0 <= log_x < 256 and 256 <= log_y < 512:
-            quad_config["bl_pixen"] = 1
-            local_x, local_y, valid_pixel = log_x, 255 - (log_y - 256), True
-        elif 256 <= log_x < 512 and 256 <= log_y < 512:
-            quad_config["br_pixen"] = 1
-            local_x, local_y, valid_pixel = (
-                255 - (log_x - 256),
-                255 - (log_y - 256),
-                True,
-            )
-        total_chunks = 8192 if full_display else 2048
-        chunked_values = [0] * total_chunks
-        if valid_pixel and 0 <= local_x < 256 and 0 <= local_y < 256:
-            if not full_display:
-                group = local_x // 32
-                chunk_idx = local_y * 8 + (7 - group)
-                idx_in_chunk = local_x % 32
-                chunked_values[chunk_idx] = bit_val << (4 * (31 - idx_in_chunk))
-        return quad_config, chunked_values
-
-    def _get_pixel_coords(self, log_x, log_y):
-        """Map logical (log_x, log_y) to (local_row, local_col, quad_cfg) for set_pixel."""
-        quad_cfg = {"tl_pixen": 0, "tr_pixen": 0, "bl_pixen": 0, "br_pixen": 0}
-        if 0 <= log_x < 256 and 0 <= log_y < 256:
-            quad_cfg["tl_pixen"] = 1
-            return log_y, log_x, quad_cfg
-        elif 256 <= log_x < 512 and 0 <= log_y < 256:
-            quad_cfg["tr_pixen"] = 1
-            return log_y, 255 - (log_x - 256), quad_cfg
-        elif 0 <= log_x < 256 and 256 <= log_y < 512:
-            quad_cfg["bl_pixen"] = 1
-            return 255 - (log_y - 256), log_x, quad_cfg
-        elif 256 <= log_x < 512 and 256 <= log_y < 512:
-            quad_cfg["br_pixen"] = 1
-            return 255 - (log_y - 256), 255 - (log_x - 256), quad_cfg
-        quad_cfg["tl_pixen"] = 1
-        return log_y, log_x, quad_cfg
 
     def save_profiling(self, profiling_data, path):
         stats = {}
@@ -663,229 +436,6 @@ class MeasurementWorker(QThread):
         with open(path, "w") as f:
             json.dump(stats, f, indent=4)
 
-    def post_process_data(self, raw_csv_path, out_dir):
-        try:
-            import pandas as pd
-
-            filtered_out_dir = out_dir / "stats"
-            filtered_out_dir.mkdir(parents=True, exist_ok=True)
-            df = pd.read_csv(raw_csv_path)
-            if df.empty:
-                return
-
-            grouped = df.groupby(["X", "Y", "BITVAL", "NVLED_V"])
-            has_std_col = "MEAS_STD" in df.columns
-
-            def _grp_stats(sub_df):
-                vals = sub_df["MEAS_VALUE"]
-                if vals.empty:
-                    return np.nan, np.nan
-                mean = float(vals.mean())
-                if len(vals) > 1:
-                    std = float(vals.std())
-                elif has_std_col:
-                    try:
-                        std = float(sub_df["MEAS_STD"].iloc[0])
-                        if np.isnan(std):
-                            std = np.nan
-                    except Exception:
-                        std = np.nan
-                else:
-                    std = np.nan
-                return mean, std
-
-            agg_rows = []
-            for name, group in grouped:
-                x, y, bitval, nvled_v = name
-                pm_mean, pm_std = _grp_stats(group[group["TYPE"] == "PM400"])
-                vl_mean, vl_std = _grp_stats(group[group["TYPE"] == "VLED"])
-                nv_mean, nv_std = _grp_stats(group[group["TYPE"] == "NVLED"])
-                agg_rows.append(
-                    {
-                        "X": int(x),
-                        "Y": int(y),
-                        "BITVAL": int(bitval),
-                        "NVLED_V": round(nvled_v, 3),
-                        "TIME_START": round(group["TIME"].min(), 6),
-                        "TIME_END": round(group["TIME"].max(), 6),
-                        "NVLED_CURR_MEAN": nv_mean,
-                        "NVLED_CURR_STD": nv_std,
-                        "VLED_CURR_MEAN": vl_mean,
-                        "VLED_CURR_STD": vl_std,
-                        "PM400_POWER_MEAN": pm_mean,
-                        "PM400_POWER_STD": pm_std,
-                    }
-                )
-            df_agg = pd.DataFrame(agg_rows)
-            if not df_agg.empty:
-                for b_val, group_df in df_agg.groupby("BITVAL"):
-                    group_df.to_csv(
-                        out_dir / f"aggregated_bitval={int(b_val)}_mean_std.csv",
-                        index=False,
-                    )
-
-            yield_stats = []
-            for (bitval, nvled_v, mtype), group in df.groupby(
-                ["BITVAL", "NVLED_V", "TYPE"]
-            ):
-                px_avg = group.groupby(["X", "Y"])["MEAS_VALUE"].mean().reset_index()
-                px_avg["BITVAL"] = int(bitval)
-                px_avg["NVLED_V"] = nvled_v
-                px_avg["TYPE"] = mtype
-                px_avg = px_avg[["X", "Y", "BITVAL", "NVLED_V", "TYPE", "MEAS_VALUE"]]
-                vals = px_avg["MEAS_VALUE"]
-                if vals.empty:
-                    continue
-                mean_val, std_val = vals.mean(), vals.std()
-                median_val = vals.median()
-                q1, q3 = vals.quantile(0.25), vals.quantile(0.75)
-                iqr = q3 - q1
-                total_pixels = len(vals)
-
-                def save_cond(cond, suffix):
-                    filtered = px_avg[cond]
-                    if not filtered.empty:
-                        filtered.to_csv(
-                            filtered_out_dir
-                            / f"pivot_bitval={int(bitval)}_nvled={nvled_v:.3f}_{mtype}_{suffix}.csv",
-                            index=False,
-                        )
-                    return len(filtered)
-
-                n_low_out = save_cond(vals < (q1 - 1.5 * iqr), "low_outliers")
-                n_high_out = save_cond(vals > (q3 + 1.5 * iqr), "high_outliers")
-                n_inliers = save_cond(
-                    (vals >= (q1 - 1.5 * iqr)) & (vals <= (q3 + 1.5 * iqr)),
-                    "inliers_iqr",
-                )
-                n_1std = save_cond(
-                    (vals >= mean_val - std_val) & (vals <= mean_val + std_val),
-                    "inside_1std",
-                )
-                n_2std = save_cond(
-                    (vals >= mean_val - 2 * std_val) & (vals <= mean_val + 2 * std_val),
-                    "inside_2std",
-                )
-                n_3std = save_cond(
-                    (vals >= mean_val - 3 * std_val) & (vals <= mean_val + 3 * std_val),
-                    "inside_3std",
-                )
-                save_cond(vals < (mean_val - 3 * std_val), "outside_3std_low")
-                save_cond(vals > (mean_val + 3 * std_val), "outside_3std_high")
-
-                if mtype == "PM400" and total_pixels > 0:
-                    dead_pixels = (
-                        (vals < (0.10 * median_val)).sum() if median_val > 0 else 0
-                    )
-                    cv = (std_val / mean_val) if mean_val != 0 else np.nan
-                    yield_stats.append(
-                        {
-                            "BITVAL": int(bitval),
-                            "NVLED_V": round(nvled_v, 3),
-                            "TOTAL_PIXELS": total_pixels,
-                            "MEAN_POWER": float(f"{mean_val:.4e}"),
-                            "STD_POWER": float(f"{std_val:.4e}"),
-                            "COEF_OF_VARIATION_CV": round(cv, 4),
-                            "DEAD_PIXELS_COUNT": int(dead_pixels),
-                            "YIELD_INLIERS_IQR_%": round(
-                                (n_inliers / total_pixels) * 100, 2
-                            ),
-                            "YIELD_1STD_%": round((n_1std / total_pixels) * 100, 2),
-                            "YIELD_2STD_%": round((n_2std / total_pixels) * 100, 2),
-                            "YIELD_3STD_%": round((n_3std / total_pixels) * 100, 2),
-                            "COUNT_INLIERS_IQR": n_inliers,
-                            "COUNT_1STD": n_1std,
-                            "COUNT_2STD": n_2std,
-                            "COUNT_3STD": n_3std,
-                        }
-                    )
-            if yield_stats:
-                pd.DataFrame(yield_stats).to_csv(
-                    out_dir / "pm400_optical_yield_report.csv", index=False
-                )
-        except Exception as e:
-            self.error.emit(f"Post-processing error: {e}")
-
-    def _save_transient(
-        self,
-        hdf5_file,
-        sec_dir,
-        x,
-        y,
-        bv,
-        nv_vol,
-        pm_times,
-        pm_arr,
-        k_times,
-        vled_arr,
-        nvled_arr,
-        T0,
-        mode="A",
-        t_ack_s=None,
-        t_turnoff_s=None,
-    ):
-        try:
-            if hdf5_file is not None and HDF5_AVAILABLE:
-                grp = hdf5_file.require_group(
-                    f"x{x:03d}_y{y:03d}/bv{bv:02d}/nv{nv_vol:.4f}"
-                )
-                grp.attrs["T0_perf_counter_s"] = T0
-                grp.attrs["mode"] = mode
-                grp.attrs["x"] = x
-                grp.attrs["y"] = y
-                grp.attrs["bitval"] = bv
-                grp.attrs["nvled_v"] = nv_vol
-                if t_ack_s is not None:
-                    grp.attrs["t_ack_s"] = t_ack_s
-                if t_turnoff_s is not None:
-                    grp.attrs["t_turnoff_s"] = t_turnoff_s
-                if pm_arr:
-                    grp.create_dataset(
-                        "pm400_time_s",
-                        data=np.array(pm_times, dtype=np.float64),
-                        compression="gzip",
-                    )
-                    grp.create_dataset(
-                        "pm400_power_W",
-                        data=np.array(pm_arr, dtype=np.float32),
-                        compression="gzip",
-                    )
-                if vled_arr:
-                    grp.create_dataset(
-                        "k_time_s",
-                        data=np.array(k_times, dtype=np.float64),
-                        compression="gzip",
-                    )
-                    grp.create_dataset(
-                        "vled_current_A",
-                        data=np.array(vled_arr, dtype=np.float32),
-                        compression="gzip",
-                    )
-                    grp.create_dataset(
-                        "nvled_current_A",
-                        data=np.array(nvled_arr, dtype=np.float32),
-                        compression="gzip",
-                    )
-            else:
-                rows = []
-                for t, v in zip(pm_times, pm_arr):
-                    rows.append([round(t, 9), "PM400", v])
-                for t, iv, in_ in zip(k_times, vled_arr, nvled_arr):
-                    rows.append([round(t, 9), "VLED", iv])
-                    rows.append([round(t, 9), "NVLED", in_])
-                if t_ack_s is not None:
-                    rows.append([round(T0 + t_ack_s, 9), "ACK", 1.0])
-                if t_turnoff_s is not None:
-                    rows.append([round(T0 + t_turnoff_s, 9), "TURNOFF_ACK", 1.0])
-                rows.sort(key=lambda r: r[0])
-                fpath = sec_dir / f"x{x:03d}_y{y:03d}_b{bv:02d}_nv{nv_vol:.4f}.csv"
-                with open(fpath, "w", newline="") as f:
-                    w = csv.writer(f)
-                    w.writerow(["TIME_s", "TYPE", "VALUE"])
-                    w.writerows(rows)
-        except Exception as e:
-            self.log_msg.emit(f"Secondary save error: {e}")
-
     # ------------------------------------------------------------------
     # Instrument connection & setup helpers
     # ------------------------------------------------------------------
@@ -893,49 +443,50 @@ class MeasurementWorker(QThread):
     def _connect_devices(self):
         self.log_msg.emit("Connecting to devices...")
         PMClass = (
-            _PM400Sim
-            if (self.cfg.get("sim_pm400") or not DRIVERS_AVAILABLE)
-            else _PM400Real
+            _PM400Sim if (self.cfg.sim_pm400 or not DRIVERS_AVAILABLE) else _PM400Real
         )
         SMUClass = (
             _Keithley2602BSim
-            if (self.cfg.get("sim_smu") or not DRIVERS_AVAILABLE)
+            if (self.cfg.sim_smu or not DRIVERS_AVAILABLE)
             else _Keithley2602BReal
         )
-        use_smile = SMILE_AVAILABLE and not self.cfg.get("sim_smile")
+        use_smile = SMILE_AVAILABLE and not self.cfg.sim_smile
 
         pm = PMClass(self.addrs["pm400"])
-        pm.set_wavelength(self.cfg["pm_wavelength"])
+        pm.set_wavelength(self.cfg.pm_wavelength)
         pm.set_power_unit("W")
         pm.set_auto_range(False)
-        pm.set_range(self.cfg["pm_range"])
+        pm.set_range(self.cfg.pm_range)
         pm.set_averaging(1)
 
         smu = SMUClass(self.addrs["smu"])
         smu.configure_channel(
             "a",
-            self.cfg["vled_compliance"],
-            self.cfg["vled_nplc"],
-            self.cfg["vled_highc"],
+            self.cfg.vled_compliance,
+            self.cfg.vled_nplc,
+            self.cfg.vled_highc,
             zero_delays=True,
-            range_i=self.cfg["vled_range_i"],
+            range_i=self.cfg.vled_range_i,
         )
         smu.configure_channel(
             "b",
-            self.cfg["nvled_compliance"],
-            self.cfg["nvled_nplc"],
-            self.cfg["nvled_highc"],
+            self.cfg.nvled_compliance,
+            self.cfg.nvled_nplc,
+            self.cfg.nvled_highc,
             zero_delays=True,
-            range_i=self.cfg["nvled_range_i"],
+            range_i=self.cfg.nvled_range_i,
         )
 
-        smile_dev = None
+        from instruments.smile_fpga import SmileFPGA
+
         if use_smile:
-            smile_dev = Smile(timeout=5000, debug_lvl=0)
+            raw_smile = Smile(timeout=5000, debug_lvl=0)
+            smile_dev = SmileFPGA(raw_smile)
         else:
             self.log_msg.emit("[SIM] SMILE platform simulated.")
+            smile_dev = _SmileFPGASim()
 
-        if self.cfg.get("smu_display_off", False):
+        if self.cfg.smu_display_off:
             self.log_msg.emit("Disabling Keithley display...")
             smu.display_off()
         return pm, smu, smile_dev
@@ -943,41 +494,41 @@ class MeasurementWorker(QThread):
     def _setup_run_dir(self, pm, smu):
         timestamp = datetime.datetime.now().strftime("%y%m%d-%H%M")
         safe_name = "".join(
-            c for c in self.cfg["sample_name"] if c.isalnum() or c in (" ", "_", "-")
+            c for c in self.cfg.sample_name if c.isalnum() or c in (" ", "_", "-")
         ).strip()
         folder_name = (
             f"{timestamp}_{safe_name}" if safe_name else f"{timestamp}_Measurement"
         )
-        base_dir = Path(self.cfg["save_dir"])
+        base_dir = Path(self.cfg.save_dir)
         run_dir = base_dir / folder_name
         raw_data_dir = run_dir / "raw_data"
         raw_data_dir.mkdir(parents=True, exist_ok=True)
 
         sec_dir = None
         hdf5_file = None
-        if self.cfg["secondary_storage_enabled"]:
+        if self.cfg.secondary_storage_enabled:
             sec_dir = (
-                Path(self.cfg["secondary_storage_dir"]) / folder_name
-                if self.cfg["secondary_storage_dir"].strip()
+                Path(self.cfg.secondary_storage_dir) / folder_name
+                if self.cfg.secondary_storage_dir.strip()
                 else run_dir / "transient_data"
             )
             sec_dir.mkdir(parents=True, exist_ok=True)
-            if self.cfg["secondary_storage_format"] == "HDF5" and HDF5_AVAILABLE:
+            if self.cfg.secondary_storage_format == "HDF5" and HDF5_AVAILABLE:
                 hdf5_file = h5py.File(str(sec_dir / "transients.h5"), "w")
 
-        if self.cfg["pixel_source"] == "CSV":
-            pixel_list = self.load_pixels_from_csv(self.cfg["csv_file_path"])
+        if self.cfg.pixel_source == "CSV":
+            pixel_list = self.load_pixels_from_csv(self.cfg.csv_file_path)
             fname_base = "meas_CSV_loaded"
         else:
             pixel_list = self.generate_pixel_sequence()
-            if self.cfg["roi_enabled"]:
+            if self.cfg.roi_enabled:
                 fname_base = (
                     f"meas_{safe_name}_ROI_"
-                    f"{self.cfg['roi_x1']},{self.cfg['roi_y1']}_"
-                    f"{self.cfg['roi_x2']},{self.cfg['roi_y2']}"
+                    f"{self.cfg.roi_x1},{self.cfg.roi_y1}_"
+                    f"{self.cfg.roi_x2},{self.cfg.roi_y2}"
                 )
             else:
-                fname_base = f"meas_{safe_name}_{self.cfg['quadrant']}"
+                fname_base = f"meas_{safe_name}_{self.cfg.quadrant}"
 
         import instrumentlib as _il
 
@@ -986,11 +537,12 @@ class MeasurementWorker(QThread):
             "instrumentlib": getattr(_il, "VERSION", "unknown"),
             "smile_postprocess": getattr(_postprocess, "VERSION", "unknown"),
         }
+        cfg_dict = self.cfg.to_dict()
         config_path = raw_data_dir / f"{fname_base}_config.json"
         with open(config_path, "w") as f:
             json.dump(
                 {
-                    "settings": self.cfg,
+                    "settings": cfg_dict,
                     "addresses": self.addrs,
                     "pm400_config": pm.get_config_dict(),
                     "smu_config": smu.get_config_dict(),
@@ -999,41 +551,16 @@ class MeasurementWorker(QThread):
                 f,
                 indent=4,
             )
-        _write_readme(run_dir, self.cfg, versions)
+        _write_readme(run_dir, cfg_dict, versions)
         return run_dir, raw_data_dir, sec_dir, hdf5_file, fname_base, pixel_list
 
-    def _build_instr_params(self, pm):
-        """Configure PM400 array mode and compute Keithley trigger count. Transient mode only."""
-        window_ms = self.cfg["window_ms"]
-        min_remaining_ms = self.cfg["min_remaining_ms"]
-        delta_t_us = 100
-        dark_tail_ms = (
-            self.cfg.get("dark_tail_ms", 0) if self.cfg.get("dark_acq") else 0
-        )
-        extended_window_ms = window_ms + min_remaining_ms + dark_tail_ms
-        n_pm_samples, _ = pm.configure_array_mode(extended_window_ms, delta_t_us)
-        k_nplc = max(self.cfg["vled_nplc"], self.cfg["nvled_nplc"])
-        expected_k_count = max(1, int(extended_window_ms / (k_nplc * 20.0)))
-        k_trigger_count = min(int(expected_k_count * 1.5) + 10, 60000)
-        return {
-            "window_ms": window_ms,
-            "min_remaining_ms": min_remaining_ms,
-            "dark_tail_ms": dark_tail_ms,
-            "delta_t_us": delta_t_us,
-            "extended_window_ms": extended_window_ms,
-            "n_pm_samples": n_pm_samples,
-            "k_trigger_count": k_trigger_count,
-        }
-
     def _build_nvled_voltages(self):
-        if self.cfg["nvled_sweep"]:
-            start_v = self.cfg["nvled_voltage"]
-            target_v = self.cfg["nvled_sweep_target"]
-            step_v = abs(self.cfg["nvled_sweep_step"]) * (
-                1 if target_v > start_v else -1
-            )
+        if self.cfg.nvled_sweep:
+            start_v = self.cfg.nvled_voltage
+            target_v = self.cfg.nvled_sweep_target
+            step_v = abs(self.cfg.nvled_sweep_step) * (1 if target_v > start_v else -1)
             return np.arange(start_v, target_v + step_v * 0.5, step_v).tolist()
-        return [self.cfg["nvled_voltage"]]
+        return [self.cfg.nvled_voltage]
 
     def _empty_profiling(self):
         return {
@@ -1047,704 +574,6 @@ class MeasurementWorker(QThread):
             "turnoff_dis": [],
             "dark_acq": [],
         }
-
-    def _maybe_turnoff_dis(self, smile_dev, profiling):
-        """Send a blank frame (turnoff) if enabled. Records elapsed time in profiling."""
-        if not self.cfg.get("turnoff_dis"):
-            return
-        t0 = time.perf_counter()
-        if smile_dev:
-            # smile_dev.send_instruction(
-            #    instr=(smile_dev.commands["TURNOFF_DIS"] << 120)
-            # )
-            blank_frame = [0] * (256 * 8)
-            send_image(smile_dev, blank_frame)
-        profiling["turnoff_dis"].append(time.perf_counter() - t0)
-
-    def _maybe_dark_acq(
-        self,
-        pm,
-        smu,
-        log_x,
-        log_y,
-        bit_val,
-        nv_vol,
-        data_buffer,
-        profiling,
-        start_time,
-        pm_fn=None,
-    ):
-        """Single dark measurement (display off). Appended to data_buffer as TYPE=DARK_*.
-        pm_fn: callable that returns one PM400 scalar (default: pm.measure).
-               Pass pm.fetch_latest when PM400 is in continuous mode."""
-        if not self.cfg.get("dark_acq"):
-            return
-        if pm_fn is None:
-            pm_fn = pm.measure
-        dark_settle = self.cfg.get("dark_settle_ms", 0) / 1000.0
-        if dark_settle > 0:
-            time.sleep(dark_settle)
-        t0 = time.perf_counter()
-        pm_dark = pm_fn()
-        vled_dark, nvled_dark = smu.measure_instant()
-        profiling["dark_acq"].append(time.perf_counter() - t0)
-        t_anchor = round(time.perf_counter() - start_time, 6)
-        data_buffer.extend(
-            [
-                [
-                    log_x,
-                    log_y,
-                    bit_val,
-                    nv_vol,
-                    t_anchor,
-                    "DARK_PM400",
-                    f"{pm_dark:.6e}",
-                    "nan",
-                ],
-                [
-                    log_x,
-                    log_y,
-                    bit_val,
-                    nv_vol,
-                    t_anchor,
-                    "DARK_VLED",
-                    f"{vled_dark:.6e}",
-                    "nan",
-                ],
-                [
-                    log_x,
-                    log_y,
-                    bit_val,
-                    nv_vol,
-                    t_anchor,
-                    "DARK_NVLED",
-                    f"{nvled_dark:.6e}",
-                    "nan",
-                ],
-            ]
-        )
-
-    # ------------------------------------------------------------------
-    # Measurement loops
-    # ------------------------------------------------------------------
-
-    def _loop_transient(
-        self,
-        pm,
-        smu,
-        smile_dev,
-        pixel_list,
-        bit_values,
-        nvled_voltages,
-        write_queue,
-        hdf5_file,
-        sec_dir,
-        profiling,
-        start_time,
-        instr,
-    ):
-        """Full transient acquisition: hardware-triggered buffered capture per pixel."""
-        n_pm_samples = instr["n_pm_samples"]
-        delta_t_us = instr["delta_t_us"]
-        window_ms = instr["window_ms"]
-        min_remaining_ms = instr["min_remaining_ms"]
-        k_trigger_count = instr["k_trigger_count"]
-
-        total_steps = len(pixel_list) * len(bit_values)
-        moving_avg_time = 0
-        step_count = 0
-
-        for log_x, log_y in pixel_list:
-            if not self.is_running:
-                break
-            self._emit_pixel_start(log_x, log_y)
-            data_buffer = []
-
-            for bit_val in bit_values:
-                if not self.is_running:
-                    break
-                t_step_start = time.perf_counter()
-
-                t0 = time.perf_counter()
-                local_row, local_col, quad_cfg = self._get_pixel_coords(log_x, log_y)
-                profiling["img_gen"].append(time.perf_counter() - t0)
-
-                is_swept = self.cfg["nvled_sweep"]
-
-                # ======================================================
-                # MODE A: Fixed NVLED — capture image turn-on transient
-                # ======================================================
-                if not is_swept:
-                    # Reset PM400 state from previous pixel (ABOR clears FETC:STAT).
-                    # CONF:ARR parameters remain valid after ABOR.
-                    t0 = time.perf_counter()
-                    pm.abort()
-                    smu.clear_buffers_only()
-                    smu.configure_hardware_trigger(k_trigger_count)
-                    profiling["k_buffer_clear"].append(time.perf_counter() - t0)
-
-                    T_arm_start = time.perf_counter()
-                    pm.start_array()
-                    smu.start_hardware_trigger()
-                    T_arm_end = time.perf_counter()
-                    T0 = (T_arm_start + T_arm_end) / 2.0
-
-                    t0 = time.perf_counter()
-                    if smile_dev:
-                        set_pixel(
-                            smile_dev, local_row, local_col, bit_val, cfg=quad_cfg
-                        )
-                    profiling["img_send"].append(time.perf_counter() - t0)
-                    t_ack_s = time.perf_counter() - T0
-
-                    elapsed = time.perf_counter() - T_arm_start
-                    remaining_normal = (window_ms / 1000.0) - elapsed
-                    dark_tail_ms = instr.get("dark_tail_ms", 0)
-                    t_turnoff_s = None
-                    if dark_tail_ms > 0 and self.cfg.get("dark_acq"):
-                        # Sleep until end of illumination window, then blank
-                        if remaining_normal > 0:
-                            time.sleep(remaining_normal)
-                        self._maybe_turnoff_dis(smile_dev, profiling)
-                        t_turnoff_s = time.perf_counter() - T0
-                        time.sleep(dark_tail_ms / 1000.0)
-                    else:
-                        actual_sleep = max(remaining_normal, min_remaining_ms / 1000.0)
-                        if actual_sleep > 0:
-                            time.sleep(actual_sleep)
-                    profiling["remaining"].append(remaining_normal)
-
-                    n_captured = min(
-                        n_pm_samples,
-                        max(
-                            1,
-                            int((time.perf_counter() - T_arm_start) * 1e6 / delta_t_us),
-                        ),
-                    )
-                    smu.abort_trigger()
-                    pm.abort()
-
-                    tail_pct = self.cfg["steady_tail_pct"]
-                    need_full = self.cfg["secondary_storage_enabled"]
-                    t0 = time.perf_counter()
-                    if need_full:
-                        pm_arr = pm.fetch_array(n_captured)
-                        pm_fetch_offset = 0
-                    else:
-                        n_tail = max(1, int(n_captured * tail_pct / 100))
-                        pm_fetch_offset = n_captured - n_tail
-                        pm_arr = pm.fetch_array(n_tail, start_offset=pm_fetch_offset)
-                    profiling["pm_arm_to_fetch"].append(time.perf_counter() - t0)
-
-                    t0 = time.perf_counter()
-                    vled_arr, nvled_arr, ta_arr, _ = smu.read_buffer_with_timestamps()
-                    profiling["k_arm_to_fetch"].append(time.perf_counter() - t0)
-
-                    pm_times = [
-                        T0 + (pm_fetch_offset + i) * delta_t_us * 1e-6
-                        for i in range(len(pm_arr))
-                    ]
-                    k_times = [t - (ta_arr[0] - T0) for t in ta_arr] if ta_arr else []
-
-                    nv_vol = self.cfg["nvled_voltage"]
-
-                    # Extract dark samples from tail if in-window dark was captured
-                    if dark_tail_ms > 0 and self.cfg.get("dark_acq"):
-                        n_dark = max(1, int(dark_tail_ms * 1000 / delta_t_us))
-                        dark_samples = (
-                            pm_arr[-n_dark:] if len(pm_arr) >= n_dark else pm_arr
-                        )
-                        pm_dark_val = (
-                            float(np.mean(dark_samples))
-                            if dark_samples
-                            else float("nan")
-                        )
-                        t_anchor = round(time.perf_counter() - start_time, 6)
-                        data_buffer.extend(
-                            [
-                                [
-                                    log_x,
-                                    log_y,
-                                    bit_val,
-                                    nv_vol,
-                                    t_anchor,
-                                    "DARK_PM400",
-                                    f"{pm_dark_val:.6e}",
-                                    f"{float(np.std(dark_samples)):.6e}",
-                                ],
-                            ]
-                        )
-                    t_anchor = round(T0 - start_time, 6)
-                    eff_tail = 100.0 if not need_full else tail_pct
-                    pm_mean, pm_std = steady_state_stats(pm_arr, eff_tail)
-                    vl_mean, vl_std = steady_state_stats(vled_arr, tail_pct)
-                    nv_mean, nv_std = steady_state_stats(nvled_arr, tail_pct)
-                    data_buffer.extend(
-                        [
-                            [
-                                log_x,
-                                log_y,
-                                bit_val,
-                                nv_vol,
-                                t_anchor,
-                                "PM400",
-                                pm_mean,
-                                pm_std,
-                            ],
-                            [
-                                log_x,
-                                log_y,
-                                bit_val,
-                                nv_vol,
-                                t_anchor,
-                                "VLED",
-                                vl_mean,
-                                vl_std,
-                            ],
-                            [
-                                log_x,
-                                log_y,
-                                bit_val,
-                                nv_vol,
-                                t_anchor,
-                                "NVLED",
-                                nv_mean,
-                                nv_std,
-                            ],
-                        ]
-                    )
-
-                    if self.cfg["secondary_storage_enabled"] and sec_dir is not None:
-                        write_queue.put(
-                            (
-                                "secondary",
-                                {
-                                    "hdf5_file": hdf5_file,
-                                    "sec_dir": sec_dir,
-                                    "x": log_x,
-                                    "y": log_y,
-                                    "bv": bit_val,
-                                    "nv_vol": nv_vol,
-                                    "pm_times": pm_times,
-                                    "pm_arr": pm_arr,
-                                    "k_times": k_times,
-                                    "vled_arr": vled_arr,
-                                    "nvled_arr": nvled_arr,
-                                    "T0": T0,
-                                    "mode": "A",
-                                    "t_ack_s": t_ack_s,
-                                    "t_turnoff_s": t_turnoff_s,
-                                },
-                            )
-                        )
-                    self._maybe_turnoff_dis(smile_dev, profiling)
-                    self._maybe_dark_acq(
-                        pm,
-                        smu,
-                        log_x,
-                        log_y,
-                        bit_val,
-                        nv_vol,
-                        data_buffer,
-                        profiling,
-                        start_time,
-                    )
-
-                # ======================================================
-                # MODE B: Swept NVLED — capture voltage step transients
-                # ======================================================
-                else:
-                    t0 = time.perf_counter()
-                    if smile_dev:
-                        set_pixel(
-                            smile_dev, local_row, local_col, bit_val, cfg=quad_cfg
-                        )
-                    profiling["img_send"].append(time.perf_counter() - t0)
-
-                    for nv_vol in nvled_voltages:
-                        if not self.is_running:
-                            break
-
-                        pm.abort()
-                        smu.clear_buffers_only()
-                        smu.configure_hardware_trigger(k_trigger_count)
-
-                        smu.set_voltage("b", nv_vol)
-                        time.sleep(self.cfg["nvled_settle_ms"] / 1000.0)
-
-                        T_arm_start = time.perf_counter()
-                        pm.start_array()
-                        smu.start_hardware_trigger()
-                        T_arm_end = time.perf_counter()
-                        T0 = (T_arm_start + T_arm_end) / 2.0
-
-                        elapsed = time.perf_counter() - T_arm_start
-                        remaining_normal = (window_ms / 1000.0) - elapsed
-                        dark_tail_ms = instr.get("dark_tail_ms", 0)
-                        t_turnoff_s = None
-                        if dark_tail_ms > 0 and self.cfg.get("dark_acq"):
-                            # Sleep until end of illumination window, then blank
-                            if remaining_normal > 0:
-                                time.sleep(remaining_normal)
-                            self._maybe_turnoff_dis(smile_dev, profiling)
-                            t_turnoff_s = time.perf_counter() - T0
-                            time.sleep(dark_tail_ms / 1000.0)
-                        else:
-                            actual_sleep = max(
-                                remaining_normal, min_remaining_ms / 1000.0
-                            )
-                            if actual_sleep > 0:
-                                time.sleep(actual_sleep)
-                        profiling["remaining"].append(remaining_normal)
-
-                        n_captured = min(
-                            n_pm_samples,
-                            max(
-                                1,
-                                int(
-                                    (time.perf_counter() - T_arm_start)
-                                    * 1e6
-                                    / delta_t_us
-                                ),
-                            ),
-                        )
-                        smu.abort_trigger()
-                        pm.abort()
-
-                        tail_pct = self.cfg["steady_tail_pct"]
-                        need_full = self.cfg["secondary_storage_enabled"]
-                        t0 = time.perf_counter()
-                        if need_full:
-                            pm_arr = pm.fetch_array(n_captured)
-                            pm_fetch_offset = 0
-                        else:
-                            n_tail = max(1, int(n_captured * tail_pct / 100))
-                            pm_fetch_offset = n_captured - n_tail
-                            pm_arr = pm.fetch_array(
-                                n_tail, start_offset=pm_fetch_offset
-                            )
-                        profiling["pm_arm_to_fetch"].append(time.perf_counter() - t0)
-
-                        t0 = time.perf_counter()
-                        vled_arr, nvled_arr, ta_arr, _ = (
-                            smu.read_buffer_with_timestamps()
-                        )
-                        profiling["k_arm_to_fetch"].append(time.perf_counter() - t0)
-
-                        pm_times = [
-                            T0 + (pm_fetch_offset + i) * delta_t_us * 1e-6
-                            for i in range(len(pm_arr))
-                        ]
-                        k_times = (
-                            [t - (ta_arr[0] - T0) for t in ta_arr] if ta_arr else []
-                        )
-
-                        # Extract dark samples from tail if in-window dark was captured
-                        if dark_tail_ms > 0 and self.cfg.get("dark_acq"):
-                            n_dark = max(1, int(dark_tail_ms * 1000 / delta_t_us))
-                            dark_samples = (
-                                pm_arr[-n_dark:] if len(pm_arr) >= n_dark else pm_arr
-                            )
-                            pm_dark_val = (
-                                float(np.mean(dark_samples))
-                                if dark_samples
-                                else float("nan")
-                            )
-                            t_anchor_dark = round(time.perf_counter() - start_time, 6)
-                            data_buffer.extend(
-                                [
-                                    [
-                                        log_x,
-                                        log_y,
-                                        bit_val,
-                                        nv_vol,
-                                        t_anchor_dark,
-                                        "DARK_PM400",
-                                        f"{pm_dark_val:.6e}",
-                                        f"{float(np.std(dark_samples)):.6e}",
-                                    ],
-                                ]
-                            )
-
-                        t_anchor = round(T0 - start_time, 6)
-                        eff_tail = 100.0 if not need_full else tail_pct
-                        pm_mean, pm_std = steady_state_stats(pm_arr, eff_tail)
-                        vl_mean, vl_std = steady_state_stats(vled_arr, tail_pct)
-                        nv_mean, nv_std = steady_state_stats(nvled_arr, tail_pct)
-                        data_buffer.extend(
-                            [
-                                [
-                                    log_x,
-                                    log_y,
-                                    bit_val,
-                                    nv_vol,
-                                    t_anchor,
-                                    "PM400",
-                                    pm_mean,
-                                    pm_std,
-                                ],
-                                [
-                                    log_x,
-                                    log_y,
-                                    bit_val,
-                                    nv_vol,
-                                    t_anchor,
-                                    "VLED",
-                                    vl_mean,
-                                    vl_std,
-                                ],
-                                [
-                                    log_x,
-                                    log_y,
-                                    bit_val,
-                                    nv_vol,
-                                    t_anchor,
-                                    "NVLED",
-                                    nv_mean,
-                                    nv_std,
-                                ],
-                            ]
-                        )
-
-                        if (
-                            self.cfg["secondary_storage_enabled"]
-                            and sec_dir is not None
-                        ):
-                            write_queue.put(
-                                (
-                                    "secondary",
-                                    {
-                                        "hdf5_file": hdf5_file,
-                                        "sec_dir": sec_dir,
-                                        "x": log_x,
-                                        "y": log_y,
-                                        "bv": bit_val,
-                                        "nv_vol": nv_vol,
-                                        "pm_times": pm_times,
-                                        "pm_arr": pm_arr,
-                                        "k_times": k_times,
-                                        "vled_arr": vled_arr,
-                                        "nvled_arr": nvled_arr,
-                                        "T0": T0,
-                                        "mode": "B",
-                                        "t_ack_s": None,
-                                        "t_turnoff_s": t_turnoff_s,
-                                    },
-                                )
-                            )
-                    # after all voltages swept
-                    self._maybe_turnoff_dis(smile_dev, profiling)
-                    self._maybe_dark_acq(
-                        pm,
-                        smu,
-                        log_x,
-                        log_y,
-                        bit_val,
-                        nv_vol,
-                        data_buffer,
-                        profiling,
-                        start_time,
-                    )
-
-                # ETA
-                step_count += 1
-                step_duration = time.perf_counter() - t_step_start
-                moving_avg_time = (
-                    step_duration
-                    if moving_avg_time == 0
-                    else 0.95 * moving_avg_time + 0.05 * step_duration
-                )
-                rem_seconds = int((total_steps - step_count) * moving_avg_time)
-                self._emit_eta(
-                    f"Pixel: {log_x},{log_y} | "
-                    f"Progress: {int((step_count / total_steps) * 100)}% | "
-                    f"ETA: {datetime.timedelta(seconds=rem_seconds)}"
-                )
-
-            if data_buffer:
-                write_queue.put(("csv", data_buffer))
-            self.pixel_update.emit(log_x, log_y, 2)
-
-        return step_count
-
-    def _loop_fast_scan(
-        self,
-        pm,
-        smu,
-        smile_dev,
-        pixel_list,
-        bit_values,
-        nvled_voltages,
-        write_queue,
-        profiling,
-        start_time,
-    ):
-        """Fast scan: SMU burst-to-buffer + PM400 continuous fetch per pixel."""
-        total_steps = len(pixel_list) * len(bit_values)
-        moving_avg_time = 0
-        step_count = 0
-        settle_s = self.cfg["fast_scan_settle_ms"] / 1000.0
-        is_swept = self.cfg["nvled_sweep"]
-        n_pts = self.cfg["fast_scan_n_pts"]
-
-        # Prepare PM400 for continuous mode.
-        # Must mirror the Part-7 benchmark sequence that confirmed FETC? works:
-        #   ABOR → CONF:POW → re-apply settings → INIT:CONT
-        # Skipping CONF:POW leaves the instrument in an undefined mode;
-        # FETC? then returns the same stale measurement on every call.
-        pm.inst.write("ABOR")
-        time.sleep(0.05)
-        pm.inst.write("CONF:POW")
-        time.sleep(0.05)
-        pm.set_wavelength(self.cfg["pm_wavelength"])
-        pm.set_power_unit("W")
-        pm.set_auto_range(False)
-        pm.set_range(self.cfg["pm_range"])
-        pm.set_averaging(1)
-        time.sleep(0.05)
-        pm.start_continuous()
-
-        for log_x, log_y in pixel_list:
-            if not self.is_running:
-                break
-            self._emit_pixel_start(log_x, log_y)
-            data_buffer = []
-
-            for bit_val in bit_values:
-                if not self.is_running:
-                    break
-                t_step_start = time.perf_counter()
-
-                t0 = time.perf_counter()
-                local_row, local_col, quad_cfg = self._get_pixel_coords(log_x, log_y)
-                profiling["img_gen"].append(time.perf_counter() - t0)
-
-                t0 = time.perf_counter()
-                if smile_dev:
-                    set_pixel(smile_dev, local_row, local_col, bit_val, cfg=quad_cfg)
-                profiling["img_send"].append(time.perf_counter() - t0)
-
-                if settle_s > 0:
-                    time.sleep(settle_s)
-
-                # Clear SMU buffer once; burst appends for each voltage.
-                smu.clear_buffers_only()
-                pm_vals_by_vol = []  # list[list[(value, t)]] indexed by [vol_idx][pt_idx]
-
-                for nv_vol in nvled_voltages:
-                    if not self.is_running:
-                        break
-
-                    if is_swept:
-                        smu.set_voltage("b", nv_vol)
-                        time.sleep(self.cfg["nvled_settle_ms"] / 1000.0)
-
-                    # Fire SMU burst (non-blocking write), then immediately start PM400
-                    # fetches. The Keithley executes the TSP loop autonomously while
-                    # Python is busy with FETC? calls. At 0.001 NPLC the burst takes
-                    # ~n×60 µs; each FETC? takes ~0.7 ms, so the SMU finishes well
-                    # before the PM400 loop ends. measure_burst_join() collects the
-                    # DONE response (returns immediately if already done).
-                    t0_k = time.perf_counter()
-                    smu.measure_burst_fire(n_pts)
-
-                    t0 = time.perf_counter()
-                    blk = [
-                        (pm.fetch_latest(), time.perf_counter()) for _ in range(n_pts)
-                    ]
-                    profiling["pm_arm_to_fetch"].append(time.perf_counter() - t0)
-
-                    smu.measure_burst_join()
-                    profiling["k_arm_to_fetch"].append(time.perf_counter() - t0_k)
-                    pm_vals_by_vol.append(blk)
-
-                # Single SMU buffer read for all n_vols × n_pts entries.
-                vled_all, nvled_all = smu.read_buffers()
-
-                for j, nv_vol in enumerate(nvled_voltages):
-                    pm_blk = pm_vals_by_vol[j] if j < len(pm_vals_by_vol) else []
-                    for k in range(n_pts):
-                        idx = j * n_pts + k
-                        pm_val, t_pm = (
-                            pm_blk[k]
-                            if k < len(pm_blk)
-                            else (float("nan"), time.perf_counter())
-                        )
-                        vled_i = vled_all[idx] if idx < len(vled_all) else float("nan")
-                        nvled_i = (
-                            nvled_all[idx] if idx < len(nvled_all) else float("nan")
-                        )
-                        t_anchor = round(t_pm - start_time, 6)
-                        data_buffer.extend(
-                            [
-                                [
-                                    log_x,
-                                    log_y,
-                                    bit_val,
-                                    nv_vol,
-                                    t_anchor,
-                                    "PM400",
-                                    f"{pm_val:.6e}",
-                                    "nan",
-                                ],
-                                [
-                                    log_x,
-                                    log_y,
-                                    bit_val,
-                                    nv_vol,
-                                    t_anchor,
-                                    "VLED",
-                                    f"{vled_i:.6e}",
-                                    "nan",
-                                ],
-                                [
-                                    log_x,
-                                    log_y,
-                                    bit_val,
-                                    nv_vol,
-                                    t_anchor,
-                                    "NVLED",
-                                    f"{nvled_i:.6e}",
-                                    "nan",
-                                ],
-                            ]
-                        )
-
-                self._maybe_turnoff_dis(smile_dev, profiling)
-                # fetch_latest() is safe here — FETC:POW? does not abort INIT:CONT.
-                self._maybe_dark_acq(
-                    pm,
-                    smu,
-                    log_x,
-                    log_y,
-                    bit_val,
-                    nv_vol,
-                    data_buffer,
-                    profiling,
-                    start_time,
-                    pm_fn=pm.fetch_latest,
-                )
-
-                step_count += 1
-                step_duration = time.perf_counter() - t_step_start
-                moving_avg_time = (
-                    step_duration
-                    if moving_avg_time == 0
-                    else 0.95 * moving_avg_time + 0.05 * step_duration
-                )
-                rem_seconds = int((total_steps - step_count) * moving_avg_time)
-                self._emit_eta(
-                    f"Pixel: {log_x},{log_y} | "
-                    f"Progress: {int((step_count / total_steps) * 100)}% | "
-                    f"ETA: {datetime.timedelta(seconds=rem_seconds)}"
-                )
-
-            if data_buffer:
-                write_queue.put(("csv", data_buffer))
-            self.pixel_update.emit(log_x, log_y, 2)
-
-        pm.stop_continuous()
-        return step_count
 
     # ------------------------------------------------------------------
     # Post-processing & cleanup
@@ -1834,7 +663,7 @@ class MeasurementWorker(QThread):
         if not files:
             return
 
-        if not self.cfg.get("turnoff_dis"):
+        if not self.cfg.turnoff_dis:
             msg = (
                 "On-time analysis: results may be unreliable — "
                 "'Turn Off Display After Each Pixel' is not enabled. "
@@ -1908,7 +737,7 @@ class MeasurementWorker(QThread):
             do_aggregate=True,
             do_heatmaps=True,
             do_ontimes=(sec_dir is not None),
-            do_plots=(self.cfg.get("plot_transients", False) and sec_dir is not None),
+            do_plots=(self.cfg.plot_transients and sec_dir is not None),
             log_fn=self.log_msg.emit,
         )
 
@@ -1949,8 +778,7 @@ class MeasurementWorker(QThread):
 
     def run(self):
         pm = smu = smile_dev = None
-        write_queue = None
-        writer_thread = None
+        data_writer = None
         hdf5_file = None
         step_count = 0
 
@@ -1962,100 +790,70 @@ class MeasurementWorker(QThread):
 
             bit_values = [
                 int(x.strip())
-                for x in self.cfg["bit_values"].split(",")
+                for x in self.cfg.bit_values.split(",")
                 if x.strip().isdigit() and int(x.strip()) < 16
             ]
             nvled_voltages = self._build_nvled_voltages()
             profiling = self._empty_profiling()
-            write_queue = queue.Queue()
-
-            def _writer_worker(wq, csv_writer, csv_fh):
-                while True:
-                    item = wq.get()
-                    if item is None:
-                        break
-                    try:
-                        if item[0] == "csv":
-                            csv_writer.writerows(item[1])
-                            csv_fh.flush()
-                        elif item[0] == "secondary":
-                            self._save_transient(**item[1])
-                    except Exception:
-                        pass
-                    wq.task_done()
 
             csv_path = raw_data_dir / f"{fname_base}.csv"
-            with open(csv_path, "w", newline="") as csv_file:
-                writer = csv.writer(csv_file)
-                writer.writerow(
-                    [
-                        "X",
-                        "Y",
-                        "BITVAL",
-                        "NVLED_V",
-                        "TIME",
-                        "TYPE",
-                        "MEAS_VALUE",
-                        "MEAS_STD",
-                    ]
-                )
-                csv_file.flush()
-                writer_thread = threading.Thread(
-                    target=_writer_worker,
-                    args=(write_queue, writer, csv_file),
-                    daemon=True,
-                )
-                writer_thread.start()
+            from data.writer import DataWriter
 
-                self.log_msg.emit("Turning outputs ON...")
-                smu.set_voltage("a", self.cfg["vled_voltage"])
-                smu.set_voltage("b", self.cfg["nvled_voltage"])
-                smu.enable_output("a", True)
-                smu.enable_output("b", True)
-                self.log_msg.emit(f"Pre-settling for {self.cfg['pre_settle_ms']} ms...")
-                time.sleep(self.cfg["pre_settle_ms"] / 1000.0)
-                self.log_msg.emit("Measuring ...")
-                start_time = time.perf_counter()
+            data_writer = DataWriter(
+                csv_path,
+                sec_dir=sec_dir,
+                hdf5_file=hdf5_file,
+                error_callback=self.log_msg.emit,
+            )
+            data_writer.start()
 
-                mode = self.cfg["measurement_mode"]
-                if mode == "Fast Scan":
-                    t0 = time.perf_counter()
-                    smu.setup_buffers(timestamps=False)  # sets appendmode=1 for burst
-                    profiling["k_setup"].append(time.perf_counter() - t0)
-                    step_count = self._loop_fast_scan(
-                        pm,
-                        smu,
-                        smile_dev,
-                        pixel_list,
-                        bit_values,
-                        nvled_voltages,
-                        write_queue,
-                        profiling,
-                        start_time,
-                    )
-                else:  # Full Transient
-                    instr = self._build_instr_params(pm)
-                    t0 = time.perf_counter()
-                    smu.setup_buffers(timestamps=True)
-                    smu.configure_hardware_trigger(instr["k_trigger_count"])
-                    profiling["k_setup"].append(time.perf_counter() - t0)
-                    step_count = self._loop_transient(
-                        pm,
-                        smu,
-                        smile_dev,
-                        pixel_list,
-                        bit_values,
-                        nvled_voltages,
-                        write_queue,
-                        hdf5_file,
-                        sec_dir,
-                        profiling,
-                        start_time,
-                        instr,
-                    )
+            self.log_msg.emit("Turning outputs ON...")
+            smu.set_voltage("a", self.cfg.vled_voltage)
+            smu.set_voltage("b", self.cfg.nvled_voltage)
+            smu.enable_output("a", True)
+            smu.enable_output("b", True)
+            self.log_msg.emit(f"Pre-settling for {self.cfg.pre_settle_ms} ms...")
+            time.sleep(self.cfg.pre_settle_ms / 1000.0)
+            self.log_msg.emit("Measuring ...")
+            start_time = time.perf_counter()
 
-                write_queue.put(None)
-                writer_thread.join()
+            from measurement.context import MeasurementContext
+            from measurement.coordinator import ScanCoordinator
+            from measurement.modes import FastScanMode, TransientMode
+            from measurement.ultra_fast import UltraFastMode
+
+            ctx = MeasurementContext(
+                cfg=self.cfg,
+                data_writer=data_writer,
+                profiling=profiling,
+                start_time=start_time,
+                sec_dir=sec_dir,
+                raw_data_dir=raw_data_dir,
+                is_running=lambda: self.is_running,
+                log=self.log_msg.emit,
+                pixel_active=self._emit_pixel_start,
+                pixel_done=lambda x, y: self.pixel_update.emit(x, y, 2),
+                set_eta=self._emit_eta,
+            )
+
+            mode_name = self.cfg.measurement_mode
+            if mode_name == "Ultra Fast":
+                mode = UltraFastMode()
+            elif mode_name == "Fast Scan":
+                mode = FastScanMode()
+            else:
+                mode = TransientMode()
+            coordinator = ScanCoordinator(mode, ctx)
+            step_count = coordinator.run(
+                pm,
+                smu,
+                smile_dev,
+                pixel_list,
+                bit_values,
+                nvled_voltages,
+            )
+
+            data_writer.close()
 
             self.log_msg.emit("Turning outputs OFF...")
             try:
@@ -2063,7 +861,7 @@ class MeasurementWorker(QThread):
                 smu.enable_output("b", False)
             except Exception:
                 pass
-            if step_count > 0 and self.cfg.get("post_process_enabled", True):
+            if step_count > 0 and self.cfg.post_process_enabled:
                 self._post_process(profiling, raw_data_dir, csv_path, run_dir, sec_dir)
 
             self.log_msg.emit("Measurement Finished.")
@@ -2071,9 +869,11 @@ class MeasurementWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
         finally:
-            if writer_thread is not None and writer_thread.is_alive():
-                write_queue.put(None)
-                writer_thread.join(timeout=30.0)
+            if data_writer is not None:
+                try:
+                    data_writer.close()
+                except Exception:
+                    pass
             self._cleanup(pm, smu, smile_dev, hdf5_file)
 
     def stop(self):
@@ -2092,7 +892,6 @@ class MicroLEDCharGUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("SMILE MicroLED Characterization")
         self.resize(1500, 1000)
-        self.rm = pyvisa.ResourceManager()
         self.worker = None
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -2348,7 +1147,7 @@ class MicroLEDCharGUI(QMainWindow):
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Mode:"))
         self.cb_meas_mode = NoWheelComboBox()
-        self.cb_meas_mode.addItems(["Full Transient", "Fast Scan"])
+        self.cb_meas_mode.addItems(["Full Transient", "Fast Scan", "Ultra Fast"])
         self.cb_meas_mode.setToolTip(
             "Full Transient: arms PM400 array capture (ABOR → INIT) per pixel.\n"
             "Captures the complete LED turn-on waveform at 10 kHz.\n"
@@ -2357,7 +1156,11 @@ class MicroLEDCharGUI(QMainWindow):
             "Fast Scan: uses PM400 INIT:CONT continuous mode + Keithley TSP burst.\n"
             "No per-pixel arm/fetch overhead — ~1–5 ms per pixel typical.\n"
             "Returns only mean ± std snapshots (no waveform). Best for\n"
-            "quick yield maps across the full array."
+            "quick yield maps across the full array.\n\n"
+            "Ultra Fast: batches many pixels into one continuous PM400 array\n"
+            "capture. Unsorts post-hoc by FPGA ACK timestamps with smart\n"
+            "window trimming. Fastest mode by far; does not support NVLED sweep\n"
+            "or secondary storage."
         )
         mode_row.addWidget(self.cb_meas_mode, 1)
         strat_layout.addLayout(mode_row)
@@ -2384,6 +1187,73 @@ class MicroLEDCharGUI(QMainWindow):
         )
         npts_row.addWidget(self.sb_fast_scan_n_pts, 1)
         strat_layout.addLayout(npts_row)
+
+        # ── Ultra-Fast controls ─────────────────────────────────────
+        ultra_dt_row = QHBoxLayout()
+        ultra_dt_row.addWidget(QLabel("PM Δt:"))
+        self.sb_ultra_delta_t = NoWheelSpinBox()
+        self.sb_ultra_delta_t.setRange(100, 1000)
+        self.sb_ultra_delta_t.setSingleStep(100)
+        self.sb_ultra_delta_t.setValue(200)
+        self.sb_ultra_delta_t.setSuffix(" μs")
+        self.sb_ultra_delta_t.setToolTip(
+            "PM400 sample interval (Ultra Fast only). Rounded to the\n"
+            "nearest 100 μs. Smaller Δt → higher temporal resolution\n"
+            "but shorter chunk duration (10 000-sample PM400 buffer cap).\n"
+            "  100 μs → 1 s chunk  (~141 px/chunk)\n"
+            "  200 μs → 2 s chunk  (~283 px/chunk)\n"
+            "  500 μs → 5 s chunk  (~708 px/chunk)\n"
+            "  1000 μs → 10 s chunk (~1416 px/chunk)"
+        )
+        ultra_dt_row.addWidget(self.sb_ultra_delta_t, 1)
+        strat_layout.addLayout(ultra_dt_row)
+
+        ultra_dark_row = QHBoxLayout()
+        ultra_dark_row.addWidget(QLabel("Dark every N:"))
+        self.sb_ultra_dark_every_n = NoWheelSpinBox()
+        self.sb_ultra_dark_every_n.setRange(0, 100)
+        self.sb_ultra_dark_every_n.setValue(10)
+        self.sb_ultra_dark_every_n.setToolTip(
+            "Insert a blank-frame dark reference every N pixels inside\n"
+            "each chunk (Ultra Fast only). Used for drift-corrected\n"
+            "dark subtraction via linear interpolation. 0 disables\n"
+            "intermediate darks (still a chunk head + tail blank)."
+        )
+        ultra_dark_row.addWidget(self.sb_ultra_dark_every_n, 1)
+        strat_layout.addLayout(ultra_dark_row)
+
+        ultra_trim_row = QHBoxLayout()
+        ultra_trim_row.addWidget(QLabel("Window Trim:"))
+        self.dsb_ultra_trim_pct = NoWheelDoubleSpinBox()
+        self.dsb_ultra_trim_pct.setRange(0.0, 40.0)
+        self.dsb_ultra_trim_pct.setValue(10.0)
+        self.dsb_ultra_trim_pct.setSuffix(" %")
+        self.dsb_ultra_trim_pct.setDecimals(1)
+        self.dsb_ultra_trim_pct.setToolTip(
+            "Drop the first/last N% of each inter-ACK interval before\n"
+            "computing per-pixel statistics (Ultra Fast only).\n"
+            "Avoids turn-on / turn-off transitions that would bias the\n"
+            "mean. Typical: 10 % (4 ms usable window on a 5 ms pixel)."
+        )
+        ultra_trim_row.addWidget(self.dsb_ultra_trim_pct, 1)
+        strat_layout.addLayout(ultra_trim_row)
+
+        self.chk_ultra_save_diag = QCheckBox("Save chunk diagnostics (.npz + .png)")
+        self.chk_ultra_save_diag.setChecked(False)
+        self.chk_ultra_save_diag.setToolTip(
+            "Save per-chunk raw buffers and diagnostic plots to the "
+            "raw_data/ultra_fast_diag/ folder. Runs in a background "
+            "thread so it does not slow down the measurement."
+        )
+        strat_layout.addWidget(self.chk_ultra_save_diag)
+
+        self.lbl_ultra_geom = QLabel("")
+        self.lbl_ultra_geom.setStyleSheet("color: #666; font-size: 10px;")
+        strat_layout.addWidget(self.lbl_ultra_geom)
+
+        self.sb_ultra_delta_t.valueChanged.connect(self._update_ultra_geom_label)
+        self.sb_ultra_dark_every_n.valueChanged.connect(self._update_ultra_geom_label)
+        self._update_ultra_geom_label()
 
         self.cb_meas_mode.currentIndexChanged.connect(self._on_mode_changed)
         self._on_mode_changed(0)  # initialise visibility
@@ -2794,10 +1664,22 @@ class MicroLEDCharGUI(QMainWindow):
                 self.lbl_csv_info.setText(f"Error: {e}")
 
     def _on_mode_changed(self, _index=0):
-        is_fast = self.cb_meas_mode.currentText() == "Fast Scan"
+        mode = self.cb_meas_mode.currentText()
+        is_fast = mode == "Fast Scan"
+        is_ultra = mode == "Ultra Fast"
+        is_transient = mode == "Full Transient"
         # Fast-scan-only controls
         for w in (self.sb_fast_scan_settle, self.sb_fast_scan_n_pts):
             w.setEnabled(is_fast)
+        # Ultra-fast-only controls
+        for w in (
+            self.sb_ultra_delta_t,
+            self.sb_ultra_dark_every_n,
+            self.dsb_ultra_trim_pct,
+            self.chk_ultra_save_diag,
+            self.lbl_ultra_geom,
+        ):
+            w.setEnabled(is_ultra)
         # Transient-only controls (buffer acquisition + secondary storage)
         for w in (
             self.sb_window_ms,
@@ -2809,11 +1691,39 @@ class MicroLEDCharGUI(QMainWindow):
             self.btn_sec_dir,
             self.chk_plot_transients,
         ):
-            w.setEnabled(not is_fast)
-        # If switching to Fast Scan, also re-apply secondary-toggle state so
-        # chk_plot_transients respects chk_secondary when returning to Transient mode.
-        if not is_fast:
+            w.setEnabled(is_transient)
+        # NPLC + high-C are auto-managed in Ultra Fast mode (NPLC is
+        # derived from delta_t, high-C is incompatible with zero-delay
+        # burst sampling). Guard with hasattr because _on_mode_changed
+        # can fire during init_ui before the Device Config widgets exist.
+        if hasattr(self, "dsb_vled_nplc"):
+            for w in (
+                self.dsb_vled_nplc,
+                self.dsb_nvled_nplc,
+                self.chk_vled_highc,
+                self.chk_nvled_highc,
+            ):
+                w.setEnabled(not is_ultra)
+        # Re-apply secondary-toggle state only while in transient mode, so
+        # chk_plot_transients respects chk_secondary when returning here.
+        if is_transient:
             self._on_secondary_toggled(self.chk_secondary.isChecked())
+
+    def _update_ultra_geom_label(self):
+        try:
+            from measurement.ultra_fast import compute_chunk_geometry
+
+            delta_t = int(self.sb_ultra_delta_t.value())
+            dark_n = int(self.sb_ultra_dark_every_n.value())
+            n_pm, dur_ms, ppc, nplc = compute_chunk_geometry(delta_t, dark_n)
+            self.lbl_ultra_geom.setText(
+                f"~{ppc} px/chunk, {dur_ms / 1000:.1f} s capture, "
+                f"NPLC={nplc:.3f} "
+                f"({n_pm} PM samples @ {delta_t} μs, "
+                f"{delta_t // 100}x avg)"
+            )
+        except Exception:
+            self.lbl_ultra_geom.setText("")
 
     def _on_secondary_toggled(self, checked):
         self.chk_plot_transients.setEnabled(checked)
@@ -2821,9 +1731,10 @@ class MicroLEDCharGUI(QMainWindow):
             self.chk_plot_transients.setChecked(False)
 
     def refresh_resources(self):
-        try:
-            resources = list(self.rm.list_resources())
-        except Exception:
+        from instruments.resources import list_visa_resources
+
+        resources = list_visa_resources()
+        if not resources:
             resources = ["Sim_PM400", "Sim_K2602B"]
         for cb in (self.cb_pm400, self.cb_2602b):
             cb.clear()
@@ -2883,6 +1794,10 @@ class MicroLEDCharGUI(QMainWindow):
             "measurement_mode": self.cb_meas_mode.currentText(),
             "fast_scan_settle": self.sb_fast_scan_settle.value(),
             "fast_scan_n_pts": self.sb_fast_scan_n_pts.value(),
+            "ultra_fast_delta_t_us": self.sb_ultra_delta_t.value(),
+            "ultra_fast_dark_every_n": self.sb_ultra_dark_every_n.value(),
+            "ultra_fast_trim_pct": self.dsb_ultra_trim_pct.value(),
+            "ultra_fast_save_diag": self.chk_ultra_save_diag.isChecked(),
             "turnoff_dis": self.chk_turnoff_dis.isChecked(),
             "dark_settle_ms": self.sb_dark_settle_ms.value(),
             "window_ms": self.sb_window_ms.value(),
@@ -2954,6 +1869,11 @@ class MicroLEDCharGUI(QMainWindow):
                     self.cb_meas_mode.setCurrentIndex(idx)
             get("fast_scan_settle", self.sb_fast_scan_settle.setValue)
             get("fast_scan_n_pts", self.sb_fast_scan_n_pts.setValue)
+            get("ultra_fast_delta_t_us", self.sb_ultra_delta_t.setValue)
+            get("ultra_fast_dark_every_n", self.sb_ultra_dark_every_n.setValue)
+            get("ultra_fast_trim_pct", self.dsb_ultra_trim_pct.setValue)
+            get("ultra_fast_save_diag", self.chk_ultra_save_diag.setChecked)
+            self._update_ultra_geom_label()
             get("turnoff_dis", self.chk_turnoff_dis.setChecked)
             get("dark_settle_ms", self.sb_dark_settle_ms.setValue)
             get("window_ms", self.sb_window_ms.setValue)
@@ -3015,26 +1935,33 @@ class MicroLEDCharGUI(QMainWindow):
             "measurement_mode": self.cb_meas_mode.currentText(),
             "fast_scan_settle_ms": self.sb_fast_scan_settle.value(),
             "fast_scan_n_pts": self.sb_fast_scan_n_pts.value(),
+            "ultra_fast_delta_t_us": self.sb_ultra_delta_t.value(),
+            "ultra_fast_dark_every_n": self.sb_ultra_dark_every_n.value(),
+            "ultra_fast_trim_pct": self.dsb_ultra_trim_pct.value(),
+            "ultra_fast_save_diag": self.chk_ultra_save_diag.isChecked(),
             "turnoff_dis": self.chk_turnoff_dis.isChecked(),
             "dark_settle_ms": self.sb_dark_settle_ms.value(),
             "window_ms": self.sb_window_ms.value(),
             "min_remaining_ms": self.sb_min_remaining_ms.value(),
             "steady_tail_pct": self.dsb_steady_tail.value(),
             "pre_settle_ms": self.sb_pre_settle.value(),
+            # Secondary storage + plot_transients + transient-only SMU
+            # display are only valid in Full Transient mode — Fast Scan
+            # and Ultra Fast have no per-pixel arrays to save.
             "secondary_storage_enabled": (
                 self.chk_secondary.isChecked()
-                and self.cb_meas_mode.currentText() != "Fast Scan"
+                and self.cb_meas_mode.currentText() == "Full Transient"
             ),
             "secondary_storage_format": self.cb_sec_format.currentText(),
             "secondary_storage_dir": self.txt_sec_dir.text(),
             "plot_transients": (
                 self.chk_plot_transients.isChecked()
-                and self.cb_meas_mode.currentText() != "Fast Scan"
+                and self.cb_meas_mode.currentText() == "Full Transient"
             ),
             "post_process_enabled": self.chk_post_process.isChecked(),
             "smu_display_off": (
                 self.chk_smu_display_off.isChecked()
-                and self.cb_meas_mode.currentText() != "Fast Scan"
+                and self.cb_meas_mode.currentText() == "Full Transient"
             ),
             "dark_tail_ms": self.sb_dark_tail_ms.value(),
         }
