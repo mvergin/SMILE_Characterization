@@ -3,7 +3,7 @@ smile_postprocess.py — Standalone post-processing module for SMILE measurement
 Can be imported by the GUI or run as a CLI tool.
 """
 
-VERSION = "20260322_v1"
+VERSION = "20260415_v1"
 
 import csv
 import glob
@@ -241,6 +241,43 @@ def post_process_data(raw_csv_path, out_dir, log_fn=print):
                     index=False,
                 )
 
+        # -- Scatter plots: optical power vs NVLED / VLED current ----------
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            if not df_agg.empty:
+                plots_dir = filtered_out_dir  # stats/
+                bitvals = sorted(df_agg["BITVAL"].unique())
+                cmap = plt.cm.get_cmap("tab10", max(len(bitvals), 1))
+
+                for x_col, x_label, fname_suffix in [
+                    ("NVLED_CURR_MEAN", "Average NVLED current (A)", "nvled"),
+                    ("VLED_CURR_MEAN", "Average VLED current (A)", "vled"),
+                ]:
+                    fig, ax = plt.subplots(figsize=(8, 6))
+                    for ci, bv in enumerate(bitvals):
+                        sub = df_agg[df_agg["BITVAL"] == bv]
+                        ax.scatter(
+                            sub[x_col], sub["PM400_POWER_MEAN"],
+                            s=8, alpha=0.6, color=cmap(ci),
+                            label=f"BITVAL {int(bv)}",
+                        )
+                    ax.set_xlabel(x_label)
+                    ax.set_ylabel("Average optical power (W)")
+                    ax.set_title(f"Optical power vs {x_label.split('(')[0].strip()}")
+                    ax.legend(fontsize=7, markerscale=2)
+                    ax.grid(True, alpha=0.3)
+                    fig.tight_layout()
+                    fig.savefig(str(plots_dir / f"scatter_power_vs_{fname_suffix}.png"), dpi=200)
+                    plt.close(fig)
+                log_fn("Scatter plots saved (power vs NVLED, power vs VLED).")
+        except ImportError:
+            log_fn("Scatter plots skipped — matplotlib not installed.")
+        except Exception as e:
+            log_fn(f"Scatter plot error: {e}")
+
         yield_stats = []
         for (bitval, nvled_v, mtype), group in df.groupby(
             ["BITVAL", "NVLED_V", "TYPE"]
@@ -291,29 +328,43 @@ def post_process_data(raw_csv_path, out_dir, log_fn=print):
             save_cond(vals > (mean_val + 3 * std_val), "outside_3std_high")
 
             if mtype == "PM400" and total_pixels > 0:
-                dead_pixels = (
-                    (vals < (0.10 * median_val)).sum() if median_val > 0 else 0
-                )
-                cv = (std_val / mean_val) if mean_val != 0 else np.nan
+                dead_mask = (vals < (0.10 * median_val)) if median_val > 0 else pd.Series(False, index=vals.index)
+                dead_pixels = int(dead_mask.sum())
+                alive_vals = vals[~dead_mask]
+                n_alive = len(alive_vals)
+
+                if n_alive > 0:
+                    alive_mean = alive_vals.mean()
+                    alive_std = alive_vals.std() if n_alive > 1 else 0.0
+                    cv = (alive_std / alive_mean) if alive_mean != 0 else np.nan
+                    n_1std_alive = int(((alive_vals >= alive_mean - alive_std) & (alive_vals <= alive_mean + alive_std)).sum())
+                    n_2std_alive = int(((alive_vals >= alive_mean - 2 * alive_std) & (alive_vals <= alive_mean + 2 * alive_std)).sum())
+                    n_3std_alive = int(((alive_vals >= alive_mean - 3 * alive_std) & (alive_vals <= alive_mean + 3 * alive_std)).sum())
+                else:
+                    alive_mean = np.nan
+                    alive_std = np.nan
+                    cv = np.nan
+                    n_1std_alive = 0
+                    n_2std_alive = 0
+                    n_3std_alive = 0
+
                 yield_stats.append(
                     {
                         "BITVAL": int(bitval),
                         "NVLED_V": round(nvled_v, 3),
                         "TOTAL_PIXELS": total_pixels,
-                        "MEAN_POWER": float(f"{mean_val:.4e}"),
-                        "STD_POWER": float(f"{std_val:.4e}"),
-                        "COEF_OF_VARIATION_CV": round(cv, 4),
-                        "DEAD_PIXELS_COUNT": int(dead_pixels),
-                        "YIELD_INLIERS_IQR_%": round(
-                            (n_inliers / total_pixels) * 100, 2
-                        ),
-                        "YIELD_1STD_%": round((n_1std / total_pixels) * 100, 2),
-                        "YIELD_2STD_%": round((n_2std / total_pixels) * 100, 2),
-                        "YIELD_3STD_%": round((n_3std / total_pixels) * 100, 2),
-                        "COUNT_INLIERS_IQR": n_inliers,
-                        "COUNT_1STD": n_1std,
-                        "COUNT_2STD": n_2std,
-                        "COUNT_3STD": n_3std,
+                        "ALIVE_PIXELS": n_alive,
+                        "DEAD_PIXELS_COUNT": dead_pixels,
+                        "YIELD_ALIVE_%": round((n_alive / total_pixels) * 100, 2),
+                        "MEAN_POWER": float(f"{alive_mean:.4e}") if np.isfinite(alive_mean) else np.nan,
+                        "STD_POWER": float(f"{alive_std:.4e}") if np.isfinite(alive_std) else np.nan,
+                        "COEF_OF_VARIATION_CV": round(cv, 4) if np.isfinite(cv) else np.nan,
+                        "YIELD_1STD_%": round((n_1std_alive / n_alive) * 100, 2) if n_alive > 0 else np.nan,
+                        "YIELD_2STD_%": round((n_2std_alive / n_alive) * 100, 2) if n_alive > 0 else np.nan,
+                        "YIELD_3STD_%": round((n_3std_alive / n_alive) * 100, 2) if n_alive > 0 else np.nan,
+                        "COUNT_1STD": n_1std_alive,
+                        "COUNT_2STD": n_2std_alive,
+                        "COUNT_3STD": n_3std_alive,
                     }
                 )
         if yield_stats:
