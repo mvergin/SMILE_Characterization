@@ -395,6 +395,13 @@ class Keithley2602B:
             "end",
             "endscript",
         ])
+        # Hard-clear any stale output sitting in the VISA queue from
+        # prior phases — a leftover `DONE` from Fast Scan would make our
+        # join() return instantly and swallow the real EXP_DONE.
+        try:
+            self.inst.clear()
+        except Exception:
+            pass
         self.inst.write(script)
 
     def join_experimental_sweep(self, timeout_s):
