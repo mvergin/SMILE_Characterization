@@ -141,11 +141,27 @@ class ExperimentalSweepMode(MeasurementMode):
         delta_t_us = 100  # always max PM400 rate (100 µs = 10 kHz)
         window_ms = 1000.0
         n_pm_samples, _ = pm.configure_array_mode(window_ms, delta_t_us)
+
+        # Experimental mode hard-codes low NPLC + zero delays so the K
+        # rapid-fire burst fits inside the 40 % measure window per voltage.
+        # Re-do channel setup explicitly (previous phases leave different
+        # NPLC / range / autozero state that would stall the TSP script).
+        k_nplc = 0.001
+        smu.configure_channel(
+            "a", compliance_current=cfg.vled_compliance,
+            nplc=k_nplc, high_c=False, zero_delays=True,
+            range_i=cfg.vled_range_i,
+        )
+        smu.configure_channel(
+            "b", compliance_current=cfg.nvled_compliance,
+            nplc=k_nplc, high_c=False, zero_delays=True,
+            range_i=cfg.nvled_range_i,
+        )
         return {
             "delta_t_us": delta_t_us,
             "window_ms": window_ms,
             "n_pm_samples": n_pm_samples,
-            "k_nplc": max(cfg.vled_nplc, cfg.nvled_nplc),
+            "k_nplc": k_nplc,
         }
 
     def cleanup_instruments(self, pm, smu, ctx: MeasurementContext) -> None:
