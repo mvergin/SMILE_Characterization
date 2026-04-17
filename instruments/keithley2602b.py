@@ -275,6 +275,141 @@ class Keithley2602B:
             return [], [], [], []
 
     # ------------------------------------------------------------------
+    # Experimental hardware-swept NVLED (listv on ch B, co-triggered ch A)
+    # ------------------------------------------------------------------
+
+    def configure_experimental_sweep(
+        self,
+        v_list,
+        vled_voltage,
+        settle_time_s,
+        points_per_voltage,
+    ):
+        """Prepare buffers + stash the sweep parameters for the scripted
+        hardware-paced NVLED sweep.
+
+        The actual sweep is a TSP script (see ``initiate_experimental_sweep``)
+        that walks ``v_list`` on ch B and, per voltage, rapid-fires
+        ``points_per_voltage`` chA+chB measurements into the instrument
+        buffers. Timestamps on both buffers give per-sample absolute time
+        (from the instrument's internal clock, which we align to the
+        PM400's perf_counter on the host side).
+
+        We use a script rather than the nested trigger model because the
+        chA measure stimulus can't easily fire K times per listv step on
+        the 2602B without a trigger-blender chain — the TSP ``for`` loop is
+        simpler and also produces back-to-back (∼tens of µs apart) chA/chB
+        pairs, which is well below the PM400 100 µs sample period.
+
+        Reuses the existing ``configure_channel`` setup for compliance,
+        NPLC, and range (caller is expected to have done that already).
+        """
+        n = len(v_list)
+        if n < 1:
+            raise ValueError("v_list must contain at least one voltage")
+        K = int(points_per_voltage)
+        if K < 1:
+            raise ValueError("points_per_voltage must be >= 1")
+        v_str = "{" + ",".join(f"{float(v):.6f}" for v in v_list) + "}"
+
+        # Clear buffers, enable timestamps + appendmode. Stash the script
+        # parameters as Lua globals so initiate() is a fixed-size message.
+        tsp = (
+            "smua.nvbuffer1.clear() "
+            "smub.nvbuffer1.clear() "
+            "smub.nvbuffer2.clear() "
+            "smua.nvbuffer1.appendmode = 1 "
+            "smub.nvbuffer1.appendmode = 1 "
+            "smub.nvbuffer2.appendmode = 1 "
+            "smua.nvbuffer1.collecttimestamps = 1 "
+            "smub.nvbuffer1.collecttimestamps = 1 "
+            f"smua.source.levelv = {float(vled_voltage)} "
+            f"_exp_v = {v_str} "
+            f"_exp_settle = {float(settle_time_s)} "
+            f"_exp_k = {K}"
+        )
+        self.inst.write(tsp)
+        # Flush TSP queue before caller fires the sweep.
+        self.inst.query("print('EXP_PREP_DONE')")
+        return n, K
+
+    def initiate_experimental_sweep(self):
+        """Fire-and-forget: start the scripted sweep on the instrument.
+        Non-blocking — the TSP loop runs autonomously and prints
+        ``EXP_DONE`` when finished. Caller must ``join_experimental_sweep``
+        (or ``read_experimental_sweep_buffers``) to resync.
+        """
+        script = (
+            "for i=1, #_exp_v do "
+            "smub.source.levelv = _exp_v[i] "
+            "if _exp_settle > 0 then delay(_exp_settle) end "
+            "for j=1, _exp_k do "
+            "smub.measure.iv(smub.nvbuffer1, smub.nvbuffer2) "
+            "smua.measure.i(smua.nvbuffer1) "
+            "end "
+            "end "
+            "print('EXP_DONE')"
+        )
+        self.inst.write(script)
+
+    def join_experimental_sweep(self, timeout_s):
+        """Block until the script prints ``EXP_DONE``. Raises on mismatch."""
+        prev = self.inst.timeout
+        self.inst.timeout = int(timeout_s * 1000) + 5000
+        try:
+            resp = self.inst.read().strip()
+        finally:
+            self.inst.timeout = prev
+        if resp != "EXP_DONE":
+            self.inst.clear()
+            raise RuntimeError(
+                f"Experimental sweep sync error: expected 'EXP_DONE', got '{resp[:40]}'"
+            )
+
+    def read_experimental_sweep_buffers(self):
+        """Read (ia, ib, vb, ta, tb) from the experimental-sweep buffers.
+
+        ``ta`` / ``tb`` are the chA / chB buffer timestamps in the
+        instrument's internal clock (referenced to the first sample =
+        0.0s). All lists have the same length on success; empty on
+        failure.
+        """
+        try:
+            n_a = int(float(self.inst.query("print(smua.nvbuffer1.n)")))
+            n_b = int(float(self.inst.query("print(smub.nvbuffer1.n)")))
+            n_v = int(float(self.inst.query("print(smub.nvbuffer2.n)")))
+            n = min(n_a, n_b, n_v)
+            if n == 0:
+                return [], [], [], [], []
+            ia_str = self.inst.query(f"printbuffer(1, {n}, smua.nvbuffer1)")
+            ib_str = self.inst.query(f"printbuffer(1, {n}, smub.nvbuffer1)")
+            vb_str = self.inst.query(f"printbuffer(1, {n}, smub.nvbuffer2)")
+            ta_str = self.inst.query(
+                f"printbuffer(1, {n}, smua.nvbuffer1.timestamps)"
+            )
+            tb_str = self.inst.query(
+                f"printbuffer(1, {n}, smub.nvbuffer1.timestamps)"
+            )
+            return (
+                [float(x) for x in ia_str.split(",")],
+                [float(x) for x in ib_str.split(",")],
+                [float(x) for x in vb_str.split(",")],
+                [float(x) for x in ta_str.split(",")],
+                [float(x) for x in tb_str.split(",")],
+            )
+        except Exception as e:
+            print(f"read_experimental_sweep_buffers error: {e}")
+            return [], [], [], [], []
+
+    def cleanup_experimental_sweep(self):
+        """Drop the stashed globals. No trigger-model state to reset —
+        the script path doesn't touch trigger.source/measure.action."""
+        try:
+            self.inst.write("_exp_v = nil _exp_settle = nil _exp_k = nil")
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
     # Error queue
     # ------------------------------------------------------------------
 
