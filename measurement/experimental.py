@@ -355,6 +355,15 @@ class ExperimentalSweepMode(MeasurementMode):
                 T0=T_pm_start, mode="EXP",
                 t_ack_s=(T_k_ref - T_pm_start), t_turnoff_s=None,
             )
+            seg_starts_rel = [t - T_pm_start for t in k_seg_starts]
+            seg_ends_rel = [t - T_pm_start for t in k_seg_ends]
+            ctx.data_writer.plot_experimental(
+                x=log_x, y=log_y, bv=bit_val,
+                pm_times=pm_times_rel, pm_arr=list(pm_arr),
+                k_times=k_times_rel, nvled_arr=list(ib),
+                v_list=list(v_list),
+                seg_starts=seg_starts_rel, seg_ends=seg_ends_rel,
+            )
 
         self._maybe_turnoff_dis(smile_dev, ctx)
 
