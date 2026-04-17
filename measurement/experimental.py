@@ -51,6 +51,14 @@ DEFAULT_SETTLE_FRAC = 0.6
 # discarded from the mean/std).
 ZERO_SETTLE_TRIM_PCT = 10.0
 
+# Empirical per-sample floor for `smub.measure.iv(buf1, buf2)` +
+# `smua.measure.i(buf)` as a TSP-scripted pair at NPLC=0.001 on the
+# 2602B. The integration time (NPLC/50 = 20 µs) understates the real
+# cost because each measurement also pays ~50 µs of TSP/ADC overhead.
+# K is sized against this floor so the scripted burst actually fits in
+# `measure_s` and the whole sweep stays inside the 1 s PM400 window.
+K_SAMPLE_FLOOR_S = 70e-6
+
 
 def compute_sweep_timing(
     n_voltages,
@@ -73,7 +81,9 @@ def compute_sweep_timing(
     """
     n = max(1, int(n_voltages))
     per_v_s = budget_s / n
-    nplc_s = max(nplc / line_freq_hz, 1e-6)
+    # Per-sample time is dominated by TSP/ADC overhead, not the NPLC
+    # integration — floor the estimate so K doesn't overshoot.
+    nplc_s = max(nplc / line_freq_hz, K_SAMPLE_FLOOR_S)
 
     if float(user_settle_ms) == 0.0:
         settle_s = 0.0
