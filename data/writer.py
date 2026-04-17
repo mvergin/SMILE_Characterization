@@ -22,6 +22,16 @@ from typing import Callable, Optional
 import numpy as np
 
 try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    MPL_AVAILABLE = True
+except Exception:
+    MPL_AVAILABLE = False
+
+try:
     import h5py
 
     HDF5_AVAILABLE = True
@@ -131,6 +141,64 @@ def _save_transient_csv(
         w.writerows(rows)
 
 
+def _plot_experimental_pixel(
+    sec_dir,
+    x,
+    y,
+    bv,
+    pm_times,
+    pm_arr,
+    k_times,
+    nvled_arr,
+    v_list,
+    seg_starts,
+    seg_ends,
+):
+    """Render PM400 power + NVLED current with per-voltage chunk shading.
+
+    One PNG per (x, y, bitval). Coloured spans mark the K-sample window
+    that contributed to each voltage's mean/std row.
+    """
+    if not MPL_AVAILABLE or not pm_arr or not k_times:
+        return
+    fig, (ax_pm, ax_nv) = plt.subplots(
+        2, 1, figsize=(11, 6), sharex=True
+    )
+    ax_pm.plot(pm_times, np.asarray(pm_arr) * 1e6, lw=0.8, color="tab:blue")
+    ax_pm.set_ylabel("PM400 power (µW)")
+    ax_pm.set_title(
+        f"Experimental sweep — pixel ({x},{y}) bv={bv}, {len(v_list)} voltages"
+    )
+    ax_nv.plot(
+        k_times, np.asarray(nvled_arr) * 1e3, lw=0.8, color="tab:red"
+    )
+    ax_nv.set_ylabel("NVLED current (mA)")
+    ax_nv.set_xlabel("Time (s, rel. PM arm)")
+
+    cmap = plt.get_cmap("viridis")
+    n = max(1, len(v_list))
+    for j, (t0, t1, v) in enumerate(zip(seg_starts, seg_ends, v_list)):
+        c = cmap(j / n)
+        for ax in (ax_pm, ax_nv):
+            ax.axvspan(t0, t1, color=c, alpha=0.18, lw=0)
+        ax_nv.text(
+            (t0 + t1) / 2.0,
+            ax_nv.get_ylim()[1],
+            f"{v:+.2f}V",
+            ha="center",
+            va="top",
+            fontsize=7,
+            rotation=90,
+            color=c,
+        )
+    ax_pm.grid(alpha=0.3)
+    ax_nv.grid(alpha=0.3)
+    fig.tight_layout()
+    out = sec_dir / f"x{x:03d}_y{y:03d}_b{bv:02d}_exp.png"
+    fig.savefig(out, dpi=110)
+    plt.close(fig)
+
+
 class DataWriter:
     """Owns the overview CSV + background writer thread.
 
@@ -223,6 +291,16 @@ class DataWriter:
         kwargs.pop("sec_dir", None)
         self._queue.put(("secondary", kwargs))
 
+    def plot_experimental(self, **kwargs) -> None:
+        """Enqueue a per-pixel experimental-sweep plot.
+
+        Payload keys: x, y, bv, pm_times, pm_arr, k_times, nvled_arr,
+        v_list, seg_starts, seg_ends. Silently dropped if no sec_dir.
+        """
+        if self._sec_dir is None or not MPL_AVAILABLE:
+            return
+        self._queue.put(("plot_experimental", kwargs))
+
     # ------------------------------------------------------------------
     # Worker
     # ------------------------------------------------------------------
@@ -242,6 +320,9 @@ class DataWriter:
                         _save_transient_hdf5(self._hdf5_file, **payload)
                     elif self._sec_dir is not None:
                         _save_transient_csv(self._sec_dir, **payload)
+                elif kind == "plot_experimental":
+                    if self._sec_dir is not None:
+                        _plot_experimental_pixel(self._sec_dir, **payload)
             except Exception as e:
                 try:
                     self._error_cb(f"Secondary save error: {e}")

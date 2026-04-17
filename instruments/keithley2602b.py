@@ -329,10 +329,12 @@ class Keithley2602B:
 
         # Clear buffers, enable timestamps + appendmode. Stash the script
         # parameters as Lua globals so initiate() is a fixed-size message.
-        # Statements MUST be separated by newlines — the 2602B's TSP
-        # parser emits -285 "Syntax error" when a table constructor is
-        # on the same line as subsequent assignments with only spaces.
+        # Wrapped in loadandrunscript/endscript so the 2602B accumulates
+        # the whole payload before parsing — needed because large voltage
+        # lists ( > ~30 entries) overrun the interactive TSP per-line
+        # buffer and silently truncate the `_exp_v = {...}` line.
         tsp = "\n".join([
+            "loadandrunscript",
             "smua.nvbuffer1.clear()",
             "smub.nvbuffer1.clear()",
             "smub.nvbuffer2.clear()",
@@ -345,6 +347,7 @@ class Keithley2602B:
             f"_exp_v = {v_str}",
             f"_exp_settle = {float(settle_time_s)}",
             f"_exp_k = {K}",
+            "endscript",
         ])
         self.inst.write(tsp)
         # Flush TSP queue before caller fires the sweep, and verify the
