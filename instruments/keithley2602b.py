@@ -310,61 +310,123 @@ class Keithley2602B:
         K = int(points_per_voltage)
         if K < 1:
             raise ValueError("points_per_voltage must be >= 1")
-        v_str = "{" + ",".join(f"{float(v):.6f}" for v in v_list) + "}"
+        v_str = "{" + ", ".join(f"{float(v):.6f}" for v in v_list) + "}"
+
+        # Hard-reset VISA I/O state before we push a long TSP payload.
+        # Fast Scan's burst uses the same `print('DONE')` / read() pattern
+        # and any partial leftover in the output queue would misalign our
+        # next query → -420 "Query UNTERMINATED" on the first read.
+        try:
+            self.inst.clear()
+        except Exception:
+            pass
+        # Drain any lingering error-queue entries so later error checks
+        # only report fresh problems.
+        try:
+            self.inst.write("errorqueue.clear()")
+        except Exception:
+            pass
 
         # Clear buffers, enable timestamps + appendmode. Stash the script
         # parameters as Lua globals so initiate() is a fixed-size message.
-        tsp = (
-            "smua.nvbuffer1.clear() "
-            "smub.nvbuffer1.clear() "
-            "smub.nvbuffer2.clear() "
-            "smua.nvbuffer1.appendmode = 1 "
-            "smub.nvbuffer1.appendmode = 1 "
-            "smub.nvbuffer2.appendmode = 1 "
-            "smua.nvbuffer1.collecttimestamps = 1 "
-            "smub.nvbuffer1.collecttimestamps = 1 "
-            f"smua.source.levelv = {float(vled_voltage)} "
-            f"_exp_v = {v_str} "
-            f"_exp_settle = {float(settle_time_s)} "
-            f"_exp_k = {K}"
-        )
+        # Statements MUST be separated by newlines — the 2602B's TSP
+        # parser emits -285 "Syntax error" when a table constructor is
+        # on the same line as subsequent assignments with only spaces.
+        tsp = "\n".join([
+            "smua.nvbuffer1.clear()",
+            "smub.nvbuffer1.clear()",
+            "smub.nvbuffer2.clear()",
+            "smua.nvbuffer1.appendmode = 1",
+            "smub.nvbuffer1.appendmode = 1",
+            "smub.nvbuffer2.appendmode = 1",
+            "smua.nvbuffer1.collecttimestamps = 1",
+            "smub.nvbuffer1.collecttimestamps = 1",
+            f"smua.source.levelv = {float(vled_voltage)}",
+            f"_exp_v = {v_str}",
+            f"_exp_settle = {float(settle_time_s)}",
+            f"_exp_k = {K}",
+        ])
         self.inst.write(tsp)
-        # Flush TSP queue before caller fires the sweep.
-        self.inst.query("print('EXP_PREP_DONE')")
+        # Flush TSP queue before caller fires the sweep, and verify the
+        # globals survived (nil here == the setup write silently failed).
+        resp = self.inst.query(
+            "print('PREP', type(_exp_v), _exp_settle, _exp_k)"
+        ).strip()
+        if "table" not in resp:
+            errs = self.check_error_queue()
+            raise RuntimeError(
+                f"Experimental sweep setup failed — expected 'PREP table ...', "
+                f"got '{resp}'. Keithley errors: {errs}"
+            )
         return n, K
 
     def initiate_experimental_sweep(self):
         """Fire-and-forget: start the scripted sweep on the instrument.
-        Non-blocking — the TSP loop runs autonomously and prints
-        ``EXP_DONE`` when finished. Caller must ``join_experimental_sweep``
-        (or ``read_experimental_sweep_buffers``) to resync.
+
+        Wrapped in ``pcall`` so that any runtime failure (nil global,
+        buffer overflow, invalid source value, ...) is captured and
+        returned as ``EXP_ERR:<message>`` — otherwise a TSP runtime error
+        just leaves the output queue empty and the host sees the generic
+        -420 "Query UNTERMINATED" when it tries to join.
         """
-        script = (
-            "for i=1, #_exp_v do "
-            "smub.source.levelv = _exp_v[i] "
-            "if _exp_settle > 0 then delay(_exp_settle) end "
-            "for j=1, _exp_k do "
-            "smub.measure.iv(smub.nvbuffer1, smub.nvbuffer2) "
-            "smua.measure.i(smua.nvbuffer1) "
-            "end "
-            "end "
-            "print('EXP_DONE')"
-        )
+        # MUST be wrapped in loadandrunscript/endscript — the 2602B
+        # evaluates each incoming line as a standalone Lua chunk in its
+        # default interactive mode, so multi-line control flow
+        # (do/end, if/end, function/end) gets shredded and bare lines
+        # like `smub.measure.iv(...)` run out of context. The
+        # loadandrunscript ... endscript markers switch the parser into
+        # "accumulate this whole block as one chunk, then run" mode.
+        script = "\n".join([
+            "loadandrunscript",
+            "local ok, err = pcall(function()",
+            "  for i = 1, table.getn(_exp_v) do",
+            "    smub.source.levelv = _exp_v[i]",
+            "    if _exp_settle > 0 then delay(_exp_settle) end",
+            "    for j = 1, _exp_k do",
+            "      smub.measure.iv(smub.nvbuffer1, smub.nvbuffer2)",
+            "      smua.measure.i(smua.nvbuffer1)",
+            "    end",
+            "  end",
+            "end)",
+            "if ok then",
+            "  print('EXP_DONE')",
+            "else",
+            "  print('EXP_ERR:' .. tostring(err))",
+            "end",
+            "endscript",
+        ])
         self.inst.write(script)
 
     def join_experimental_sweep(self, timeout_s):
-        """Block until the script prints ``EXP_DONE``. Raises on mismatch."""
+        """Block until the script prints ``EXP_DONE``.
+
+        Raises ``RuntimeError`` with the Keithley error queue content if
+        the script returned ``EXP_ERR:...`` or the read timed out.
+        """
         prev = self.inst.timeout
         self.inst.timeout = int(timeout_s * 1000) + 5000
         try:
-            resp = self.inst.read().strip()
+            try:
+                resp = self.inst.read().strip()
+            except Exception as read_err:
+                errs = self.check_error_queue()
+                raise RuntimeError(
+                    f"Experimental sweep read timed out ({read_err}). "
+                    f"Keithley error queue: {errs}"
+                )
         finally:
             self.inst.timeout = prev
-        if resp != "EXP_DONE":
+        if resp == "EXP_DONE":
+            return
+        errs = self.check_error_queue()
+        try:
             self.inst.clear()
-            raise RuntimeError(
-                f"Experimental sweep sync error: expected 'EXP_DONE', got '{resp[:40]}'"
-            )
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Experimental sweep failed: response='{resp[:200]}', "
+            f"Keithley errors={errs}"
+        )
 
     def read_experimental_sweep_buffers(self):
         """Read (ia, ib, vb, ta, tb) from the experimental-sweep buffers.

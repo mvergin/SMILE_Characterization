@@ -107,7 +107,7 @@ SWEEP_MODE_NVLED = "Full Transient"
 # array capture. The whole sweep must fit in the 10 000-sample PM400
 # buffer (``n_voltages × (settle + nplc/50) < ~0.8 s``). Post-hoc
 # splicing uses the K hardware timestamps as per-voltage boundaries.
-EXPERIMENTAL_NVLED_SWEEP = False
+EXPERIMENTAL_NVLED_SWEEP = True
 
 # Save full PM400 + SMU waveforms for every Full-Transient capture.
 # Off → only steady-state mean/std rows go into the CSV.

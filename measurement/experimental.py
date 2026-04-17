@@ -213,10 +213,12 @@ class ExperimentalSweepMode(MeasurementMode):
         if remaining > 0:
             time.sleep(remaining)
 
+        sweep_ok = True
         try:
             smu.join_experimental_sweep(timeout_s=total_s + 0.5)
         except Exception as e:
-            ctx.log(f"WARNING: experimental sweep join failed: {e}")
+            sweep_ok = False
+            ctx.log(f"ERROR: experimental sweep join failed: {e}")
 
         total_elapsed = time.perf_counter() - T_pm_start
         profiling["remaining"].append(max(0.0, 1.0 - total_elapsed))
@@ -240,7 +242,7 @@ class ExperimentalSweepMode(MeasurementMode):
         except Exception:
             pass
 
-        if not tb_inst or not pm_arr or not ia:
+        if not sweep_ok or not tb_inst or not pm_arr or not ia:
             ctx.log(
                 f"WARNING: experimental sweep returned empty buffers at "
                 f"pixel ({log_x},{log_y}) — n_pm={len(pm_arr)}, "
