@@ -166,6 +166,51 @@ class Keithley2602BSim:
     def measure_instant(self):
         return random.gauss(100e-6, 1e-6), random.gauss(10e-3, 0.1e-3)
 
+    # ------------------------------------------------------------------
+    # Experimental hardware-swept NVLED (sim mirror)
+    # ------------------------------------------------------------------
+    def configure_experimental_sweep(
+        self, v_list, vled_voltage, settle_time_s, points_per_voltage,
+    ):
+        self._exp_v_list = list(v_list)
+        self._exp_settle = float(settle_time_s)
+        self._exp_k = int(points_per_voltage)
+        return len(self._exp_v_list), self._exp_k
+
+    def initiate_experimental_sweep(self):
+        self._exp_t0 = time.perf_counter()
+
+    def join_experimental_sweep(self, timeout_s):
+        pass
+
+    def read_experimental_sweep_buffers(self):
+        v = getattr(self, "_exp_v_list", [])
+        settle = getattr(self, "_exp_settle", 0.0)
+        K = getattr(self, "_exp_k", 1)
+        n_v = len(v)
+        if n_v == 0 or K == 0:
+            return [], [], [], [], []
+        # Per-sample pace. We don't know NPLC here, so pick a pace that
+        # keeps all N·K samples inside the 0.8 s budget for realistic sim
+        # test coverage: one sample every (measure_s / K) seconds.
+        K_total_s = max(1e-4, 0.8 - n_v * settle)
+        per_sample = K_total_s / max(1, n_v * K)
+        ia, ib, vb, ta, tb = [], [], [], [], []
+        t = 0.0
+        for vv in v:
+            t += settle  # source delay
+            for _ in range(K):
+                ia.append(random.gauss(100e-6, 1e-6))
+                ib.append(random.gauss(10e-3, 0.1e-3))
+                vb.append(float(vv) + random.gauss(0, 1e-4))
+                ta.append(t)
+                tb.append(t)
+                t += per_sample
+        return ia, ib, vb, ta, tb
+
+    def cleanup_experimental_sweep(self):
+        pass
+
     def read_buffer_with_timestamps(self):
         n = max(1, self._n_pts)
         ia = [random.gauss(100e-6, 1e-6) for _ in range(n)]

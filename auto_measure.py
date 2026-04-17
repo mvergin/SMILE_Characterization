@@ -100,6 +100,15 @@ NVLED_SWEEP_POWER = 2.5  # spacing exponent (see above)
 #                      turn-on transient per voltage step
 SWEEP_MODE_NVLED = "Full Transient"
 
+# Experimental hardware-paced NVLED sweep. Overrides SWEEP_MODE_NVLED
+# when True: phases 2/3 use ``ExperimentalSweepMode`` — the Keithley
+# walks through the voltage list via ``smub.trigger.source.listv`` with
+# ``smub.source.delay`` per-step, co-timed to a single 1-second PM400
+# array capture. The whole sweep must fit in the 10 000-sample PM400
+# buffer (``n_voltages × (settle + nplc/50) < ~0.8 s``). Post-hoc
+# splicing uses the K hardware timestamps as per-voltage boundaries.
+EXPERIMENTAL_NVLED_SWEEP = False
+
 # Save full PM400 + SMU waveforms for every Full-Transient capture.
 # Off → only steady-state mean/std rows go into the CSV.
 # On  → also writes per-(pixel, bitval, voltage) waveform files to
@@ -171,6 +180,15 @@ DARK_EVERY_N_SWEEP = 0  # 0 = dark only at end of pixel
 # >0 = also take dark every N voltage steps
 TURNOFF_DIS = True  # blank the pixel between measurement steps
 # (recommended: prevents thermal buildup)
+
+# ── Per-phase time limits (minutes) ─────────────────────────────────
+# Upper bound on wall-clock duration of each phase. When the limit is
+# reached the scan stops cleanly at the next pixel/bit-value boundary
+# (no data loss — rows already written are kept and post-processing
+# still runs). Set to 0 or None to disable the limit for that phase.
+FASTSCAN_TIME_LIMIT_MIN = 60.0        # Phase 1
+SWEEP_WITHIN_TIME_LIMIT_MIN = 240.0   # Phase 2a
+SWEEP_OUTSIDE_TIME_LIMIT_MIN = 240.0  # Phase 2b
 
 # ── Dead-pixel classification ───────────────────────────────────────
 # After the fast scan, pixels with mean PM400 power below this fraction
@@ -430,6 +448,7 @@ def _run_measurement(
     label,
     log,
     nvled_voltages=None,
+    time_limit_s=None,
 ):
     """Execute one complete measurement run (fast scan or sweep).
 
@@ -442,6 +461,7 @@ def _run_measurement(
     from measurement.config import MeasurementConfig
     from measurement.context import MeasurementContext
     from measurement.coordinator import ScanCoordinator
+    from measurement.experimental import ExperimentalSweepMode
     from measurement.modes import FastScanMode, TransientMode
 
     raw_data_dir = run_dir / "raw_data"
@@ -507,6 +527,23 @@ def _run_measurement(
         "dark_acq": [],
     }
 
+    t_phase_start = time.perf_counter()
+    timeout_hit = {"flag": False}
+
+    def _is_running():
+        if time_limit_s is None or time_limit_s <= 0:
+            return True
+        elapsed = time.perf_counter() - t_phase_start
+        if elapsed >= time_limit_s:
+            if not timeout_hit["flag"]:
+                timeout_hit["flag"] = True
+                log(
+                    f"TIME LIMIT reached for '{label}' "
+                    f"({time_limit_s/60:.1f} min) — stopping at next pixel boundary."
+                )
+            return False
+        return True
+
     ctx = MeasurementContext(
         cfg=cfg,
         data_writer=data_writer,
@@ -514,19 +551,27 @@ def _run_measurement(
         start_time=time.perf_counter(),
         sec_dir=sec_dir,
         raw_data_dir=raw_data_dir,
+        is_running=_is_running,
         log=log,
         set_eta=lambda msg: print(f"  {msg}", end="\r"),
     )
 
     if cfg.measurement_mode == "Fast Scan":
         mode = FastScanMode()
+    elif cfg.measurement_mode == "Experimental Sweep":
+        mode = ExperimentalSweepMode()
     else:
         mode = TransientMode()
 
     coordinator = ScanCoordinator(mode, ctx)
+    budget_str = (
+        f", time limit {time_limit_s/60:.1f} min"
+        if time_limit_s and time_limit_s > 0
+        else ""
+    )
     log(
         f"Measuring {len(pixel_list)} pixels x {len(bit_values)} bitvals "
-        f"x {len(nvled_voltages)} voltages ({cfg.measurement_mode})..."
+        f"x {len(nvled_voltages)} voltages ({cfg.measurement_mode}){budget_str}..."
     )
     step_count = coordinator.run(
         pm, smu, smile_dev, pixel_list, bit_values, nvled_voltages
@@ -538,7 +583,12 @@ def _run_measurement(
     smu.enable_output("a", False)
     smu.enable_output("b", False)
 
-    log(f"Completed {step_count} steps. Data: {csv_path}")
+    phase_elapsed = time.perf_counter() - t_phase_start
+    status = " (TIME LIMIT)" if timeout_hit["flag"] else ""
+    log(
+        f"Completed {step_count} steps in "
+        f"{datetime.timedelta(seconds=int(phase_elapsed))}{status}. Data: {csv_path}"
+    )
     print()  # clear the \r ETA line
     return csv_path, run_dir
 
@@ -674,6 +724,7 @@ def main():
             fastscan_dir,
             label="FastScan",
             log=log,
+            time_limit_s=(FASTSCAN_TIME_LIMIT_MIN or 0) * 60.0,
         )
 
         log("Post-processing fast scan...")
@@ -699,6 +750,30 @@ def main():
             NVLED_SWEEP_START, NVLED_SWEEP_TARGET,
             NVLED_SWEEP_N, NVLED_SWEEP_POWER,
         )
+
+        # Resolve which mode the sweep phases should use.
+        effective_sweep_mode = (
+            "Experimental Sweep" if EXPERIMENTAL_NVLED_SWEEP else SWEEP_MODE_NVLED
+        )
+        if EXPERIMENTAL_NVLED_SWEEP:
+            from measurement.experimental import compute_sweep_timing
+
+            k_nplc = max(SWEEP_VLED_NPLC, SWEEP_NVLED_NPLC)
+            settle_s, measure_s, K, trim_pct, per_v_s, total_s = (
+                compute_sweep_timing(
+                    n_voltages=len(sweep_voltages),
+                    user_settle_ms=SWEEP_NVLED_SETTLE_MS,
+                    nplc=k_nplc,
+                )
+            )
+            mode_tag = "zero-settle (trim 10%)" if settle_s == 0 else "auto 60/40"
+            log(
+                f"Experimental sweep enabled — {len(sweep_voltages)} voltages, "
+                f"per-voltage {per_v_s*1000:.1f} ms [{mode_tag}]: "
+                f"settle={settle_s*1000:.1f} ms, measure={measure_s*1000:.1f} ms, "
+                f"K={K} samples/voltage (nplc={k_nplc}) — total ~{total_s*1000:.1f} ms "
+                f"of PM400 1 s buffer."
+            )
         log(
             f"NVLED voltages ({len(sweep_voltages)} pts, power={NVLED_SWEEP_POWER}): "
             f"{sweep_voltages[0]:.3f} V → {sweep_voltages[-1]:.3f} V "
@@ -728,7 +803,7 @@ def main():
 
             sweep_within_dir = sample_dir / "NVLEDSweep" / "Within1STD"
             sweep_cfg = _make_config(
-                measurement_mode=SWEEP_MODE_NVLED,
+                measurement_mode=effective_sweep_mode,
                 nvled_sweep=True,
                 nvled_voltage=NVLED_SWEEP_START,
                 **sweep_overrides,
@@ -743,6 +818,7 @@ def main():
                 label="Sweep_Within1STD",
                 log=log,
                 nvled_voltages=sweep_voltages,
+                time_limit_s=(SWEEP_WITHIN_TIME_LIMIT_MIN or 0) * 60.0,
             )
             log("Post-processing within-1std sweep...")
             _postprocess(csv_sw, sweep_within_dir, log)
@@ -759,7 +835,7 @@ def main():
 
             sweep_outside_dir = sample_dir / "NVLEDSweep" / "Outside1STD"
             sweep_cfg = _make_config(
-                measurement_mode=SWEEP_MODE_NVLED,
+                measurement_mode=effective_sweep_mode,
                 nvled_sweep=True,
                 nvled_voltage=NVLED_SWEEP_START,
                 **sweep_overrides,
@@ -774,6 +850,7 @@ def main():
                 label="Sweep_Outside1STD",
                 log=log,
                 nvled_voltages=sweep_voltages,
+                time_limit_s=(SWEEP_OUTSIDE_TIME_LIMIT_MIN or 0) * 60.0,
             )
             log("Post-processing outside-1std sweep...")
             _postprocess(csv_so, sweep_outside_dir, log)
