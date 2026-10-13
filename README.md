@@ -122,6 +122,18 @@ background, so the LED current is 0.1–0.8% of it and its per-sample noise is
 ~29 µA against channel B's 9 nA. Treat channel A as a supply-rail monitor, not
 as a second measurement of the LED.
 
+### `make_capacitance_figures.py` — the investigation report's figures
+
+```bash
+python make_capacitance_figures.py ../SMILE_Characterization
+```
+
+Builds all twelve figures for **[INVESTIGATION_REPORT.md](INVESTIGATION_REPORT.md)**
+from the `charatests/` and `caprun/` runs in the measurement repo, and prints the
+numbers it plotted so the report text cannot drift from the data. Read the report
+first if you are wondering why the sweep settles for seconds, why High-C is
+mandatory, or why every rising-side EQE before 261014 is unusable.
+
 ### Smaller tools
 
 | script | what it answers |
