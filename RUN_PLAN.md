@@ -90,19 +90,29 @@ What to look for yourself, before sending:
 
 ---
 
-## Stage 2 — the actual capacitance  (~4 min, same pixel)
+## Stage 2 — the actual capacitance  (~6 min, same pixel)
 
 ```powershell
-.venv\Scripts\python.exe characterize_capacitance.py --what cap stepdir --out D:\caprun ^
-  --pixels 80,15 --voltages -0.7 -0.85 -1.0 -1.3 --ranges 1e-3
+.venv\Scripts\python.exe characterize_capacitance.py --what cap --out D:\caprun ^
+  --pixels 80,15 --cap-currents 1e-6 1e-5 1e-4 --cap-park -0.40 --cap-v-stop -0.65
 ```
 
-**Send back:** `cap.csv`, `stepdir.csv`.
+**Send back:** `cap.csv`.
 
-What it decides: whether C is really ~50 µF, and whether the `lit` and `blanked`
-numbers agree. `stepdir` separates capacitor from parasitic — if `t_01pct` scales
-with `|dv|`, it is charge, and the "slow non-radiative parasitic current" from the
-warm-up diagnostic gets reinterpreted.
+`cap` measures `C = I/(dV/dt)`: park below turn-on, hand the node to a current
+source, time the voltage ramp. It needs only a voltage slope, so it is immune to
+the current-range problem. Three setpoints that disagree mean the LED is taking a
+share of the ramp current — lower `--cap-v-stop`.
+
+The original version integrated the current transient of a voltage step instead.
+It failed on the bench: an accurate current *through* a fast transient is exactly
+what the capacitor prevents, and one over-range sample at 9.91e37 poisoned the
+integral (it reported C = 1e40 F). Do not resurrect that approach.
+
+`stepdir` is now largely redundant: path independence across three starting
+voltages, agreeing to 0.6%, already showed the error was capacitive. Run it only
+as a cross-check, and **with `--highc --compliance 1e-5`** — it reads current in
+voltage mode and without High-C the numbers are range artifacts.
 
 ---
 
@@ -186,7 +196,11 @@ Use the `capacitance_F` that stage 2 actually measured, not the 50 µF default.
   be a no-op`. **Stop.** Without pixel control, every "pixel" measurement is
   actually the whole array.
 * Any `SMU rejected a ch B setting` line → send it, it means a TSP setting was
-  refused.
+  refused. `5069 Autorange locked for HighC mode` means something wrote a range
+  while High-C was on.
+* **Every experiment that reads current in voltage mode needs `--highc`.** Without
+  it, readings below ~10 µA are not noisy, they are wrong: they land at 42–58% of
+  whatever range is selected, independent of bias. The script warns if you omit it.
 
 ## Safety notes
 

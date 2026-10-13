@@ -23,10 +23,12 @@ Experiments (``--what``):
 
   step      I(t) after a voltage step at the lowest NPLC, per voltage x range x
             High-C state. Settled value, time to 1% and 0.1%, overshoot, ripple.
-  cap       C per pixel, from the step transient: integrate the current above its
-            settled level, so Q/dV is the charge the capacitor took. Also run
-            blanked, which gives the array-common part; a lit-vs-blanked
-            difference across pixels is real spatial variation.
+  cap       C per pixel from a known current and the voltage slope it produces:
+            C = I/(dV/dt). Park below turn-on, hand the node to a current source,
+            time the ramp. Needs only a voltage slope, so it is immune to the
+            current-range problem that defeats every other approach here. Run
+            blanked and lit; a lit-vs-blanked difference is a per-pixel
+            contribution.
   isrc      ch B sinks a set current and HOLDS FOR MINUTES, logging chA, chB, V
             and dV/dt. The earlier rejection of current-source mode was measured
             with a 15 ms settle, which at 0.3 uA into 50 uF moves the node by
@@ -433,45 +435,95 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
 
 
 def exp_cap(pm, smu, smile, pixel, cfg, args, log):
-    """C from the step transient, lit and blanked.
+    """C from a known current and the voltage slope it produces: ``C = I / (dV/dt)``.
 
-    The settled current is the DC level (LED + leakage). Integrating the excess above
-    it gives the charge the capacitor took, so C = Q/dV. Running lit and blanked at
-    the same pixel separates the array-common capacitance from anything local.
+    The original method integrated the current transient of a voltage step to get
+    Q, then C = Q/dV. It failed on the bench for two reasons that are not fixable
+    by tuning: it needs an accurate current *through* a fast transient, which is
+    exactly what the capacitor prevents, and a single over-range sample at 9.91e37
+    poisons the whole integral (observed: C = 1e40 F).
+
+    Sourcing a known current and timing the voltage ramp needs only a voltage
+    slope, which the SMU measures well, and it sidesteps the current-range problem
+    entirely because the current is *set* rather than measured.
+
+    Run below turn-on, where the LED draws a small fraction of the setpoint, so the
+    slope is the capacitor's. Blanked and lit, so a per-pixel contribution shows.
     """
     rows = []
-    m.configure_voltage_source_b(smu, cfg, log)
-    if not cfg.highc_b:
-        # In High-C the range comes from the limit and the setting is locked
-        # (error 5069), so writing it would be refused.
-        m.set_measure_range_b(smu, args.ranges[0])
-        time.sleep(0.05)
+    park = args.cap_park
     for lit in (False, True):
         if lit:
             smile.set_pixel(pixel[0], pixel[1], cfg.bitvals[0])
         else:
             smile.blank_frame()
-        time.sleep(0.05)
-        for v in args.voltages:
-            dv = v - args.v_start
-            if abs(dv) < 1e-6:
-                continue
-            t, _ia, ib = capture_step(smu, args.v_start, v, args.samples, args.nplc,
-                                     chunk=args.chunk, log=log,
-                                     limit_a=cfg.nvled_compliance,
-                                     capacitance=args.capacitance,
-                                     max_presettle_s=args.max_presettle_s)
-            if t.size < 10:
-                continue
-            base = float(np.median(ib[int(0.8 * ib.size):]))
-            q = float(np.trapezoid(ib - base, t))
-            rows.append(dict(lit=lit, v_from=args.v_start, v_to=v, dv=dv, charge_C=q,
-                             capacitance_F=q / dv if dv else float("nan"),
-                             dc_level_A=base, record_s=float(t[-1])))
-            log(f"    lit={lit!s:5} dV={dv:+.2f} V  Q={q*1e6:+.3f} uC  "
-                f"-> C={q/dv*1e6:+.1f} uF   (DC {base*1e9:+.2f} nA)")
+        for i_set in args.cap_currents:
+            # park in voltage mode at a bias below turn-on, then hand the node to a
+            # current source and watch it ramp
+            m.configure_voltage_source_b(smu, cfg, log)
+            smu.set_voltage("b", float(park))
+            time.sleep(max(0.5, 3 * charge_time_s(args.capacitance, park,
+                                                  cfg.nvled_compliance)))
+            src = dataclasses.replace(cfg, current_source_range_i=cap_source_range(i_set))
+            m.configure_current_source_b(smu, src)
+            m.set_nplc(smu, max(args.nplc, 0.1))
+            m.set_current_b(smu, -abs(i_set))        # sink: drives the node negative
+            t0 = time.perf_counter()
+            ts, vs = [], []
+            while (dt := time.perf_counter() - t0) < args.cap_seconds:
+                vb, _ = m.read_voltage_b(smu, n=2)
+                ts.append(dt)
+                vs.append(vb)
+                # honour the stop only once the ramp is genuinely under way: a glitch
+                # on the first read after the mode switch must not end it immediately
+                if len(ts) >= 5 and abs(vb) > abs(args.cap_v_stop):
+                    break                            # before turn-on or compliance
+            m.set_current_b(smu, 0.0)
+            tsa, vsa = np.asarray(ts), np.asarray(vs)
+            slope, cap = ramp_capacitance(tsa, vsa, i_set, cfg.nvled_v_limit)
+            rows.append(dict(lit=lit, i_set=i_set, park_v=park, n_samples=int(tsa.size),
+                             ramp_s=float(tsa[-1]) if tsa.size else 0.0,
+                             v_start=float(vsa[0]) if vsa.size else float("nan"),
+                             v_end=float(vsa[-1]) if vsa.size else float("nan"),
+                             dvdt=slope, capacitance_F=cap,
+                             smu_errors=drain_errors(smu)))
+            log(f"    lit={lit!s:5} I={i_set*1e9:>8.0f} nA  "
+                f"V {vsa[0] if vsa.size else float('nan'):+.3f} -> "
+                f"{vsa[-1] if vsa.size else float('nan'):+.3f} V in "
+                f"{tsa[-1] if tsa.size else 0:.1f}s  dV/dt={slope*1e3:+8.2f} mV/s  "
+                f"-> C={cap*1e6:8.2f} uF")
+    m.set_current_b(smu, 0.0)
     smile.blank_frame()
     return rows
+
+
+def ramp_capacitance(ts, vs, i_set, v_limit):
+    """(dV/dt, C) from a constant-current voltage ramp. C = I / (dV/dt).
+
+    Drops samples pinned at the voltage compliance and skips the first 10% of the
+    ramp, which carries the source-mode switch transient. Returns (nan, nan) when
+    too few usable samples remain, rather than fitting noise.
+    """
+    ts, vs = np.asarray(ts, float), np.asarray(vs, float)
+    if ts.size < 6:
+        return float("nan"), float("nan")
+    ok = np.isfinite(vs) & (np.abs(vs) < abs(v_limit) * 0.98)
+    if ok.sum() < 5:
+        return float("nan"), float("nan")
+    t_ok = ts[ok]
+    mid = ok & (ts > t_ok[0] + 0.1 * (t_ok[-1] - t_ok[0]))
+    if mid.sum() < 5:
+        return float("nan"), float("nan")
+    slope = float(np.polyfit(ts[mid], vs[mid], 1)[0])            # V/s
+    return slope, (abs(i_set / slope) if slope else float("nan"))
+
+
+def cap_source_range(i_set):
+    """Smallest 2602B source range that holds i_set, so the setpoint is accurate."""
+    for r in m.SMU_I_RANGES:
+        if r >= abs(i_set):
+            return r
+    return m.SMU_I_RANGES[-1]
 
 
 def exp_isrc(pm, smu, smile, pixel, cfg, args, log):
@@ -700,6 +752,15 @@ def build_parser():
                     help="ch B source current range while holding 0 A. The finest range "
                          "minimises the regulation error that would add to the decay "
                          "current; the blanked run cancels what is left")
+    ap.add_argument("--cap-currents", nargs="+", type=float, default=[1e-6, 1e-5, 1e-4],
+                    help="known currents for the C = I/(dV/dt) ramp (A)")
+    ap.add_argument("--cap-park", type=float, default=-0.40,
+                    help="bias to park at before the ramp. Below turn-on, so the LED's "
+                         "own current is a small fraction of the setpoint")
+    ap.add_argument("--cap-v-stop", type=float, default=-0.65,
+                    help="stop the ramp here, before the LED turns on and starts taking "
+                         "a share of the setpoint")
+    ap.add_argument("--cap-seconds", type=float, default=5.0, help="max ramp duration")
     ap.add_argument("--step-n-pm", type=int, default=512,
                     help="PM reads after each step capture. 512 gives a ~7.6 pW 3-sigma "
                          "floor (measured), against ~219 pW at J=0.25")
@@ -755,6 +816,16 @@ def main(argv=None):
     if args.samples > 50000:
         log(f"WARNING: --samples {args.samples} may exceed the SMU buffer; "
             f"check record_s and n in the CSV against what you asked for")
+    # Measured 261013: a voltage-mode current reading without High-C is a range
+    # artifact below ~10 uA, not a noisy measurement - it lands at 42-58% of
+    # whatever range is selected regardless of bias. step and stepdir read current
+    # in voltage mode, so they need it. cap does not: it measures a voltage slope.
+    needs_highc = [n for n in what if n in ("step", "stepdir")]
+    if needs_highc and not (args.highc or args.highc_both):
+        log(f"WARNING: {', '.join(needs_highc)} measure current in voltage mode without "
+            f"High-C. Below ~10 uA that reads ~50% of the selected range regardless of "
+            f"bias. Pass --highc (and --compliance, e.g. 1e-5) unless you are "
+            f"deliberately reproducing the artifact.")
     pm, smu, smile = m.connect(cfg, log, simulate=args.simulate)
     collected: dict[str, list[dict]] = {name: [] for name in what}
     try:
