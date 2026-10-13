@@ -119,6 +119,23 @@ same pixel, the same frame, the same instant.
 A reader without these columns must fall back to `I_LED = |NVLED_CURR_MEAN|`
 and say so, rather than silently reporting an uncorrected rising side.
 
+### Present for the voltage ramp
+
+| column | unit | meaning |
+|---|---|---|
+| `NVLED_LIMIT_A` | A | the compliance in force at this point |
+| `NVLED_AT_COMPLIANCE` | bool | the reading sat on that limit |
+
+The limit is not constant across a sweep: -2.6 V draws ~120 uA while the rising
+side needs a 10 uA limit to resolve at all, and under High-C the limit also
+selects the measure range. It is chosen per point from the previous point's
+current (the sweep runs high current to low current, so that is an upper bound).
+
+**A point with `NVLED_AT_COMPLIANCE` true is not a measurement of the device.**
+Drop it. Run 261014-0007 had eight consecutive points reading exactly 10000.4 nA
+because an earlier version tied the limit to the density knee; they look like a
+plateau in the I-V and would corrupt any fit through them.
+
 ### Conventions that are easy to get wrong
 
 * **`*_STD` is the SEM**, kept under that name for backwards compatibility.

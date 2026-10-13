@@ -234,6 +234,26 @@ def test_leakage_reference_is_measured_and_written():
         assert "NVLED_CURR_REF" not in agg.read_text().splitlines()[0]
 
 
+def test_pick_limit_never_clamps_the_real_iv_curve():
+    """Run 261014-0007: a limit tied to the density knee clamped 8 points at 10 uA."""
+    from measure_iqe.acquire import pick_limit
+    cfg = IQEConfig()
+    # the measured curve for pixel 124,135, high current -> low current, amps
+    curve = [1.194e-4, 1.161e-4, 1.108e-4, 9.60e-5, 7.12e-5, 4.34e-5, 3.03e-5,
+             2.10e-5, 1.40e-5, 8.65e-6, 5.52e-6, 3.16e-6, 1.55e-6, 6.42e-7, 4.24e-7]
+    i_last = None
+    for i in curve:
+        lim = pick_limit(i_last, cfg)
+        assert i < 0.995 * lim, f"{i:g} A would clamp at the {lim:g} A limit"
+        i_last = i
+    # and it must still drop to the fine limit once the current is small, or the
+    # whole point of High-C (the limit picks the range) is lost
+    assert pick_limit(4.24e-7, cfg) == cfg.vramp_lowv_limit_a
+    # the first point knows nothing, so it must take the widest
+    assert pick_limit(None, cfg) == cfg.vramp_highv_limit_a
+    assert pick_limit(float("nan"), cfg) == cfg.vramp_highv_limit_a
+
+
 def test_segment_limits_are_applied_not_just_configured():
     """-2.6 V needs ~175 uA and the rising side needs 10 uA: no single limit spans it."""
     seen = []
@@ -250,8 +270,9 @@ def test_segment_limits_are_applied_not_just_configured():
             run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
     finally:
         acquire.configure_voltage_source_b = real
-    assert cfg.vramp_lowv_limit_a in seen, f"rising-side limit never applied: {set(seen)}"
-    assert cfg.vramp_highv_limit_a in seen, f"droop limit never applied: {set(seen)}"
+    assert cfg.vramp_lowv_limit_a in seen, f"fine limit never applied: {set(seen)}"
+    assert cfg.vramp_highv_limit_a in seen, f"wide limit never applied: {set(seen)}"
+    assert len(set(seen)) >= 2, "the compliance never changed across the sweep"
 
 
 def test_warmup_diag_writes_its_own_csv():

@@ -422,12 +422,19 @@ _AGG_COLS_FULL = _AGG_COLS + [
 # Appended, never inserted, so a reader that does not know these columns still works.
 _AGG_COLS_REF = ["NVLED_CURR_REF", "NVLED_CURR_REF_STD", "VLED_CURR_REF",
                  "PM400_POWER_REF", "PM400_POWER_REF_STD", "LEAK_REF_BITVAL"]
+# The compliance actually in force at each point, and whether the point hit it. Written
+# for the voltage ramp, where the limit tracks the measured current (see pick_limit).
+_AGG_COLS_LIMIT = ["NVLED_LIMIT_A", "NVLED_AT_COMPLIANCE"]
 
 
 def agg_cols(cfg: IQEConfig) -> list[str]:
     """The aggregated-CSV columns this configuration writes."""
     cols = list(_AGG_COLS_FULL if cfg.save_raw_samples else _AGG_COLS)
-    return cols + _AGG_COLS_REF if cfg.leak_reference else cols
+    if cfg.leak_reference:
+        cols += _AGG_COLS_REF
+    if cfg.fine_sweep_mode == "voltage":
+        cols += _AGG_COLS_LIMIT
+    return cols
 
 
 def write_aggregated_one(path: str | Path, rows: list[Row]) -> None:
@@ -623,6 +630,32 @@ def configure_common(pm, smu, cfg: IQEConfig, log: Logger) -> None:
             smu.display_off()
         except Exception:
             pass
+
+
+def pick_limit(i_last: float | None, cfg: IQEConfig) -> float:
+    """The compliance limit for the next sweep point, from the last measured current.
+
+    The limit CANNOT come from the density knee. That was the first attempt and run
+    261014-0007 shows what it costs: the knee is at -1.3 V but the device still draws
+    30 uA at -1.27 V, so a 10 uA limit clamped eight consecutive points at exactly
+    10000.4 nA. A clamped point is not a measurement, and the EQE computed from it is
+    meaningless.
+
+    The sweep runs high current to low current, so the previous point is an upper bound
+    on the next one: take the smallest standard range that still clears it with 50%
+    headroom. That self-tunes per pixel instead of assuming one array's I(V).
+
+    Under High-C the limit also picks the measure range, so this is what sets the noise
+    floor too -- hence the floor at ``vramp_lowv_limit_a`` rather than going lower still.
+    """
+    ladder = [r for r in SMU_I_RANGES
+              if cfg.vramp_lowv_limit_a <= r <= cfg.vramp_highv_limit_a]
+    if not ladder:
+        return cfg.vramp_highv_limit_a
+    if i_last is None or not math.isfinite(i_last):
+        return ladder[-1]                      # first point: widest, nothing is known yet
+    need = 1.5 * abs(i_last)
+    return next((r for r in ladder if r >= need), ladder[-1])
 
 
 def configure_voltage_source_b(smu, cfg: IQEConfig, log: Logger | None = None) -> None:
@@ -1036,25 +1069,26 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                 time.sleep(cfg.thermal_settle_ms / 1000.0)
             cur_nplc = None
             cur_range = None
-            cur_limit = cfg.nvled_compliance
+            cur_limit = None
+            i_last = None          # drives the compliance ladder; see pick_limit
             for jpt, (v, i_target) in enumerate(fine):
                 if cfg.fine_sweep_mode == "voltage":
                     if cfg.vramp_perseg_effort and v > cfg.vramp_knee_v:
                         # low-V / rising side (faint light) → heavy PM averaging + NPLC
-                        nplc, n_pm, n_smu, settle_s, limit = (
+                        nplc, n_pm, n_smu, settle_s = (
                             cfg.vramp_lowv_nplc, cfg.vramp_lowv_n_pm,
-                            cfg.vramp_lowv_n_smu, cfg.vramp_lowv_settle_s,
-                            cfg.vramp_lowv_limit_a)
+                            cfg.vramp_lowv_n_smu, cfg.vramp_lowv_settle_s)
                     elif cfg.vramp_perseg_effort:
                         # high-V droop (bright) → fast
-                        nplc, n_pm, n_smu, settle_s, limit = (
+                        nplc, n_pm, n_smu, settle_s = (
                             cfg.vramp_highv_nplc, cfg.vramp_highv_n_pm,
-                            cfg.vramp_highv_n_smu, cfg.vramp_highv_settle_s,
-                            cfg.vramp_highv_limit_a)
+                            cfg.vramp_highv_n_smu, cfg.vramp_highv_settle_s)
                     else:
-                        nplc, n_pm, n_smu, settle_s, limit = (
+                        nplc, n_pm, n_smu, settle_s = (
                             cfg.sweep_nplc, cfg.n_pm_samples, cfg.n_smu_samples,
-                            cfg.settle_ms / 1000.0, cfg.nvled_compliance)
+                            cfg.settle_ms / 1000.0)
+                    # The LIMIT tracks the measured current, not the density knee.
+                    limit = pick_limit(i_last, cfg)
                 else:
                     # heavy current averaging + longer settle at low current; fast at high
                     nplc, n_pm, n_smu, settle_ms = adaptive_params(i_target, cfg)
@@ -1120,6 +1154,15 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                                PM400_POWER_MEAN=sp["mean"], PM400_POWER_STD=sp["sem"],
                                PM400_POWER_MEDIAN=sp["median"], PM400_POWER_SAMPSTD=sp["std"])
                     psamps.append((x, y, bitval, vr, row["TIME_START"], raw_s))
+                # A point sitting on the limit is not a measurement. Flag it in the file
+                # and in the log rather than letting it reach the fit as a real current.
+                row["NVLED_LIMIT_A"] = limit
+                at_limit = bool(limit) and abs(inv) >= 0.995 * limit
+                row["NVLED_AT_COMPLIANCE"] = at_limit
+                if at_limit:
+                    log(f"      AT COMPLIANCE at {v:+.3f} V: |I|={abs(inv):.6g} A is the "
+                        f"{limit:g} A limit, not the device. Point is flagged, not usable.")
+                i_last = abs(inv)
                 prows.append(row); sw_rows.append(row)
                 last_v = v
                 # Early dead-pixel abort: judge on the first (brightest) point only.

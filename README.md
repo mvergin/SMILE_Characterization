@@ -374,12 +374,12 @@ runs that pinned each value.
 | `vramp_lowv_n_pm` | `int` | `32` |  |
 | `vramp_lowv_n_smu` | `int` | `12` |  |
 | `vramp_lowv_settle_s` | `float` | `8.0` | **seconds.** Rising side: 1% takes 5-55 s. Measured 261013; the old 20 ms was wrong by 250-2750x and is why every rising-side EQE before then is too high. |
-| `vramp_lowv_limit_a` | `float` | `1e-05` | the rising side never exceeds ~5 uA |
+| `vramp_lowv_limit_a` | `float` | `1e-05` | **floor** of the compliance ladder: the finest limit the sweep will use, which under High-C is also the finest measure range |
 | `vramp_highv_nplc` | `float` | `1.0` | was 0.5 -- not an integer, so it nulled no mains at all |
 | `vramp_highv_n_pm` | `int` | `8` |  |
 | `vramp_highv_n_smu` | `int` | `8` |  |
 | `vramp_highv_settle_s` | `float` | `2.0` | **seconds.** Droop side: big currents, the relaxation is a smaller fraction |
-| `vramp_highv_limit_a` | `float` | `0.001` | -2.6 V draws ~175 uA, far above the rising-side limit |
+| `vramp_highv_limit_a` | `float` | `0.001` | **ceiling** of the compliance ladder, and the limit used for the very first point, where nothing is known yet |
 
 #### Leakage reference (the low-J correction)
 
@@ -798,8 +798,13 @@ The investigation rewrote the sweep's settings. The short version:
 | `n_fine` | 45 | **30** | the dwell dominates; fewer points with a real settle win |
 | leakage reference | none | **every point** | at -0.80 V, 58% of the reading is not the LED |
 
-Plus a per-segment compliance, because no single limit spans the sweep: -2.6 V
-draws ~175 uA while the rising side needs a 10 uA limit to resolve at all.
+Plus an adaptive compliance, because no single limit spans the sweep: -2.6 V
+draws ~120 uA while the rising side needs a 10 uA limit to resolve at all. The
+limit is picked per point from the previous point's current, with 50% headroom
+(`pick_limit`). Tying it to the density knee instead was the first attempt and it
+clamped eight consecutive points at exactly 10 uA in run 261014-0007 -- the knee
+is at -1.3 V but the device still draws 30 uA at -1.27 V. Points that do sit on
+the limit are now flagged `NVLED_AT_COMPLIANCE` and dropped by the analysis.
 
 **Small steps do not settle faster.** That was the natural guess and the bench
 refused it (run 261013-2337). Stepping 20 mV onto -0.80 V left the reading 4.5%
