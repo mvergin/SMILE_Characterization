@@ -498,20 +498,61 @@ reading is right, and it is the likely cause of:
   since 25 µC at ~1 µA is ~25 s and a high-current dwell settles the cap fast.
 
 ```bash
-python characterize_capacitance.py --pixel 54 33 --what all --highc-both
+python characterize_capacitance.py --what all --highc-both
+python characterize_capacitance.py --what optfloor          # 2 min, no pixels needed
 ```
 
-Four experiments, each writing a CSV:
+**That C is the same everywhere is an assumption**, so every pixel-dependent
+experiment runs on `--per-quadrant` pixels (default 3) in each of the four
+quadrants. They are found by scanning a window at each quadrant's centre and
+handing the alive pixels to `select_sweep_pixels` in blocks mode, so the picks
+inherit the minimum-separation guarantee. Each pixel is then checked for light
+immediately before its long run, and a dead one is skipped and reported. Pass
+`--pixels X,Y …` to characterise specific pixels instead.
 
 | experiment | what it settles |
 |---|---|
-| `step` | I(t) after a voltage step at the lowest NPLC, per voltage × range × High-C state. Gives the settled value, time to 1% and 0.1%, overshoot and ripple. |
-| `cap` | `C = ∫I dt / ΔV` with the pixel blanked, so only the capacitor conducts. The actual capacitance and its absorption tail. |
-| `isrc` | Channel B sinks a small current and **holds for minutes**. If chA converges toward chB's setpoint as the voltage settles, there is no bypass path and the earlier "current-source mode does not work" conclusion was the capacitor. |
+| `step` | I(t) after a voltage step at the lowest NPLC, per voltage × range × High-C state. Settled value, time to 1% and 0.1%, overshoot, ripple. |
+| `cap` | `C` per pixel, from the step transient: integrate the current above its settled level, so `Q/ΔV` is the charge the capacitor took. Run lit *and* blanked, so the array-common part separates from anything local. |
+| `isrc` | Channel B sinks a set current and **holds for minutes**. If chA converges toward chB's setpoint as the voltage settles, there is no bypass path and the earlier "current-source mode does not work" conclusion was the capacitor. |
 | `stepdir` | One voltage reached from a small and from a large step. Parasitic conduction depends on time since turn-on; a capacitor depends on the charge moved. If settling scales with \|ΔV\|, it is the capacitor. |
+| `decay` | Charge the cap, then source 0 A so the node floats and discharges through the LED, logging V(t) and light. `I = C·dV/dt`. Run lit and blanked; the difference is the LED current. See below. |
+| `optfloor` | The PM400 noise floor vs averaging, array blanked. Decides how low in J you can go at all. |
 
 `--simulate` exercises the plumbing only — the built-in rig has no capacitance
-model, so it reports instant settling.
+model, so it reports instant settling and cannot model the decay.
+
+### How low in J can you go?
+
+On a 10×10 µm pixel, `J [A/cm²] = I [A] / 1e-6`, so J = 1 is 1 µA and **J = 0.1
+is 100 nA**. The SMU reaches that: 100 nA is the lowest measure range, and the
+1 µA range reads it at 10% of full scale.
+
+The light is the binding limit, not the current. Scaling from the −1.35 V
+fast-scan point (~22 nW at 25 µA):
+
+| J | I | optical power | …if EQE is down 2× at low J |
+|---|---|---|---|
+| 1 | 1 µA | ~880 pW | ~440 pW |
+| 0.3 | 300 nA | ~264 pW | ~132 pW |
+| 0.1 | 100 nA | ~88 pW | ~44 pW |
+| 0.03 | 30 nA | ~26 pW | ~13 pW |
+
+The config notes put the optical noise floor near 100 pW at light averaging,
+which puts J = 0.1 **at or under the floor**. Since the SEM falls as `1/√N_PM`,
+going from `N_PM` 8 to 512 buys 8× — a ~12 pW floor, which makes J = 0.1 a
+few-sigma measurement and J = 0.3 comfortable. That is why `optfloor` exists:
+measure the real floor before planning the sweep, instead of trusting the 100 pW
+estimate. If J = 0.1 has to be solid, the fix is optical collection, not
+averaging.
+
+On the current side, `decay` is the route below 1 µA. At 100 nA into 50 µF the
+decay slope is `I/C` = **2 mV/s**, which the SMU's voltmeter resolves far better
+than its 100 nA range resolves 100 nA, and the decay sweeps the operating point
+continuously, so one run yields a dense I(V) curve instead of discrete points.
+Two caveats it already handles: leakage discharges the cap too, and a 0 A
+setpoint is only as good as the source range's regulation — the blanked run
+cancels both, and `--decay-source-range` defaults to the finest range.
 
 ### High-C mode
 

@@ -1,52 +1,65 @@
-"""Characterise the array's ~50 uF capacitance and what it does to a current reading.
+"""Characterise the array's capacitance, per pixel, and how low in J you can actually go.
 
 The array carries a large capacitor in parallel with the LED. Moving the cathode
-bias across the rising-side span (-0.8 -> -1.3 V) moves ``C*dV ~ 25 uC`` of
-charge. At LED currents (1-10 uA) that is seconds per pixel; at the SMU's
-compliance it is microseconds. Which of those you get decides whether a low-J
-current reading is right, and it explains the direction hysteresis, the useless
-low ranges, the oscillation seen in the buffer, and probably the "slow parasitic
-current" the warm-up diagnostic found.
+bias across the rising-side span (-0.8 -> -1.3 V) moves ``C*dV ~ 25 uC`` of charge
+at C = 50 uF. At LED currents (1-10 uA) that is seconds per pixel; at the SMU's
+compliance it is microseconds. Which of those supplies the charge decides whether a
+low-J current reading is right, and it plausibly explains the direction hysteresis,
+the fine ranges reading low J wrong, the oscillation seen in the buffer, and the
+"slow parasitic current" the warm-up diagnostic found.
 
-This script measures that instead of reasoning about it. Four experiments:
+**That C is the same everywhere is an assumption**, so every pixel-dependent
+experiment runs on several pixels per quadrant. Each pixel is checked for light
+first, so a long run is never spent on a dead one.
 
-  step        After a voltage step, capture I(t) at the lowest NPLC into the SMU
-              buffer with instrument timestamps. Per voltage, per measure range,
-              High-C on and off. Reports the settled value, the time to reach 1%
-              and 0.1% of it, and an oscillation metric.
+Current density on a 10x10 um pixel: ``J [A/cm2] = I [A] / 1e-6``, so
 
-  cap         With the pixel blanked (no LED current), step the voltage and
-              integrate the current: C = integral(I dt) / dV. Gives the actual
-              capacitance and the dielectric-absorption tail.
+    1 uA -> J = 1        300 nA -> J = 0.3        100 nA -> J = 0.1
 
-  isrc        The decisive current-source test. Channel B sinks a small current
-              and holds for minutes while chA current, chB current and chB
-              voltage are logged. If chA converges towards chB's setpoint as the
-              voltage settles, there is no bypass path and the earlier
-              "current-source mode does not work" conclusion was the capacitor.
-              If chA sits at tens of uA with dV/dt already ~0, the bypass is
-              real.
+Getting below J = 1 means measuring at and under a microamp. See ``optfloor``
+before planning that: the optical signal, not the current, is the binding limit.
 
-  stepdir     The same voltage reached from a small step and from a large step.
-              A parasitic conduction path depends on time since turn-on; a
-              capacitor depends on how much charge had to move. If the settling
-              time scales with the step size, it is the capacitor.
+Experiments (``--what``):
+
+  step      I(t) after a voltage step at the lowest NPLC, per voltage x range x
+            High-C state. Settled value, time to 1% and 0.1%, overshoot, ripple.
+  cap       C per pixel, from the step transient: integrate the current above its
+            settled level, so Q/dV is the charge the capacitor took. Also run
+            blanked, which gives the array-common part; a lit-vs-blanked
+            difference across pixels is real spatial variation.
+  isrc      ch B sinks a set current and HOLDS FOR MINUTES, logging chA, chB, V
+            and dV/dt. The earlier rejection of current-source mode was measured
+            with a 15 ms settle, which at 0.3 uA into 50 uF moves the node by
+            0.09 mV -- the operating point never moved. If chA converges toward
+            chB's setpoint as the voltage settles, there is no bypass path.
+  stepdir   One voltage reached from a small and from a large step. A parasitic
+            depends on time since turn-on; a capacitor depends on charge moved.
+            If settling scales with |dV|, it is the capacitor.
+  decay     Charge-decay. Charge the cap, then source 0 A so the node floats and
+            discharges through the LED, logging V(t) and light. Then
+            ``I = C*dV/dt``, which at 100 nA into 50 uF is 2 mV/s -- a far easier
+            measurement than 100 nA of current. Run lit and blanked; the
+            difference is the LED current. This is the route to J < 1.
+  optfloor  The PM400 noise floor vs averaging, array blanked. Decides how low in
+            J you can go at all, since the light scales with the current.
 
 Usage:
-    python characterize_capacitance.py --pixel 54 33 --what step cap
-    python characterize_capacitance.py --pixel 54 33 --what isrc --isrc-seconds 300
-    python characterize_capacitance.py --what all --out D:/runs
+    python characterize_capacitance.py --what all
+    python characterize_capacitance.py --what step cap --per-quadrant 3
+    python characterize_capacitance.py --what isrc --pixels 54,33 177,63 --isrc-seconds 300
+    python characterize_capacitance.py --what optfloor          # 2 minutes, no pixels needed
 
-Writes one CSV per experiment plus a printed summary. It fits and plots nothing;
-point SMILE_IQE_Analysis at the CSVs for that.
+Writes one CSV per experiment, every row tagged with its pixel. It fits and plots
+nothing; point SMILE_IQE_Analysis at the CSVs for that.
 
-NOTE: ``--simulate`` exercises the plumbing only. The built-in sim rig has no
-capacitance model, so it will report instant settling. The physics needs the bench.
+NOTE: ``--simulate`` exercises the plumbing only. The built-in rig has no
+capacitance model, so it reports instant settling. The physics needs the bench.
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import datetime
 import time
 from pathlib import Path
@@ -56,12 +69,93 @@ import numpy as np
 import measure_iqe as m
 from measure_iqe import IQEConfig
 
-# Voltages worth probing: below turn-on, the rising side that pins peak IQE, the
-# effort-split knee, and the droop. Override with --voltages.
-DEFAULT_VOLTAGES = [-0.8, -0.9, -1.0, -1.1, -1.3, -1.8, -2.6]
-# Ranges to compare. The 10 mA range is what the clean runs used; the fine ones are
-# the ones that read low J "not just noisily but WRONG" before.
-DEFAULT_RANGES = [1e-3, 1e-4, 1e-5, 1e-6]
+# Voltages worth probing: the sub-turn-on region that reaches J < 1, the rising side
+# that pins peak IQE, the effort-split knee, and the droop.
+DEFAULT_VOLTAGES = [-0.6, -0.7, -0.8, -0.9, -1.0, -1.1, -1.3, -1.8, -2.6]
+# The 10 mA range is what the clean runs used; the fine ones read low J "not just
+# noisily but WRONG" before, which is the thing to explain.
+DEFAULT_RANGES = [1e-3, 1e-4, 1e-5, 1e-6, 1e-7]
+QUADRANTS = ("TL", "TR", "BL", "BR")
+
+
+def to_j(i_a, cfg):
+    """Current density in A/cm2 for this pixel geometry."""
+    return i_a / (cfg.pixel_area_um2 * 1e-8)
+
+
+# ----------------------------------------------------------------------
+#  pixel selection + liveness
+# ----------------------------------------------------------------------
+
+def read_power(pm, n):
+    vals = [pm.measure() for _ in range(int(n))]
+    a = np.asarray([v for v in vals if v is not None and np.isfinite(v)], float)
+    if a.size == 0:
+        return float("nan"), float("nan")
+    return float(a.mean()), float(a.std(ddof=1) / np.sqrt(a.size)) if a.size > 1 else 0.0
+
+
+def check_alive(pm, smu, smile, cfg, x, y, args, log):
+    """Fast turn-on check. Returns (power_W, dark_W, alive)."""
+    smile.blank_frame()
+    time.sleep(0.02)
+    dark, _ = read_power(pm, args.alive_n_pm)
+    smu.set_voltage("b", cfg.nvled_v_fastscan)
+    smile.set_pixel(x, y, cfg.fastscan_bitval)
+    time.sleep(max(cfg.fastscan_settle_ms, 10.0) / 1000.0)
+    p, _ = read_power(pm, args.alive_n_pm)
+    smile.blank_frame()
+    alive = (p - dark) >= args.alive_nw * 1e-9
+    log(f"    ({x},{y}) turn-on {(p-dark)*1e9:+8.2f} nW over dark "
+        f"{dark*1e9:+.2f} nW -> {'ALIVE' if alive else 'DEAD, skipping'}")
+    return p, dark, alive
+
+
+def select_pixels(pm, smu, smile, cfg, args, log):
+    """Explicit ``--pixels``, else N alive pixels per quadrant from a scan window.
+
+    The auto path scans a window at the centre of each quadrant and hands the alive
+    pixels to ``select_sweep_pixels`` in blocks mode, so the picks inherit the
+    minimum-separation guarantee instead of landing next to each other.
+    """
+    if args.pixels:
+        out = [tuple(int(v) for v in p.split(",")) for p in args.pixels]
+        log(f"  {len(out)} pixel(s) given explicitly")
+        return [dict(X=x, Y=y, quadrant="given") for x, y in out]
+
+    picked = []
+    smu.set_voltage("b", cfg.nvled_v_fastscan)
+    for quad in args.quadrants:
+        x1, y1, x2, y2 = m.NAMED_ROIS[quad]
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        half = args.quadrant_window // 2
+        wx1, wy1 = max(x1, cx - half), max(y1, cy - half)
+        wx2, wy2 = min(x2, wx1 + args.quadrant_window - 1), min(y2, wy1 + args.quadrant_window - 1)
+        log(f"  {quad}: scanning window ({wx1},{wy1})-({wx2},{wy2})")
+        rows = []
+        smile.blank_frame()
+        time.sleep(0.02)
+        dark, _ = read_power(pm, args.alive_n_pm)
+        for y in range(wy1, wy2 + 1):
+            for x in range(wx1, wx2 + 1):
+                smile.blank_frame()
+                smile.set_pixel(x, y, cfg.fastscan_bitval)
+                time.sleep(max(cfg.fastscan_settle_ms, 5.0) / 1000.0)
+                p, _ = read_power(pm, 2)
+                rows.append(dict(X=x, Y=y, PM400_POWER_MEAN=p - dark))
+        smile.blank_frame()
+        alive = [r for r in rows if r["PM400_POWER_MEAN"] >= args.alive_nw * 1e-9]
+        log(f"    alive {len(alive)}/{len(rows)}")
+        if not alive:
+            continue
+        # reuse the blocks sampler for its separation guarantee: one block = the window
+        wcfg = dataclasses.replace(cfg, roi=(wx1, wy1, wx2, wy2),
+                                   block_size=max(wx2 - wx1 + 1, wy2 - wy1 + 1),
+                                   pixels_per_block=args.per_quadrant)
+        for r in m.select_sweep_pixels(alive, wcfg, lambda _s: None):
+            picked.append(dict(X=r["X"], Y=r["Y"], quadrant=quad))
+        log(f"    picked {[(p['X'], p['Y']) for p in picked if p['quadrant'] == quad]}")
+    return picked
 
 
 # ----------------------------------------------------------------------
@@ -71,9 +165,8 @@ DEFAULT_RANGES = [1e-3, 1e-4, 1e-5, 1e-6]
 def capture_step(smu, v_from, v_to, n_samples, nplc=0.001, settle_first_s=2.0):
     """Step ch B from v_from to v_to, then burst-capture I(t) with timestamps.
 
-    Returns (t, i_a, i_b) as numpy arrays, t in seconds from the first sample.
-    The instrument timestamps are used, not host time, so the sample spacing is
-    the SMU's own and is not polluted by USB latency.
+    Returns (t, i_a, i_b), t in seconds from the first sample. Instrument
+    timestamps are used, not host time, so the spacing is the SMU's own.
     """
     m.set_nplc(smu, nplc)
     smu.setup_buffers(timestamps=True)
@@ -86,22 +179,21 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.001, settle_first_s=2.0):
         smu.measure_burst_fire(int(n_samples))
         smu.measure_burst_join()
         ia, ib = smu.read_buffers(int(n_samples))
-        t = np.linspace(0.0, time.perf_counter() - t0, len(ib))
-        return t, np.asarray(ia, float), np.asarray(ib, float)
+        return (np.linspace(0.0, time.perf_counter() - t0, len(ib)),
+                np.asarray(ia, float), np.asarray(ib, float))
     smu.measure_burst(int(n_samples))          # fills as fast as the ADC allows
     ia, ib, ta, _tb = smu.read_buffer_with_timestamps()
     if not ib:
         return np.array([]), np.array([]), np.array([])
-    t = np.asarray(ta, float) - ta[0]
-    return t, np.asarray(ia, float), np.asarray(ib, float)
+    return np.asarray(ta, float) - ta[0], np.asarray(ia, float), np.asarray(ib, float)
 
 
 def settling_metrics(t, i):
     """Settled value plus how long it took to get there.
 
-    The settled value is the median of the last 20% of the record. "Time to x%"
-    is the last time the trace is still outside x% of it, which is the honest
-    definition: a trace that re-enters the band and leaves again has not settled.
+    Settled = median of the last 20%. "Time to x%" is the LAST time the trace is
+    still outside x% of it: a trace that re-enters the band and leaves again has
+    not settled.
     """
     if t.size < 10:
         return dict(settled=float("nan"), t_1pct=float("nan"), t_01pct=float("nan"),
@@ -118,18 +210,17 @@ def settling_metrics(t, i):
 
 
 # ----------------------------------------------------------------------
-#  experiments
+#  per-pixel experiments
 # ----------------------------------------------------------------------
 
-def exp_step(smu, smile, pixel, cfg, args, log):
+def exp_step(pm, smu, smile, pixel, cfg, args, log):
     """I(t) after a voltage step, per voltage x range x High-C state."""
     rows = []
     smile.set_pixel(pixel[0], pixel[1], cfg.bitvals[0])
     for highc in ([False, True] if args.highc_both else [args.highc]):
-        m.configure_voltage_source_b(smu, IQEConfig(**{**cfg.to_dict(), "highc_b": highc}), log)
-        # In High-C the limit governs the range, so sweeping ranges is meaningless there.
-        ranges = [None] if highc else args.ranges
-        for rng in ranges:
+        m.configure_voltage_source_b(smu, dataclasses.replace(cfg, highc_b=highc), log)
+        # In High-C the limit governs the range, so sweeping ranges is meaningless.
+        for rng in ([None] if highc else args.ranges):
             if rng is not None:
                 m.set_measure_range_b(smu, rng)
                 time.sleep(0.05)
@@ -138,50 +229,55 @@ def exp_step(smu, smile, pixel, cfg, args, log):
                 met = settling_metrics(t, np.abs(ib))
                 rows.append(dict(highc=highc, range_i=rng if rng is not None else "limit",
                                  v_from=args.v_start, v_to=v, **met,
+                                 j_settled=to_j(met["settled"], cfg),
                                  i_a_settled=float(np.median(ia[int(0.8 * ia.size):]))
                                  if ia.size else float("nan"),
                                  record_s=float(t[-1]) if t.size else 0.0))
-                log(f"  highc={highc!s:5} range={str(rng):>7} V={v:+.2f}  "
-                    f"I={met['settled']*1e6:+9.3f} uA  t1%={met['t_1pct']:.3f}s  "
-                    f"t0.1%={met['t_01pct']:.3f}s  ripple={100*met['ripple']:.1f}%")
+                log(f"    highc={highc!s:5} range={str(rng):>7} V={v:+.2f}  "
+                    f"I={met['settled']*1e9:+9.1f} nA (J={to_j(met['settled'], cfg):+7.3f})  "
+                    f"t1%={met['t_1pct']:.3f}s t0.1%={met['t_01pct']:.3f}s "
+                    f"ripple={100*met['ripple']:.1f}%")
     smile.blank_frame()
     return rows
 
 
-def exp_cap(smu, smile, pixel, cfg, args, log):
-    """C = integral(I dt) / dV with the LED dark, so only the capacitor conducts."""
+def exp_cap(pm, smu, smile, pixel, cfg, args, log):
+    """C from the step transient, lit and blanked.
+
+    The settled current is the DC level (LED + leakage). Integrating the excess above
+    it gives the charge the capacitor took, so C = Q/dV. Running lit and blanked at
+    the same pixel separates the array-common capacitance from anything local.
+    """
     rows = []
-    smile.blank_frame()                        # no LED current: all charge is the cap
     m.configure_voltage_source_b(smu, cfg, log)
     m.set_measure_range_b(smu, args.ranges[0])
     time.sleep(0.05)
-    for v in args.voltages:
-        dv = v - args.v_start
-        if abs(dv) < 1e-6:
-            continue
-        t, _ia, ib = capture_step(smu, args.v_start, v, args.samples, args.nplc)
-        if t.size < 10:
-            continue
-        # subtract the settled (leakage) level, then integrate what is left: that is
-        # the charge the capacitor took, so C = Q / dV.
-        base = float(np.median(ib[int(0.8 * ib.size):]))
-        q = float(np.trapezoid(ib - base, t))
-        rows.append(dict(v_from=args.v_start, v_to=v, dv=dv, charge_C=q,
-                         capacitance_F=q / dv if dv else float("nan"),
-                         leakage_A=base, record_s=float(t[-1])))
-        log(f"  dV={dv:+.2f} V  Q={q*1e6:+.3f} uC  ->  C={q/dv*1e6:+.1f} uF   "
-            f"(settled leak {base*1e9:+.2f} nA)")
+    for lit in (False, True):
+        if lit:
+            smile.set_pixel(pixel[0], pixel[1], cfg.bitvals[0])
+        else:
+            smile.blank_frame()
+        time.sleep(0.05)
+        for v in args.voltages:
+            dv = v - args.v_start
+            if abs(dv) < 1e-6:
+                continue
+            t, _ia, ib = capture_step(smu, args.v_start, v, args.samples, args.nplc)
+            if t.size < 10:
+                continue
+            base = float(np.median(ib[int(0.8 * ib.size):]))
+            q = float(np.trapezoid(ib - base, t))
+            rows.append(dict(lit=lit, v_from=args.v_start, v_to=v, dv=dv, charge_C=q,
+                             capacitance_F=q / dv if dv else float("nan"),
+                             dc_level_A=base, record_s=float(t[-1])))
+            log(f"    lit={lit!s:5} dV={dv:+.2f} V  Q={q*1e6:+.3f} uC  "
+                f"-> C={q/dv*1e6:+.1f} uF   (DC {base*1e9:+.2f} nA)")
+    smile.blank_frame()
     return rows
 
 
-def exp_isrc(smu, smile, pixel, cfg, args, log):
-    """Current-source mode, held long enough to actually equilibrate.
-
-    The earlier rejection of current-source mode ("the anode bypasses ch B") was
-    measured with a 15 ms settle. At 0.3 uA into 50 uF, 15 ms moves the node by
-    0.09 mV — the operating point never moved. This holds for minutes and logs the
-    approach, so the bypass hypothesis and the capacitor hypothesis separate.
-    """
+def exp_isrc(pm, smu, smile, pixel, cfg, args, log):
+    """Current-source mode, held long enough to actually equilibrate."""
     rows = []
     smile.set_pixel(pixel[0], pixel[1], cfg.bitvals[0])
     m.configure_current_source_b(smu, cfg)
@@ -189,7 +285,7 @@ def exp_isrc(smu, smile, pixel, cfg, args, log):
     for i_set in args.isrc_currents:
         m.set_current_b(smu, -abs(i_set))      # ch B sinks the LED current
         t0 = time.perf_counter()
-        last_v = None
+        last = None
         while (dt := time.perf_counter() - t0) < args.isrc_seconds:
             if hasattr(smu, "measure_instant"):
                 ia, ib = smu.measure_instant()
@@ -197,46 +293,123 @@ def exp_isrc(smu, smile, pixel, cfg, args, log):
                 a, b = smu.read_buffers(1)
                 ia, ib = (a[0] if a else float("nan")), (b[0] if b else float("nan"))
             vb, _ = m.read_voltage_b(smu, n=2)
-            dvdt = ((vb - last_v[1]) / (dt - last_v[0])) if last_v else float("nan")
-            rows.append(dict(i_set=i_set, t_s=dt, i_a=ia, i_b=ib, v_b=vb, dvdt=dvdt,
+            p, _ = read_power(pm, 2)
+            dvdt = ((vb - last[1]) / (dt - last[0])) if last else float("nan")
+            rows.append(dict(i_set=i_set, j_set=to_j(i_set, cfg), t_s=dt, i_a=ia, i_b=ib,
+                             v_b=vb, dvdt=dvdt, power_W=p,
                              leak_ratio=abs(ia / ib) if ib else float("nan")))
-            last_v = (dt, vb)
+            last = (dt, vb)
             time.sleep(args.isrc_period)
         tail = [r for r in rows if r["i_set"] == i_set][-5:]
-        log(f"  I_set={i_set*1e6:.3f} uA after {args.isrc_seconds:.0f}s: "
-            f"chA={np.mean([r['i_a'] for r in tail])*1e6:+.3f} uA  "
-            f"chB={np.mean([r['i_b'] for r in tail])*1e6:+.3f} uA  "
-            f"V={np.mean([r['v_b'] for r in tail]):+.4f} V  "
+        log(f"    I_set={i_set*1e9:>7.1f} nA (J={to_j(i_set, cfg):.3f}) after "
+            f"{args.isrc_seconds:.0f}s: chA={np.mean([r['i_a'] for r in tail])*1e9:+8.1f} nA  "
+            f"chB={np.mean([r['i_b'] for r in tail])*1e9:+8.1f} nA  "
+            f"V={np.mean([r['v_b'] for r in tail]):+.4f}  "
             f"dV/dt={np.nanmean([r['dvdt'] for r in tail])*1e3:+.3f} mV/s")
     m.set_current_b(smu, 0.0)
     smile.blank_frame()
     return rows
 
 
-def exp_stepdir(smu, smile, pixel, cfg, args, log):
-    """Reach one voltage from a small step and from a large step.
-
-    Parasitic conduction depends on time since turn-on. A capacitor depends on the
-    charge that had to move. If t_settle scales with |dV|, it is the capacitor.
-    """
+def exp_stepdir(pm, smu, smile, pixel, cfg, args, log):
+    """One voltage reached from a small and from a large step."""
     rows = []
     smile.set_pixel(pixel[0], pixel[1], cfg.bitvals[0])
     m.configure_voltage_source_b(smu, cfg, log)
     m.set_measure_range_b(smu, args.ranges[0])
     time.sleep(0.05)
-    target = args.stepdir_target
     for v_from in args.stepdir_from:
-        t, _ia, ib = capture_step(smu, v_from, target, args.samples, args.nplc)
+        t, _ia, ib = capture_step(smu, v_from, args.stepdir_target, args.samples, args.nplc)
         met = settling_metrics(t, np.abs(ib))
-        rows.append(dict(v_from=v_from, v_to=target, dv=target - v_from, **met))
-        log(f"  {v_from:+.2f} -> {target:+.2f} V (dV={target-v_from:+.2f}): "
-            f"I={met['settled']*1e6:+.3f} uA  t1%={met['t_1pct']:.3f}s  "
-            f"t0.1%={met['t_01pct']:.3f}s")
+        rows.append(dict(v_from=v_from, v_to=args.stepdir_target,
+                         dv=args.stepdir_target - v_from, **met))
+        log(f"    {v_from:+.2f} -> {args.stepdir_target:+.2f} V "
+            f"(dV={args.stepdir_target-v_from:+.2f}): I={met['settled']*1e9:+8.1f} nA  "
+            f"t1%={met['t_1pct']:.3f}s t0.1%={met['t_01pct']:.3f}s")
     smile.blank_frame()
     return rows
 
 
-EXPERIMENTS = {"step": exp_step, "cap": exp_cap, "isrc": exp_isrc, "stepdir": exp_stepdir}
+def exp_decay(pm, smu, smile, pixel, cfg, args, log):
+    """Charge-decay: let the capacitor discharge through the LED and watch V(t).
+
+    ``I = C*dV/dt``. At 100 nA into 50 uF that is 2 mV/s, which the SMU's voltmeter
+    resolves far better than its 100 nA current range resolves 100 nA. The decay
+    sweeps the operating point continuously, so one run yields a dense I(V) curve
+    instead of discrete points. Run blanked too: leakage discharges the cap as
+    well, and the lit-minus-blanked difference is the LED current.
+    """
+    rows = []
+    for lit in (False, True):
+        m.configure_voltage_source_b(smu, cfg, log)
+        if lit:
+            smile.set_pixel(pixel[0], pixel[1], cfg.bitvals[0])
+        else:
+            smile.blank_frame()
+        smu.set_voltage("b", float(args.decay_from))
+        time.sleep(args.decay_charge_s)        # charge the cap at the SMU's compliance
+        m.configure_current_source_b(
+            smu, dataclasses.replace(cfg, current_source_range_i=args.decay_source_range))
+        m.set_current_b(smu, 0.0)              # float the node: it discharges via the LED
+        t0 = time.perf_counter()
+        last = None
+        while (dt := time.perf_counter() - t0) < args.decay_seconds:
+            vb, vbs = m.read_voltage_b(smu, n=args.decay_n_v)
+            p, ps = read_power(pm, args.decay_n_pm)
+            dvdt = ((vb - last[1]) / (dt - last[0])) if last else float("nan")
+            i_est = args.capacitance * dvdt    # sign follows dV/dt
+            rows.append(dict(lit=lit, t_s=dt, v_b=vb, v_b_sem=vbs, dvdt=dvdt,
+                             i_from_dvdt=i_est, j_from_dvdt=to_j(i_est, cfg),
+                             power_W=p, power_sem=ps))
+            last = (dt, vb)
+            time.sleep(args.decay_period)
+        tail = rows[-5:]
+        log(f"    lit={lit!s:5} end V={tail[-1]['v_b']:+.4f}  "
+            f"dV/dt={np.nanmean([r['dvdt'] for r in tail])*1e3:+.4f} mV/s  "
+            f"-> I={np.nanmean([r['i_from_dvdt'] for r in tail])*1e9:+8.2f} nA  "
+            f"P={np.nanmean([r['power_W'] for r in tail])*1e12:+8.1f} pW")
+    m.set_current_b(smu, 0.0)
+    smile.blank_frame()
+    return rows
+
+
+# ----------------------------------------------------------------------
+#  array-wide experiment
+# ----------------------------------------------------------------------
+
+def exp_optfloor(pm, smu, smile, cfg, args, log):
+    """PM400 noise floor vs averaging, array blanked.
+
+    This is the binding limit on how low in J you can go, because the light scales
+    with the current. At J = 0.1 (100 nA) the emission is of order 50-90 pW, so the
+    floor has to be well under that. Measured, not assumed.
+    """
+    rows = []
+    smile.blank_frame()
+    smu.set_voltage("b", 0.0)
+    time.sleep(0.2)
+    for n_pm in args.optfloor_n:
+        reps = []
+        for _ in range(args.optfloor_reps):
+            p, sem = read_power(pm, n_pm)
+            reps.append(p)
+        a = np.asarray(reps, float)
+        spread = float(a.std(ddof=1)) if a.size > 1 else float("nan")
+        rows.append(dict(n_pm=n_pm, reps=len(reps), mean_W=float(a.mean()),
+                         repeat_std_W=spread,
+                         detectable_pW=spread * 3e12,
+                         min_j_3sigma=to_j(spread * 3 / args.responsivity_w_per_a, cfg)
+                         if args.responsivity_w_per_a else float("nan")))
+        log(f"    N_PM={n_pm:>4} x{args.optfloor_reps}: offset {a.mean()*1e12:+8.1f} pW, "
+            f"repeatability {spread*1e12:8.2f} pW  -> 3-sigma detectable "
+            f"{spread*3e12:8.1f} pW")
+    return rows
+
+
+PER_PIXEL = {"step": exp_step, "cap": exp_cap, "isrc": exp_isrc,
+             "stepdir": exp_stepdir, "decay": exp_decay}
+ARRAY_WIDE = {"optfloor": exp_optfloor}
+ALL = [*PER_PIXEL, *ARRAY_WIDE]
 
 
 # ----------------------------------------------------------------------
@@ -244,7 +417,9 @@ EXPERIMENTS = {"step": exp_step, "cap": exp_cap, "isrc": exp_isrc, "stepdir": ex
 def write_csv(out_dir: Path, name: str, rows: list[dict]) -> Path | None:
     if not rows:
         return None
-    cols = list(rows[0])
+    cols: list[str] = []
+    for r in rows:                             # union of keys, first-seen order
+        cols += [k for k in r if k not in cols]
     path = out_dir / f"{name}.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=cols)
@@ -257,34 +432,59 @@ def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--what", nargs="+", default=["step", "cap"],
-                    choices=[*EXPERIMENTS, "all"], help="which experiments to run")
-    ap.add_argument("--pixel", nargs=2, type=int, default=[128, 128], metavar=("X", "Y"))
+                    choices=[*ALL, "all"], help="which experiments to run")
+    ap.add_argument("--pixels", nargs="+", default=None, metavar="X,Y",
+                    help="explicit pixels; otherwise --per-quadrant are found by scan")
+    ap.add_argument("--per-quadrant", type=int, default=3,
+                    help="alive pixels to characterise per quadrant (default 3)")
+    ap.add_argument("--quadrants", nargs="+", default=list(QUADRANTS), choices=QUADRANTS)
+    ap.add_argument("--quadrant-window", type=int, default=24,
+                    help="edge of the scan window at each quadrant centre")
+    ap.add_argument("--alive-nw", type=float, default=2.0,
+                    help="turn-on power over dark (nW) for a pixel to count as alive")
+    ap.add_argument("--alive-n-pm", type=int, default=8, help="PM reads for the liveness check")
     ap.add_argument("--out", default=None, help="output root (default: config base_dir)")
     ap.add_argument("--simulate", action="store_true",
-                    help="plumbing only — the sim rig has no capacitance model")
+                    help="plumbing only - the sim rig has no capacitance model")
     ap.add_argument("--voltages", nargs="+", type=float, default=DEFAULT_VOLTAGES)
     ap.add_argument("--ranges", nargs="+", type=float, default=DEFAULT_RANGES)
-    ap.add_argument("--v-start", type=float, default=-2.6,
-                    help="voltage to step FROM (default: the conditioned high-bias point)")
+    ap.add_argument("--v-start", type=float, default=-2.6, help="voltage to step FROM")
     ap.add_argument("--samples", type=int, default=2000, help="buffer samples per step")
     ap.add_argument("--nplc", type=float, default=0.001, help="integration time for I(t)")
     ap.add_argument("--highc", action="store_true", help="run with High-C enabled")
     ap.add_argument("--highc-both", action="store_true",
                     help="run the step experiment with High-C both off and on")
-    ap.add_argument("--isrc-currents", nargs="+", type=float, default=[3e-7, 1e-6, 1e-5],
-                    help="setpoints for the current-source test (A)")
+    ap.add_argument("--isrc-currents", nargs="+", type=float, default=[1e-7, 3e-7, 1e-6, 1e-5],
+                    help="setpoints for the current-source test (A); 1e-7 is J=0.1")
     ap.add_argument("--isrc-seconds", type=float, default=120.0,
-                    help="hold time per setpoint — needs to be minutes, not ms")
+                    help="hold time per setpoint - needs to be minutes, not ms")
     ap.add_argument("--isrc-period", type=float, default=0.5, help="log period (s)")
-    ap.add_argument("--stepdir-target", type=float, default=-0.85,
-                    help="the voltage to arrive at, from different distances")
+    ap.add_argument("--stepdir-target", type=float, default=-0.85)
     ap.add_argument("--stepdir-from", nargs="+", type=float, default=[-0.8, -1.0, -1.3, -2.6])
+    ap.add_argument("--decay-from", type=float, default=-1.3,
+                    help="charge to this voltage, then let it decay through the LED")
+    ap.add_argument("--decay-charge-s", type=float, default=3.0)
+    ap.add_argument("--decay-seconds", type=float, default=120.0)
+    ap.add_argument("--decay-period", type=float, default=0.5)
+    ap.add_argument("--decay-n-v", type=int, default=8, help="voltage reads per decay sample")
+    ap.add_argument("--decay-n-pm", type=int, default=16, help="PM reads per decay sample")
+    ap.add_argument("--decay-source-range", type=float, default=1e-7,
+                    help="ch B source current range while holding 0 A. The finest range "
+                         "minimises the regulation error that would add to the decay "
+                         "current; the blanked run cancels what is left")
+    ap.add_argument("--capacitance", type=float, default=50e-6,
+                    help="C used to turn dV/dt into a current; refine it with --what cap")
+    ap.add_argument("--optfloor-n", nargs="+", type=int, default=[4, 8, 32, 128, 512])
+    ap.add_argument("--optfloor-reps", type=int, default=12,
+                    help="repeats per N_PM, for the repeatability spread")
+    ap.add_argument("--responsivity-w-per-a", type=float, default=22e-9 / 25e-6,
+                    help="W of optical power per A of LED current, for the min-J estimate")
     return ap
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    what = list(EXPERIMENTS) if "all" in args.what else args.what
+    what = list(ALL) if "all" in args.what else args.what
     log = m.make_logger()
     cfg = IQEConfig(highc_b=args.highc)
 
@@ -293,30 +493,50 @@ def main(argv=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"Output: {out_dir}")
     if args.simulate:
-        log("SIMULATION — plumbing only, the sim rig has no capacitance model.")
+        log("SIMULATION - plumbing only, the sim rig has no capacitance model.")
 
     pm, smu, smile = m.connect(cfg, log, simulate=args.simulate)
-    written = []
+    collected: dict[str, list[dict]] = {name: [] for name in what}
     try:
         m.configure_common(pm, smu, cfg, log)
         smu.set_voltage("a", cfg.vled_voltage)
         smu.enable_output("a", True)
         smu.enable_output("b", True)
         time.sleep(0.05)
-        for name in what:
+
+        for name in [n for n in what if n in ARRAY_WIDE]:
             log("=" * 56)
-            log(f"{name.upper()}")
-            rows = EXPERIMENTS[name](smu, smile, tuple(args.pixel), cfg, args, log)
-            path = write_csv(out_dir, name, rows)
-            if path:
-                written.append(path)
-                log(f"  -> {path.name} ({len(rows)} rows)")
+            log(name.upper())
+            collected[name] = ARRAY_WIDE[name](pm, smu, smile, cfg, args, log)
+
+        per_pixel = [n for n in what if n in PER_PIXEL]
+        if per_pixel:
+            log("=" * 56)
+            log("PIXEL SELECTION")
+            pixels = select_pixels(pm, smu, smile, cfg, args, log)
+            if not pixels:
+                log("no pixels to characterise")
+            for k, px in enumerate(pixels, 1):
+                log("=" * 56)
+                log(f"PIXEL {k}/{len(pixels)} ({px['X']},{px['Y']}) [{px['quadrant']}]")
+                p_on, dark, alive = check_alive(pm, smu, smile, cfg, px["X"], px["Y"], args, log)
+                if not alive:
+                    continue
+                for name in per_pixel:
+                    log(f"  {name}")
+                    rows = PER_PIXEL[name](pm, smu, smile, (px["X"], px["Y"]), cfg, args, log)
+                    for r in rows:
+                        r.update(pixel_x=px["X"], pixel_y=px["Y"], quadrant=px["quadrant"],
+                                 turnon_W=p_on, dark_W=dark)
+                    collected[name].extend(rows)
     finally:
         m.shutdown(pm, smu, smile, cfg)
+
     log("=" * 56)
-    for p in written:
+    wrote = [p for p in (write_csv(out_dir, n, r) for n, r in collected.items()) if p]
+    for p in wrote:
         log(f"wrote {p}")
-    if not written:
+    if not wrote:
         log("no data written")
     return 0
 
