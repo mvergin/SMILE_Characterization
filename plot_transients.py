@@ -38,16 +38,28 @@ def load_traces(run_dir: Path) -> dict[str, np.ndarray]:
         return {k: d[k] for k in d.files}
 
 
+def label_of(key: str) -> str:
+    """Trace key -> the readable part, e.g. "step_hc1_rNone_v-0.800"."""
+    return key.split("_", 1)[1].rsplit("_", 1)[0]
+
+
 def clean(t, i):
     """Drop over-range samples; they are a sentinel, not a measurement."""
     ok = np.isfinite(i) & (np.abs(i) < OVERFLOW)
     return t[ok], i[ok]
 
 
-def amplitude_spectrum(t, i):
-    """(freqs, amplitudes) with the transient detrended out, matching the script."""
+def amplitude_spectrum(t, i, tail_frac=0.5):
+    """(freqs, amplitudes) over the settled tail, matching `spectrum_summary`.
+
+    The tail only: the settling is a power law, so a quadratic cannot detrend it and
+    over the whole trace the residual transient swamps every low-frequency bin.
+    """
     if t.size < 64:
         return np.array([]), np.array([])
+    cut = int((1.0 - tail_frac) * t.size)
+    if t.size - cut >= 64:
+        t, i = t[cut:], i[cut:]
     dt = float(np.median(np.diff(t)))
     if not dt > 0:
         return np.array([]), np.array([])
@@ -57,12 +69,11 @@ def amplitude_spectrum(t, i):
             np.abs(np.fft.rfft(resid * w)) * (4.0 / resid.size))
 
 
-def plot(run_dir: Path, mains_hz: float) -> None:
+def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    traces = load_traces(run_dir)
     keys = sorted(traces)
     n = len(keys)
     ncol = min(3, n)
@@ -74,7 +85,7 @@ def plot(run_dir: Path, mains_hz: float) -> None:
         a, b = ax[idx // ncol][idx % ncol], bx[idx // ncol][idx % ncol]
         t, _ia, ib = traces[key]
         tc, ic = clean(np.asarray(t, float), np.abs(np.asarray(ib, float)))
-        label = key.split("_", 1)[1].rsplit("_", 1)[0]
+        label = label_of(key)
         if tc.size < 10:
             a.set_title(f"{label}\n(all over-range)", fontsize=8)
             continue
@@ -125,28 +136,37 @@ def plot(run_dir: Path, mains_hz: float) -> None:
         plt.close(f_)
 
 
-def summarise(run_dir: Path, mains_hz: float) -> None:
-    """Print the spectral columns the measurement script already recorded."""
-    import csv
-    for name in ("step.csv", "leak.csv"):
-        path = run_dir / name
-        if not path.exists():
+def summarise(traces: dict[str, np.ndarray], mains_hz: float) -> None:
+    """Periodic content per capture, computed from the traces themselves.
+
+    Not read from the summary CSV: a CSV written before the tail-only fix reports an
+    `rms_ac` ~30x too high, because the quadratic detrend cannot remove a power-law
+    transient. Recomputing keeps this table consistent with the plot beside it.
+    """
+    print("periodic content per capture (settled tail only)")
+    print(f"  {'capture':<22} {'fs':>9} {'peak':>10} {'amp':>9} "
+          f"{str(int(mains_hz))+'Hz':>9} {'2x':>8} {'rms_ac':>9}")
+    for key in sorted(traces):
+        t, _ia, ib = traces[key]
+        tc, ic = clean(np.asarray(t, float), np.abs(np.asarray(ib, float)))
+        f, amp = amplitude_spectrum(tc, ic)
+        if not f.size:
             continue
-        rows = list(csv.DictReader(path.open()))
-        if not rows or "spec_peak_hz" not in rows[0]:
-            continue
-        print(f"\n{name}: periodic content per capture")
-        print(f"  {'bias':>7} {'fs':>8} {'peak':>10} {'amp':>9} "
-              f"{str(int(mains_hz))+'Hz':>9} {'2x':>8} {'rms_ac':>9}")
-        for r in rows:
-            v = r.get("v_to", "?")
-            g = lambda k: float(r[k]) if r.get(k) not in (None, "", "nan") else float("nan")
-            print(f"  {float(v):>+7.2f} {g('spec_fs_hz'):>7.1f}Hz "
-                  f"{g('spec_peak_hz'):>8.1f}Hz {g('spec_peak_amp')*1e9:>7.2f}nA "
-                  f"{g('spec_mains_amp')*1e9:>7.2f}nA {g('spec_mains2_amp')*1e9:>6.2f}nA "
-                  f"{g('spec_rms_ac')*1e9:>7.2f}nA")
-        print("\n  A peak at the mains line means the readings carry mains pickup, which an")
-        print("  integer NPLC would null entirely. NPLC 0.01 rejects none of it.")
+        fs = 1.0 / float(np.median(np.diff(tc)))
+        sel = f > 2.0
+        k = int(np.argmax(amp[sel])) if sel.any() else 0
+        def band(target):
+            if target >= fs / 2:
+                return float("nan")
+            b = np.abs(f - target) < max(2.0, 3 * fs / tc.size)
+            return float(np.max(amp[b])) if b.any() else float("nan")
+        cut = int(0.5 * tc.size)
+        print(f"  {label_of(key):<22} {fs:>7.1f}Hz {f[sel][k]:>8.1f}Hz "
+              f"{amp[sel][k]*1e9:>7.2f}nA {band(mains_hz)*1e9:>7.2f}nA "
+              f"{band(2*mains_hz)*1e9:>6.2f}nA {np.std(ic[cut:])*1e9:>7.2f}nA")
+    print("\n  A peak at the mains line means the readings carry mains pickup, which an")
+    print("  integer NPLC would null entirely. NPLC 0.01 rejects none of it.")
+    print("  rms_ac is the per-sample noise in the tail. It falls as sqrt(NPLC).\n")
 
 
 def main():
@@ -158,8 +178,9 @@ def main():
     run_dir = Path(args.run_dir)
     if not run_dir.is_dir():
         sys.exit(f"{run_dir} is not a directory")
-    summarise(run_dir, args.mains_hz)
-    plot(run_dir, args.mains_hz)
+    traces = load_traces(run_dir)
+    summarise(traces, args.mains_hz)
+    plot(run_dir, traces, args.mains_hz)
 
 
 if __name__ == "__main__":
