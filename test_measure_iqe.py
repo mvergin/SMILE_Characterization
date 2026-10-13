@@ -177,7 +177,7 @@ def test_voltage_sweep_writes_the_expected_files():
         agg = result.run_dir / "NVLEDSweep" / "Sweep" / "aggregated_bitval=15_mean_std.csv"
         rows = list(csv.DictReader(agg.open()))
         assert len(rows) == result.n_points
-        assert AGG_COLS == list(rows[0])[:len(AGG_COLS)], "analyze_array column contract"
+        assert AGG_COLS == list(rows[0])[:len(AGG_COLS)], "SMILE_IQE_Analysis column contract"
         assert "NVLED_CURR_MEDIAN" in rows[0], "raw-sample stats must be written"
         assert float(rows[0]["PM400_POWER_MEAN"]) > 0
 

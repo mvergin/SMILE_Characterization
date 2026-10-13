@@ -45,11 +45,7 @@ numpy==2.4.4
     #   smile-characterization (pyproject.toml)
     #   contourpy
     #   matplotlib
-    #   opencv-python
     #   pandas
-    #   scipy
-opencv-python==4.13.0.92
-    # via smile-characterization (pyproject.toml)
 packaging==26.0
     # via
     #   smile-characterization (pyproject.toml)
@@ -68,16 +64,6 @@ pyparsing==3.3.2
     # via
     #   smile-characterization (pyproject.toml)
     #   matplotlib
-pyqt6==6.11.0
-    # via smile-characterization (pyproject.toml)
-pyqt6-qt6==6.11.0
-    # via
-    #   smile-characterization (pyproject.toml)
-    #   pyqt6
-pyqt6-sip==13.11.1
-    # via
-    #   smile-characterization (pyproject.toml)
-    #   pyqt6
 python-dateutil==2.9.0.post0
     # via
     #   smile-characterization (pyproject.toml)
@@ -91,8 +77,6 @@ rich==14.3.3
     # via
     #   smile-characterization (pyproject.toml)
     #   typer
-scipy==1.18.1
-    # via smile-characterization (pyproject.toml)
 shellingham==1.5.4
     # via
     #   smile-characterization (pyproject.toml)

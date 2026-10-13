@@ -1,9 +1,9 @@
 """IQE acquisition for the SMILE micro-LED array — the measurement core.
 
-This module acquires data and writes CSVs.  It does NOT plot or fit; run the
-analysis separately::
+This module acquires data and writes CSVs.  It does NOT plot or fit — that lives
+in the separate SMILE_IQE_Analysis repo::
 
-    python analyze_array.py "<run_dir>"
+    python analyze_array.py "<run_dir>"        # SMILE_IQE_Analysis
 
 Design (informed by auditing the results_georg data and the 10mA/1mA bench runs):
 
@@ -26,7 +26,7 @@ Design (informed by auditing the results_georg data and the 10mA/1mA bench runs)
     stored ``*_STD`` columns are the standard error of the mean, so heavier
     averaging genuinely lowers the gated uncertainty.
 
-Output (consumed by ``analyze_array.py``)::
+Output (specified in RUN_FORMAT.md, consumed by SMILE_IQE_Analysis)::
 
     <run_dir>/FastScan/{aggregated_bitval=<b>_mean_std.csv, raw_data/...}
     <run_dir>/NVLEDSweep/Sweep/{aggregated_bitval=<b>_mean_std.csv, raw_data/...}
@@ -1251,7 +1251,8 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
         log("=" * 56)
         if selected and not warmup_diag:
             log(f"DONE. {n_points} sweep points over {len(selected)} pixels.")
-            log(f'Analyze separately:\n    python analyze_array.py "{out_dir}"')
+            log('Analyze separately (SMILE_IQE_Analysis):\n'
+                f'    python analyze_array.py "{out_dir}"')
     finally:
         shutdown(pm, smu, smile, cfg)
     return IQEResult(run_dir=out_dir, n_pixels=len(selected), n_points=n_points, config=cfg)

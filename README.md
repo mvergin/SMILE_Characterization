@@ -1,16 +1,25 @@
 # SMILE_Characterization
 
-Tooling to characterize the SMILE platform developed in the EU project
-*Scalable Structured Micro Illumination Light Engines*: a PyQt GUI for manual
-work, plus scripted IQE/EQE acquisition and analysis for the micro-LED array.
+Measure the micro-LED array of the SMILE platform, developed in the EU project
+*Scalable Structured Micro Illumination Light Engines*. This repo talks to the
+instruments and writes measurement data. **It does not analyse it.**
+
+```
+SMILE_Characterization  ──writes──▶  <run_dir>/  ──reads──▶  SMILE_IQE_Analysis
+     (instruments, CLI)                CSV + JSON             (fits, reports)
+```
+
+Fitting, plotting and reporting live in the separate
+[SMILE_IQE_Analysis](../SMILE_IQE_Analysis) repo. The two share no code — a run
+directory on disk is the whole interface, specified in
+**[RUN_FORMAT.md](RUN_FORMAT.md)** and kept byte-identical in both repos.
 
 | piece | what it is |
 |---|---|
-| `measure_iqe/` | **acquisition library + CLI** — fast scan, pixel selection, IQE sweep. Writes CSVs only. |
-| `analyze_array.py` | analysis: loads a run directory, fits the ABC model, writes the report and plots. |
-| `smile_automatic_gui_2602b.py` | the PyQt GUI. |
-| `smile/`, `instruments/` | SMILE FPGA driver and the PM400 / Keithley 2602B instrument drivers. |
-| `benchmark_sweep.py`, `autozero_bench.py` | parameter benchmarks built on the `measure_iqe` API. |
+| `measure_iqe/` | **the measurement: library + CLI** — fast scan, pixel selection, IQE sweep |
+| `smile/`, `instruments/` | SMILE FPGA driver and the PM400 / Keithley 2602B instrument drivers |
+| `auto_measure.py` + `measurement/`, `data/` | the older automated run (transient and ultra-fast modes), with its own post-processing in `smile_postprocess.py` |
+| `benchmark_sweep.py`, `autozero_bench.py`, `sweep_variants.py` | parameter benchmarks built on the `measure_iqe` API |
 
 ---
 
@@ -115,10 +124,10 @@ finally:
 | `make_logger`, `make_run_dir` | encode-safe timestamped logger; timestamped run directory |
 | `NAMED_ROIS`, `SMU_I_RANGES` | ROI presets and the 2602B current ranges |
 
-Everything writes CSVs only. Fit and plot them separately:
+Everything writes CSVs only. Fit and plot them from the analysis repo:
 
 ```bash
-python analyze_array.py "<run_dir>"
+python analyze_array.py "<run_dir>"        # SMILE_IQE_Analysis
 ```
 
 ---
@@ -452,8 +461,22 @@ python test_measure_iqe.py       # no pytest needed; also collects under pytest
 
 The checks run the whole acquisition against the simulation rig: every source
 mode, every pixel-selection mode, the warm-up diagnostic, the dead-pixel abort,
-the CLI, the config round trip, and the CSV column contract that
-`analyze_array.py` depends on.
+the blocks-mode spacing guarantees, the CLI, and the config round trip.
+
+```bash
+python test_run_format.py        # the contract with SMILE_IQE_Analysis
+```
+
+This one asserts a fresh run still writes the layout and columns that
+RUN_FORMAT.md promises, that the committed `tests/fixture/` has not drifted from
+what the code produces, and that an interrupted run stays readable.
+`tests/fixture/` is a real simulated run; the analysis repo holds the same
+fixture and asserts it can still *read* that shape, so a format change that
+breaks one side fails on both.
+
+To change the format: edit RUN_FORMAT.md, copy it to the analysis repo,
+regenerate the fixture with the command at the bottom of that file, copy the
+fixture across, and update both tests.
 
 ---
 
@@ -468,3 +491,12 @@ the CLI, the config round trip, and the CSV column contract that
 * `auto_measure.py` still configures itself with module-level constants rather
   than an `IQEConfig`. The "LabView PC, 1 ms settle" variant that used to be a
   906-line copy of it is now a preset comment block at the top of that file.
+* `smile_postprocess.py` and `smile_heatmap.py` are analysis-shaped but stayed
+  here: `auto_measure.py` calls them inline during a run, on its own CSV format
+  rather than the one in RUN_FORMAT.md. If `auto_measure.py` is ever retired or
+  ported onto `measure_iqe`, they go to the analysis repo with it.
+* The PyQt GUI was removed in the split. It was an intermediary for checking
+  things by hand, and the scripts replaced it. A thin wrapper that shells out to
+  `python -m measure_iqe` would be the way to bring that convenience back —
+  nothing in this repo needs to change for that. The old GUI is still in git
+  history if you want it as a starting point.

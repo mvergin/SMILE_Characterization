@@ -12,7 +12,8 @@ or from the command line::
 
     python -m measure_iqe --simulate --set roi='[0,0,7,7]'
 
-The package writes CSVs only; fit and plot them with ``analyze_array.py``.
+The package writes CSVs only. Fit and plot the result with the separate
+SMILE_IQE_Analysis repo; RUN_FORMAT.md specifies the handoff.
 """
 
 from .acquire import (

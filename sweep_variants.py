@@ -17,7 +17,7 @@ It does two independent things:
      whether the NVLED current spans the full range and whether the light tracks
      NVLED (corr of log P vs log I) — i.e. whether that variant gives a physical
      current you can compute IQE from. Each folder is a normal run you can pass
-     straight to analyze_array.py.
+     straight to analyze_array.py (in the SMILE_IQE_Analysis repo).
 
 Reuses measure_iqe.py's primitives by overriding its module globals per variant.
 
@@ -314,7 +314,8 @@ def write_summary(root, settle_sum, results, log):
     lines += ["", "Read: NVLED should span ~2 decades up to ~10^-4 A and corr(logP,logNVLED) "
               "should be ≈ corr(logP,logVLED) ≈ 1. If NVLED is compressed (small max) or its "
               "correlation is much worse than VLED's, that variant misreads the current.", "",
-              "Analyze any variant: `python analyze_array.py \"<variant folder>\"`"]
+              "Analyze any variant (SMILE_IQE_Analysis): "
+              "`python analyze_array.py \"<variant folder>\"`"]
     (root / "SUMMARY.md").write_text("\n".join(lines), encoding="utf-8")
     log("=" * 60)
     log(f"Wrote {root/'SUMMARY.md'}")
