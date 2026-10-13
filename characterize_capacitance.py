@@ -502,7 +502,7 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                                       cfg=cfg, charge_limit=args.charge_limit,
                                       switch_settle_s=args.switch_settle_s)
                 met = settling_metrics(t, np.abs(ib))
-                spec = keep_trace(f"step_hc{int(highc)}_r{rng}_v{v:+.3f}",
+                spec = keep_trace(f"step_hc{int(highc)}_r{rng}_f{args.v_start:+.3f}_v{v:+.3f}",
                                   t, ia, ib, args.trace_points)
                 ia_ok = ia[np.isfinite(ia) & (np.abs(ia) < OVERFLOW)] if ia.size else ia
                 # The node is settled by now, so read the light too: at these currents
@@ -696,7 +696,8 @@ def exp_leak(pm, smu, smile, pixel, cfg, args, log):
                                       cfg=cfg, charge_limit=args.charge_limit,
                                       switch_settle_s=args.switch_settle_s)
             met = settling_metrics(t, np.abs(ib))
-            spec = keep_trace(f"leak_{state}_v{v:+.3f}", t, _ia, ib, args.trace_points)
+            spec = keep_trace(f"leak_{state}_f{args.v_start:+.3f}_v{v:+.3f}", t, _ia, ib,
+                              args.trace_points)
             pw, pw_sem = read_power(pm, args.step_n_pm)
             meas[state] = (met, pw, pw_sem, spec)
         lit, off, blank = (meas[k] for k in ("lit", "off", "blank"))
