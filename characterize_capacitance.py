@@ -549,27 +549,36 @@ def cap_source_range(i_set):
 
 
 def exp_leak(pm, smu, smile, pixel, cfg, args, log):
-    """Settled current and light at each bias, pixel LIT and BLANKED.
+    """Settled current and light at each bias, in THREE frame states.
 
-    The missing measurement. Both source modes read the TOTAL cathode current, so
-    neither separates LED injection from a parallel leakage path. Blanking the pixel
-    at the same bias removes the LED and leaves the leakage, so lit minus blanked is
-    the true LED current.
+    Both source modes read the TOTAL cathode current, so neither separates LED
+    injection from a parallel leakage path. The reference state has to remove the
+    injection WITHOUT changing anything else.
 
-    This matters because the cap ramps implied a few hundred nA of parallel current
-    near -0.35 V, which is comparable to the 249 nA measured at -0.70 V. If much of
-    that is leakage then the LED current at low J is far smaller than the cathode
-    current, and the apparent EQE collapse below J ~ 0.4 is a contaminated
-    denominator rather than device physics. Same bias, same range, same timing, so
-    the subtraction is valid.
+    Blanking the frame does not qualify, and the first attempt at this experiment
+    proved it: the blanked current came out HIGHER than the lit current at every
+    bias (934 nA vs 250 nA at -0.70 V), giving a negative LED current. It was also
+    nearly bias-independent, and the cap ramps had independently inferred the same
+    ~900 nA. So an all-off frame leaves the backplane conducting ~5x more than a
+    frame with one pixel addressed, and lit-minus-blanked subtracts the wrong number.
+
+    The valid reference is the SAME pixel addressed at bitval 0: identical frame
+    structure and select state, zero drive. All three states are recorded so the
+    difference between them stays visible:
+
+        i_led   = lit - off      the LED current, from the valid reference
+        i_off   = bitval 0, addressed
+        i_blank = no frame, for comparison with the earlier runs
     """
     rows = []
     m.configure_voltage_source_b(smu, cfg, log)
     for v in args.voltages:
         meas = {}
-        for lit in (True, False):
-            if lit:
+        for state in ("lit", "off", "blank"):
+            if state == "lit":
                 smile.set_pixel(pixel[0], pixel[1], cfg.bitvals[0])
+            elif state == "off":
+                smile.set_pixel(pixel[0], pixel[1], 0)   # addressed, zero drive
             else:
                 smile.blank_frame()
             time.sleep(0.05)
@@ -580,27 +589,34 @@ def exp_leak(pm, smu, smile, pixel, cfg, args, log):
                                       max_presettle_s=args.max_presettle_s)
             met = settling_metrics(t, np.abs(ib))
             pw, pw_sem = read_power(pm, args.step_n_pm)
-            meas[lit] = (met, pw, pw_sem)
-        (mlit, plit, plit_sem), (mdark, pdark, pdark_sem) = meas[True], meas[False]
-        i_led = mlit["settled"] - mdark["settled"]
-        p_led = plit - pdark
-        eqe = float("nan")
-        if np.isfinite(i_led) and i_led:
-            eqe = (p_led / cfg.photon_energy_j) / (abs(i_led) / 1.602176634e-19)
-        rows.append(dict(v_to=v, i_lit=mlit["settled"], i_dark=mdark["settled"],
-                         i_led=i_led, j_led=to_j(i_led, cfg),
-                         leak_frac=(abs(mdark["settled"]) / abs(mlit["settled"])
-                                    if mlit["settled"] else float("nan")),
-                         p_lit=plit, p_dark=pdark, p_led=p_led, p_sem=plit_sem,
-                         eqe_led=eqe, settled_lit=mlit["settled_ok"],
-                         settled_dark=mdark["settled_ok"],
-                         over_lit=mlit["n_overflow"], over_dark=mdark["n_overflow"],
+            meas[state] = (met, pw, pw_sem)
+        lit, off, blank = (meas[k] for k in ("lit", "off", "blank"))
+        i_led = lit[0]["settled"] - off[0]["settled"]
+        p_led = lit[1] - off[1]
+        # A non-physical LED current means the reference is still wrong for this
+        # device. Say so rather than publishing an EQE computed from it.
+        ok = bool(np.isfinite(i_led) and i_led > 0)
+        eqe = ((p_led / cfg.photon_energy_j) / (i_led / 1.602176634e-19)) if ok else float("nan")
+        rows.append(dict(v_to=v,
+                         i_lit=lit[0]["settled"], i_off=off[0]["settled"],
+                         i_blank=blank[0]["settled"], i_led=i_led,
+                         j_led=to_j(i_led, cfg) if ok else float("nan"),
+                         led_current_physical=ok,
+                         leak_frac=(abs(off[0]["settled"] / lit[0]["settled"])
+                                    if lit[0]["settled"] else float("nan")),
+                         blank_vs_off=(abs(blank[0]["settled"] / off[0]["settled"])
+                                       if off[0]["settled"] else float("nan")),
+                         p_lit=lit[1], p_off=off[1], p_blank=blank[1], p_led=p_led,
+                         p_sem=lit[2], p_sigma=abs(p_led) / lit[2] if lit[2] else float("nan"),
+                         eqe_led=eqe,
+                         settled_lit=lit[0]["settled_ok"], settled_off=off[0]["settled_ok"],
+                         over_lit=lit[0]["n_overflow"], over_off=off[0]["n_overflow"],
                          smu_errors=drain_errors(smu)))
-        log(f"    V={v:+.2f}  lit {mlit['settled']*1e9:+9.1f} nA  dark "
-            f"{mdark['settled']*1e9:+9.1f} nA  -> LED {i_led*1e9:+9.1f} nA "
-            f"(J={to_j(i_led, cfg):+7.3f}, leak "
-            f"{100*abs(mdark['settled']/mlit['settled']) if mlit['settled'] else float('nan'):.0f}%)"
-            f"  P {p_led*1e12:+8.1f} pW  EQE {100*eqe:6.3f}%")
+        log(f"    V={v:+.2f}  lit {lit[0]['settled']*1e9:+8.1f}  off "
+            f"{off[0]['settled']*1e9:+8.1f}  blank {blank[0]['settled']*1e9:+8.1f} nA"
+            f"  -> LED {i_led*1e9:+8.1f} nA" + ("" if ok else " << NON-PHYSICAL")
+            + f"  P {p_led*1e12:+7.1f} pW ({abs(p_led)/lit[2] if lit[2] else 0:.0f}sig)"
+            + (f"  EQE {100*eqe:6.3f}%" if ok else ""))
     smile.blank_frame()
     return rows
 
@@ -794,7 +810,8 @@ def estimate_seconds(what, cfg, args, n_pixels):
         total += n_pixels * n_hc * n_rng * len(args.voltages) * (
             per_capture + pm_s * (2 if args.step_dark else 1))
     if "leak" in what:
-        total += n_pixels * len(args.voltages) * 2 * (per_capture + pm_s)
+        # three frame states per bias: lit, addressed-at-bitval-0, blanked
+        total += n_pixels * len(args.voltages) * 3 * (per_capture + pm_s)
     if "stepdir" in what:
         total += n_pixels * len(args.stepdir_from) * per_capture
     if "cap" in what:

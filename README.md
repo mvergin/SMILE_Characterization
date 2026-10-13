@@ -731,11 +731,38 @@ source range is now chosen per setpoint.
 
 ### The open question: is the low-J current actually LED current?
 
-Both source modes measure the *total* cathode current. If a few hundred nA of
-leakage flows at low bias, the 249 nA at −0.70 V is mostly not injection — and
-that would explain the 20× EQE drop below J ≈ 0.4 as a contaminated denominator
-rather than device physics. The `leak` experiment settles it by measuring each bias
-lit and blanked; lit minus blanked is the LED current.
+Both source modes measure the *total* cathode current, so neither separates LED
+injection from leakage. The first attempt used a blanked frame as the reference and
+**that is invalid** — measured:
+
+| V | lit | blanked | lit − blanked |
+|---|---|---|---|
+| −0.85 | 955.5 nA | 962.2 nA | −6.7 nA |
+| −0.80 | 455.5 nA | 946.3 nA | −490.8 nA |
+| −0.70 | 250.4 nA | 934.3 nA | −683.9 nA |
+
+A negative LED current is impossible, and the blanked current is nearly
+bias-independent at 934–962 nA. The `cap` ramps had independently inferred the same
+thing — 867 nA parallel when blanked against 164 nA when lit at −0.35 V. Two
+experiments agree: **an all-off frame leaves the backplane conducting ~5× more than
+a frame with one pixel addressed.** The blanked light was 3.2–4.6 pW, i.e. the
+optical floor, so the array really is dark; it is the *leakage* that changes, not
+the emission.
+
+So blanking does not hold the leakage fixed, and the reference must leave the
+backplane addressing alone. `leak` now measures **three** frame states per bias:
+
+* `lit` — the pixel at its normal bitval
+* `off` — the **same pixel addressed at bitval 0**: identical frame structure and
+  select state, zero drive. This is the valid reference, and `i_led = lit − off`
+* `blank` — no frame, recorded for comparison with the runs above
+
+`led_current_physical` is False when `i_led` comes out ≤ 0, and no EQE is published
+from a reference that is still wrong.
+
+One useful side result from the same run: at `step_n_pm` 2048 the optical SEM was
+1.8 pW, so the 6.0 pW at −0.70 V is a 3.3σ detection. The averaging extrapolation
+held.
 
 `highc_b` with `perpoint_range` is rejected by `validate()`: they cannot both own
 the range.
