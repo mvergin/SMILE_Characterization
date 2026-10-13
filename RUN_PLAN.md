@@ -196,6 +196,23 @@ Halve it with `--per-quadrant 2 --quadrant-window 16` and two voltages (~27 min)
 decides: whether one compliance schedule and one settle budget work array-wide, or
 whether the sweep needs per-region margin.
 
+### Result (run 261013-1625, 12 pixels, 4 quadrants) — **answered: uniform**
+
+* **C = 42.8 +- 0.1 uF**, spread 0.8% over the whole array. One global
+  capacitance, not a per-pixel one. Use this number, not 50 uF.
+  Solve it from two ramp currents, which cancels the ramp leakage:
+  `C = (I2-I1)/(|dVdt2|-|dVdt1|)`. A single setpoint reads high (51 uF at
+  10 uA, 215 uF at 1 uA) because leakage steals part of the ramp current.
+* **`i_off` (same pixel, bitval 0) = 236-254 nA**, stable to +-3% array-wide and
+  to 0.2 nA within a capture. This is the usable zero reference.
+* **A blanked frame draws 4x more** (943-956 nA) than the addressed pixel at
+  bitval 0. Reproducible on all 12 pixels. Never use a blank as the reference.
+* **One compliance and one settle budget work array-wide.** Every capture
+  settled, no SMU errors, `i_led` SEM 0.2 nA at 177 nA (0.1%).
+* EQE is smooth and monotone, 0.0562% at -0.95 V down to 0.0380% at -0.80 V.
+  The left half is 17-31% brighter than the right. That gradient is real
+  signal, so a spatial map is worth measuring.
+
 ## Stage 5 — charge decay, only if stage 0 allowed it  (~10 min/pixel)
 
 Use the `capacitance_F` that stage 2 actually measured, not the 50 µF default.
