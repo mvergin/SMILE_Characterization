@@ -38,9 +38,49 @@ def load_traces(run_dir: Path) -> dict[str, np.ndarray]:
         return {k: d[k] for k in d.files}
 
 
+def parse_key(key: str) -> dict:
+    """Decode a traces.npz key into its settings.
+
+    The key is built by the measurement script and is a filename, not a label:
+
+        000_step_hc1_rNone_v-0.950_5
+         |   |    |     |       |  stride: every 5th sample was kept
+         |   |    |     |       voltage stepped TO
+         |   |    |     measure range, None = not forced (High-C picks it)
+         |   |    High-C: 1 on, 0 off
+         |   experiment
+         capture index, in run order
+
+    `leak` keys carry a frame state (lit / off / blank) where `step` carries hc/range.
+    Anything unrecognised falls through into `rest`, so a new tag never crashes a plot.
+    """
+    parts = key.split("_")
+    out = {"idx": parts[0], "what": parts[1] if len(parts) > 1 else "?",
+           "stride": parts[-1], "v": None, "highc": None, "range": None, "rest": []}
+    for p in parts[2:-1]:
+        if p.startswith("v-") or p.startswith("v+"):
+            out["v"] = float(p[1:])
+        elif p.startswith("hc") and p[2:].isdigit():
+            out["highc"] = bool(int(p[2:]))
+        elif p.startswith("r"):
+            out["range"] = None if p == "rNone" else p[1:]
+        else:
+            out["rest"].append(p)
+    return out
+
+
 def label_of(key: str) -> str:
-    """Trace key -> the readable part, e.g. "step_hc1_rNone_v-0.800"."""
-    return key.split("_", 1)[1].rsplit("_", 1)[0]
+    """Trace key -> a title a human can read, e.g. "-0.950 V, High-C, range auto"."""
+    k = parse_key(key)
+    bits = [f"{k['v']:+.3f} V" if k["v"] is not None else k["what"]]
+    bits += k["rest"]
+    if k["highc"] is not None:
+        bits.append("High-C" if k["highc"] else "no High-C")
+    if k["range"] is not None:
+        bits.append(f"range {k['range']}")
+    elif k["highc"]:
+        bits.append("range auto")
+    return ", ".join(bits)
 
 
 def clean(t, i):
@@ -148,7 +188,7 @@ def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
         ts = tc[w - 1:]
         m = (ts > 0) & (dev > 0)
         line, = cx.plot(ts[m], dev[m] * 100, lw=1.0,
-                        label=f"{label.split('_v')[-1]} V   (settled {settled*1e9:,.0f} nA)")
+                        label=f"{label}   (settled {settled*1e9:,.0f} nA)")
         fit = m & (ts > 0.8) & (ts < 10) & (dev > 2e-3)
         if fit.sum() > 20:
             slope = np.polyfit(np.log(ts[fit]), np.log(dev[fit]), 1)[0]
@@ -211,7 +251,7 @@ def summarise(traces: dict[str, np.ndarray], mains_hz: float) -> None:
     transient. Recomputing keeps this table consistent with the plot beside it.
     """
     print("periodic content per capture (settled tail only)")
-    print(f"  {'capture':<22} {'fs':>9} {'peak':>10} {'amp':>9} "
+    print(f"  {'capture':<30} {'fs':>9} {'peak':>10} {'amp':>9} "
           f"{str(int(mains_hz))+'Hz':>9} {'2x':>8} {'rms_ac':>9}")
     for key in sorted(traces):
         t, _ia, ib = traces[key]
@@ -228,7 +268,7 @@ def summarise(traces: dict[str, np.ndarray], mains_hz: float) -> None:
             b = np.abs(f - target) < max(2.0, 3 * fs / tc.size)
             return float(np.max(amp[b])) if b.any() else float("nan")
         cut = int(0.5 * tc.size)
-        print(f"  {label_of(key):<22} {fs:>7.1f}Hz {f[sel][k]:>8.1f}Hz "
+        print(f"  {label_of(key):<30} {fs:>7.1f}Hz {f[sel][k]:>8.1f}Hz "
               f"{amp[sel][k]*1e9:>7.2f}nA {band(mains_hz)*1e9:>7.2f}nA "
               f"{band(2*mains_hz)*1e9:>6.2f}nA {np.std(ic[cut:])*1e9:>7.2f}nA")
     print("\n  A peak at the mains line means the readings carry mains pickup, which an")
