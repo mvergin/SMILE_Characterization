@@ -618,6 +618,15 @@ Two consequences:
 `highc_b` with `perpoint_range` is rejected by `validate()`: they cannot both own
 the range.
 
+**Both High-C transitions are refusal points.** The 2602B locks the range settings
+while High-C is on — error `5069 SMU B: Autorange locked for HighC mode`. So
+writing `measure.rangei` *after* enabling High-C is refused, and so is re-entering
+`configure_voltage_source_b` while High-C is still on from an earlier call, because
+`configure_channel` writes `autorangei` before it touches `highc`. The function
+therefore always disables High-C first, sets the range, then re-enables it, which
+makes it idempotent whatever state the channel was left in. Any code that sets a
+range must skip the call under High-C.
+
 ---
 
 ## Known limitations

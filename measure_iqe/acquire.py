@@ -617,14 +617,25 @@ def configure_voltage_source_b(smu, cfg: IQEConfig, log: Logger | None = None) -
     (``set_measure_range_b``).
 
     With ``highc_b``: High-C mode is enabled via raw TSP, because the driver refuses
-    ``high_c=True`` on channel B. In High-C mode the 2602B derives the current range
-    from the *limit*, so writing ``measure.rangei`` afterwards conflicts with it and
-    errors — which is why earlier High-C attempts "didn't work". So we set the range
-    BEFORE enabling High-C and never touch it again (``set_measure_range_b`` and
-    ``perpoint_range`` are both suppressed), and we use AUTOZERO_ONCE, which is what
-    the driver's own notes say High-C needs. The SMU error queue is drained
-    afterwards so a rejected setting is reported instead of silently misreading.
+    ``high_c=True`` on channel B. In High-C the 2602B derives the current range from
+    the *limit* and **locks the range settings** — error 5069, "SMU B: Autorange
+    locked for HighC mode". So the order is: leave High-C, set the range, re-enable
+    High-C, then never touch the range again (``set_measure_range_b`` and
+    ``perpoint_range`` are both suppressed). AUTOZERO_ONCE is what the driver's own
+    notes say High-C needs. The error queue is drained afterwards, so a refused
+    setting is reported instead of silently misreading current.
+
+    Both transitions matter and both were wrong once: writing the range *after*
+    enabling High-C is refused, and so is re-entering this function while High-C is
+    still on from a previous call.
     """
+    if hasattr(smu, "inst"):
+        # Leave High-C FIRST, unconditionally. While it is on, the 2602B locks the
+        # range settings ("5069 SMU B: Autorange locked for HighC mode"), and
+        # configure_channel's next act is to write measure.autorangei and
+        # measure.rangei. Disabling first makes this function idempotent: it works
+        # whatever state the channel was left in by a previous call.
+        smu.inst.write("smub.source.highc = smub.DISABLE")
     smu.configure_channel("b", cfg.nvled_compliance, cfg.sweep_nplc, False,
                           zero_delays=not cfg.highc_b, range_i=cfg.nvled_range_i)
     if hasattr(smu, "inst"):

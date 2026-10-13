@@ -416,8 +416,11 @@ def exp_cap(pm, smu, smile, pixel, cfg, args, log):
     """
     rows = []
     m.configure_voltage_source_b(smu, cfg, log)
-    m.set_measure_range_b(smu, args.ranges[0])
-    time.sleep(0.05)
+    if not cfg.highc_b:
+        # In High-C the range comes from the limit and the setting is locked
+        # (error 5069), so writing it would be refused.
+        m.set_measure_range_b(smu, args.ranges[0])
+        time.sleep(0.05)
     for lit in (False, True):
         if lit:
             smile.set_pixel(pixel[0], pixel[1], cfg.bitvals[0])
@@ -486,8 +489,11 @@ def exp_stepdir(pm, smu, smile, pixel, cfg, args, log):
     rows = []
     smile.set_pixel(pixel[0], pixel[1], cfg.bitvals[0])
     m.configure_voltage_source_b(smu, cfg, log)
-    m.set_measure_range_b(smu, args.ranges[0])
-    time.sleep(0.05)
+    if not cfg.highc_b:
+        # In High-C the range comes from the limit and the setting is locked
+        # (error 5069), so writing it would be refused.
+        m.set_measure_range_b(smu, args.ranges[0])
+        time.sleep(0.05)
     for v_from in args.stepdir_from:
         t, _ia, ib = capture_step(smu, v_from, args.stepdir_target, args.samples, args.nplc,
                                      chunk=args.chunk, log=log,
