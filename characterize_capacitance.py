@@ -165,11 +165,21 @@ def select_pixels(pm, smu, smile, cfg, args, log):
 #  capture primitive
 # ----------------------------------------------------------------------
 
-def capture_step(smu, v_from, v_to, n_samples, nplc=0.001, settle_first_s=2.0):
+def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
+                 chunk=2000, log=None):
     """Step ch B from v_from to v_to, then burst-capture I(t) with timestamps.
 
     Returns (t, i_a, i_b), t in seconds from the first sample. Instrument
     timestamps are used, not host time, so the spacing is the SMU's own.
+
+    The burst is issued in chunks. One ``measure_burst(20000)`` blocks the VISA
+    read for the whole burst — about 8 s at NPLC 0.01 — which overruns the
+    driver's 10 s timeout once overhead is added and then kills the run. The
+    buffer is in append mode, so chunks accumulate into one record, and the
+    instrument timestamps make the small gap between chunks visible rather than
+    silently distorting the time axis. A chunk that still times out is caught: the
+    interface is cleared so the stale 'DONE' cannot desync later queries, and
+    whatever was captured so far is returned.
     """
     m.set_nplc(smu, nplc)
     smu.setup_buffers(timestamps=True)
@@ -184,11 +194,37 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.001, settle_first_s=2.0):
         ia, ib = smu.read_buffers(int(n_samples))
         return (np.linspace(0.0, time.perf_counter() - t0, len(ib)),
                 np.asarray(ia, float), np.asarray(ib, float))
-    smu.measure_burst(int(n_samples))          # fills as fast as the ADC allows
-    ia, ib, ta, _tb = smu.read_buffer_with_timestamps()
+
+    # two channels per iteration, integration plus overhead, then 4x head-room
+    per_sample_s = max(2.0 * nplc / 50.0, 200e-6)
+    old_timeout = smu.inst.timeout
+    smu.inst.timeout = max(10_000, int(chunk * per_sample_s * 4_000))
+    done = 0
+    try:
+        while done < int(n_samples):
+            k = min(int(chunk), int(n_samples) - done)
+            smu.measure_burst(k)
+            done += k
+    except Exception as exc:
+        try:
+            smu.inst.clear()
+        except Exception:
+            pass
+        if log:
+            log(f"      burst stopped after {done}/{n_samples} samples: "
+                f"{type(exc).__name__} — keeping what was captured")
+    finally:
+        # the buffer read is a single large ASCII transfer; give it room too
+        smu.inst.timeout = max(old_timeout, 30_000)
+        try:
+            ia, ib, ta, _tb = smu.read_buffer_with_timestamps()
+        finally:
+            smu.inst.timeout = old_timeout
     if not ib:
         return np.array([]), np.array([]), np.array([])
-    return np.asarray(ta, float) - ta[0], np.asarray(ia, float), np.asarray(ib, float)
+    n = min(len(ia), len(ib), len(ta))
+    return (np.asarray(ta[:n], float) - ta[0],
+            np.asarray(ia[:n], float), np.asarray(ib[:n], float))
 
 
 def settling_metrics(t, i):
@@ -298,7 +334,8 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
             if err_range:
                 log(f"    SMU rejected range {rng}: {err_range}")
             for v in args.voltages:
-                t, ia, ib = capture_step(smu, args.v_start, v, args.samples, args.nplc)
+                t, ia, ib = capture_step(smu, args.v_start, v, args.samples, args.nplc,
+                                     chunk=args.chunk, log=log)
                 met = settling_metrics(t, np.abs(ib))
                 ia_ok = ia[np.isfinite(ia) & (np.abs(ia) < OVERFLOW)] if ia.size else ia
                 err = (err_range + " " + drain_errors(smu)).strip()
@@ -342,7 +379,8 @@ def exp_cap(pm, smu, smile, pixel, cfg, args, log):
             dv = v - args.v_start
             if abs(dv) < 1e-6:
                 continue
-            t, _ia, ib = capture_step(smu, args.v_start, v, args.samples, args.nplc)
+            t, _ia, ib = capture_step(smu, args.v_start, v, args.samples, args.nplc,
+                                     chunk=args.chunk, log=log)
             if t.size < 10:
                 continue
             base = float(np.median(ib[int(0.8 * ib.size):]))
@@ -399,7 +437,8 @@ def exp_stepdir(pm, smu, smile, pixel, cfg, args, log):
     m.set_measure_range_b(smu, args.ranges[0])
     time.sleep(0.05)
     for v_from in args.stepdir_from:
-        t, _ia, ib = capture_step(smu, v_from, args.stepdir_target, args.samples, args.nplc)
+        t, _ia, ib = capture_step(smu, v_from, args.stepdir_target, args.samples, args.nplc,
+                                     chunk=args.chunk, log=log)
         met = settling_metrics(t, np.abs(ib))
         rows.append(dict(v_from=v_from, v_to=args.stepdir_target,
                          dv=args.stepdir_target - v_from, **met))
@@ -536,6 +575,10 @@ def build_parser():
     ap.add_argument("--samples", type=int, default=6000,
                     help="buffer samples per step. record_s in the CSV says how much time "
                          "that bought; raise it until the record outlasts the settling")
+    ap.add_argument("--chunk", type=int, default=2000,
+                    help="samples per TSP burst. The buffer appends, so this only bounds "
+                         "how long a single blocking VISA read lasts; lower it if a burst "
+                         "times out")
     ap.add_argument("--nplc", type=float, default=0.01,
                     help="integration time for I(t). 0.001 is the SMU minimum but gave "
                          "60-99%% ripple and unusable magnitudes on the bench; 0.01 trades "
@@ -626,20 +669,32 @@ def main(argv=None):
                     continue
                 for name in per_pixel:
                     log(f"  {name}")
-                    rows = PER_PIXEL[name](pm, smu, smile, (px["X"], px["Y"]), cfg, args, log)
+                    # One failing experiment must not cost the pixels already done.
+                    try:
+                        rows = PER_PIXEL[name](pm, smu, smile, (px["X"], px["Y"]),
+                                               cfg, args, log)
+                    except Exception as exc:
+                        log(f"    {name} FAILED on ({px['X']},{px['Y']}): "
+                            f"{type(exc).__name__}: {exc}")
+                        log("    continuing with the next experiment; "
+                            "data so far is already on disk")
+                        continue
                     for r in rows:
                         r.update(pixel_x=px["X"], pixel_y=px["Y"], quadrant=px["quadrant"],
                                  turnon_W=p_on, dark_W=dark)
                     collected[name].extend(rows)
+                    # flush after every experiment, so a later crash keeps this
+                    write_csv(out_dir, name, collected[name])
     finally:
         m.shutdown(pm, smu, smile, cfg)
-
-    log("=" * 56)
-    wrote = [p for p in (write_csv(out_dir, n, r) for n, r in collected.items()) if p]
-    for p in wrote:
-        log(f"wrote {p}")
-    if not wrote:
-        log("no data written")
+        # Writing in the finally is the point: previously an exception here skipped
+        # the writes entirely and a run that died partway lost every completed row.
+        log("=" * 56)
+        wrote = [p for p in (write_csv(out_dir, n, r) for n, r in collected.items()) if p]
+        for p in wrote:
+            log(f"wrote {p}")
+        if not wrote:
+            log("no data written")
     return 0
 
 
