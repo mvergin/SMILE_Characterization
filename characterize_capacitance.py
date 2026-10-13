@@ -76,6 +76,9 @@ DEFAULT_VOLTAGES = [-0.6, -0.7, -0.8, -0.9, -1.0, -1.1, -1.3, -1.8, -2.6]
 # noisily but WRONG" before, which is the thing to explain.
 DEFAULT_RANGES = [1e-3, 1e-4, 1e-5, 1e-6, 1e-7]
 QUADRANTS = ("TL", "TR", "BL", "BR")
+# The 2600 returns 9.91e37 for an over-range reading. It is a sentinel, not a number:
+# left in, it poisons every median and max it touches.
+OVERFLOW = 1e36
 
 
 def to_j(i_a, cfg):
@@ -191,27 +194,94 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.001, settle_first_s=2.0):
 def settling_metrics(t, i):
     """Settled value plus how long it took to get there.
 
-    Settled = median of the last 20%. "Time to x%" is the LAST time the trace is
-    still outside x% of it: a trace that re-enters the band and leaves again has
-    not settled.
+    Settled = median of the last 20% of the VALID samples. "Time to x%" is the LAST
+    time the trace is outside x% of it, because a trace that re-enters the band and
+    leaves again has not settled.
+
+    Three columns to read carefully:
+      * ``t_*pct`` is NaN when the trace is STILL outside the band at the end of the
+        record. It did not settle in the time captured, so raise --samples. 0.0 means
+        it was inside the band from the first valid sample.
+      * ``settled_ok`` is False exactly when t_1pct is NaN.
+      * ``n_overflow`` counts over-range samples. Anything above zero means the
+        measure range was too small for the transient, even if the settled value fits.
     """
-    if t.size < 10:
-        return dict(settled=float("nan"), t_1pct=float("nan"), t_01pct=float("nan"),
-                    overshoot=float("nan"), ripple=float("nan"), n=int(t.size))
-    tail = i[int(0.8 * i.size):]
+    valid = np.isfinite(i) & (np.abs(i) < OVERFLOW)
+    base = dict(n=int(t.size), n_overflow=int((~valid).sum()), settled=float("nan"),
+                t_1pct=float("nan"), t_01pct=float("nan"), overshoot=float("nan"),
+                ripple=float("nan"), settled_ok=False, tail_noise=float("nan"),
+                t_1pct_tol=float("nan"), t_01pct_tol=float("nan"),
+                tail_drift_frac=float("nan"), smooth_window=0)
+    if valid.sum() < 10:
+        return base
+    tv, iv = t[valid], i[valid]
+    tail = iv[int(0.8 * iv.size):]
     settled = float(np.median(tail))
-    out = dict(settled=settled, n=int(t.size),
-               ripple=float(np.std(tail) / abs(settled)) if settled else float("nan"),
-               overshoot=float(np.max(np.abs(i)) / abs(settled)) if settled else float("nan"))
+    base.update(settled=settled,
+                ripple=float(np.std(tail) / abs(settled)) if settled else float("nan"),
+                overshoot=float(np.max(np.abs(iv)) / abs(settled)) if settled else float("nan"))
+    # The band has to respect the measurement noise. A trace with 3% ripple can never
+    # enter a 1% band, so a pure-fraction criterion reports NaN forever and tells you
+    # nothing about settling. "Settled" therefore means indistinguishable from the
+    # final value GIVEN the noise: within frac, or within 3 sigma of the tail.
+    noise = float(np.std(tail))
+    base["tail_noise"] = noise
+    # Smooth before the band test, and use 5 sigma rather than 3. With 3 sigma about
+    # 0.3% of samples sit outside the band by chance, so on a noisy trace the LAST such
+    # sample is near the end almost always and t_1pct just reports the record length.
+    # Smoothing removes single-sample excursions; 5 sigma makes a chance excursion
+    # negligible even over thousands of samples. When the noise is larger than the
+    # nominal band the tolerance is noise-dominated, which is honest -- 2% per-sample
+    # noise cannot resolve 1% settling. t_*pct_tol records the tolerance actually used.
+    w = max(5, iv.size // 100)
+    smooth = np.convolve(iv, np.ones(w) / w, mode="valid")
+    ts = tv[w - 1:]
+    base["smooth_window"] = int(w)
     for frac, key in ((0.01, "t_1pct"), (0.001, "t_01pct")):
-        bad = np.nonzero(np.abs(i - settled) > frac * abs(settled))[0]
-        out[key] = float(t[bad[-1]]) if bad.size and bad[-1] + 1 < t.size else 0.0
-    return out
+        tol = max(frac * abs(settled), 5.0 * noise / np.sqrt(w))
+        base[key + "_tol"] = tol
+        bad = np.nonzero(np.abs(smooth - settled) > tol)[0]
+        if bad.size == 0:
+            base[key] = 0.0                     # in band from the first valid sample
+        elif bad[-1] + 1 >= smooth.size:
+            base[key] = float("nan")            # never settled inside the record
+        else:
+            base[key] = float(ts[bad[-1]])
+    # A short record can LOOK settled, because "settled" is measured against the end
+    # of that same record: a slow exponential still climbing looks flat over its last
+    # 20%. So test the tail for a trend as well. A tail that is still drifting means
+    # the capture was too short, whatever t_1pct says.
+    tail_t = tv[int(0.8 * tv.size):]
+    drift = float("nan")
+    if tail_t.size > 2 and settled:
+        slope = float(np.polyfit(tail_t, tail, 1)[0])            # A/s
+        # extrapolate over the window the slope was fitted on, not the whole record:
+        # multiplying by the full record over-states the drift of an exponential tail
+        drift = abs(slope * (tail_t[-1] - tail_t[0])) / abs(settled)
+    base["tail_drift_frac"] = drift
+    base["settled_ok"] = bool(np.isfinite(base["t_1pct"])
+                              and (not np.isfinite(drift) or drift < 0.01))
+    return base
 
 
 # ----------------------------------------------------------------------
 #  per-pixel experiments
 # ----------------------------------------------------------------------
+
+def drain_errors(smu):
+    """The SMU error queue as one string, empty when clean.
+
+    Called after every range change and every capture, and recorded in the CSV.
+    Checking only once at configure time misses a range the SMU refused later and a
+    measurement that over-ranged during the transient.
+    """
+    if not hasattr(smu, "check_error_queue"):
+        return ""
+    try:
+        return " | ".join(smu.check_error_queue())
+    except Exception as exc:
+        return f"error-queue read failed: {exc}"
+
 
 def exp_step(pm, smu, smile, pixel, cfg, args, log):
     """I(t) after a voltage step, per voltage x range x High-C state."""
@@ -224,19 +294,29 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
             if rng is not None:
                 m.set_measure_range_b(smu, rng)
                 time.sleep(0.05)
+            err_range = drain_errors(smu)
+            if err_range:
+                log(f"    SMU rejected range {rng}: {err_range}")
             for v in args.voltages:
                 t, ia, ib = capture_step(smu, args.v_start, v, args.samples, args.nplc)
                 met = settling_metrics(t, np.abs(ib))
+                ia_ok = ia[np.isfinite(ia) & (np.abs(ia) < OVERFLOW)] if ia.size else ia
+                err = (err_range + " " + drain_errors(smu)).strip()
                 rows.append(dict(highc=highc, range_i=rng if rng is not None else "limit",
+                                 compliance_a=cfg.nvled_compliance, nplc=args.nplc,
                                  v_from=args.v_start, v_to=v, **met,
                                  j_settled=to_j(met["settled"], cfg),
-                                 i_a_settled=float(np.median(ia[int(0.8 * ia.size):]))
-                                 if ia.size else float("nan"),
-                                 record_s=float(t[-1]) if t.size else 0.0))
+                                 i_a_settled=float(np.median(ia_ok[int(0.8 * ia_ok.size):]))
+                                 if ia_ok.size else float("nan"),
+                                 record_s=float(t[-1]) if t.size else 0.0,
+                                 smu_errors=err))
                 log(f"    highc={highc!s:5} range={str(rng):>7} V={v:+.2f}  "
-                    f"I={met['settled']*1e9:+9.1f} nA (J={to_j(met['settled'], cfg):+7.3f})  "
-                    f"t1%={met['t_1pct']:.3f}s t0.1%={met['t_01pct']:.3f}s "
-                    f"ripple={100*met['ripple']:.1f}%")
+                    f"I={met['settled']*1e9:+10.1f} nA (J={to_j(met['settled'], cfg):+8.2f})  "
+                    f"t1%={met['t_1pct']:.3f} t0.1%={met['t_01pct']:.3f}  "
+                    f"ripple={100*met['ripple']:.0f}%  over={met['n_overflow']}/{met['n']}  "
+                    f"rec={float(t[-1]) if t.size else 0:.2f}s"
+                    + ("  << NOT SETTLED" if not met["settled_ok"] else "")
+                    + (f"  ERR: {err}" if err else ""))
     smile.blank_frame()
     return rows
 
@@ -453,8 +533,18 @@ def build_parser():
     ap.add_argument("--voltages", nargs="+", type=float, default=DEFAULT_VOLTAGES)
     ap.add_argument("--ranges", nargs="+", type=float, default=DEFAULT_RANGES)
     ap.add_argument("--v-start", type=float, default=-2.6, help="voltage to step FROM")
-    ap.add_argument("--samples", type=int, default=2000, help="buffer samples per step")
-    ap.add_argument("--nplc", type=float, default=0.001, help="integration time for I(t)")
+    ap.add_argument("--samples", type=int, default=6000,
+                    help="buffer samples per step. record_s in the CSV says how much time "
+                         "that bought; raise it until the record outlasts the settling")
+    ap.add_argument("--nplc", type=float, default=0.01,
+                    help="integration time for I(t). 0.001 is the SMU minimum but gave "
+                         "60-99%% ripple and unusable magnitudes on the bench; 0.01 trades "
+                         "5x time resolution for a reading you can believe")
+    ap.add_argument("--compliance", type=float, default=None,
+                    help="ch B current limit (A). In High-C mode the LIMIT selects the "
+                         "measure range, so the 0.5 A default gives mA-level resolution and "
+                         "the reading is pure noise. Use ~1e-3: still charges 25 uC in 25 ms, "
+                         "but resolves microamps")
     ap.add_argument("--highc", action="store_true", help="run with High-C enabled")
     ap.add_argument("--highc-both", action="store_true",
                     help="run the step experiment with High-C both off and on")
@@ -491,6 +581,11 @@ def main(argv=None):
     what = list(ALL) if "all" in args.what else args.what
     log = m.make_logger()
     cfg = IQEConfig(highc_b=args.highc)
+    if args.compliance is not None:
+        cfg = dataclasses.replace(cfg, nvled_compliance=args.compliance)
+        log(f"ch B current limit set to {args.compliance:g} A"
+            + (" (this also selects the High-C measure range)" if args.highc or args.highc_both
+               else ""))
 
     root = Path(args.out) if args.out else Path(cfg.base_dir)
     out_dir = root / f"{datetime.datetime.now():%y%m%d-%H%M}_CAPACITANCE"
@@ -499,6 +594,9 @@ def main(argv=None):
     if args.simulate:
         log("SIMULATION - plumbing only, the sim rig has no capacitance model.")
 
+    if args.samples > 50000:
+        log(f"WARNING: --samples {args.samples} may exceed the SMU buffer; "
+            f"check record_s and n in the CSV against what you asked for")
     pm, smu, smile = m.connect(cfg, log, simulate=args.simulate)
     collected: dict[str, list[dict]] = {name: [] for name in what}
     try:
