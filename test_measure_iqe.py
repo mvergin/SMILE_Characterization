@@ -10,8 +10,10 @@ directory, so it touches no measurement data.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import dataclasses
+import io
 import json
 import tempfile
 from pathlib import Path
@@ -223,14 +225,37 @@ def test_dead_pixel_abort_skips_the_rest_of_the_sweep():
         assert result.n_points == result.n_pixels, "one point measured per dead-skipped pixel"
 
 
+def _cli(argv) -> tuple[int, str]:
+    """Run the CLI with its output captured, returning (exit code, stdout+stderr).
+
+    These assertions are about exit codes and files. Letting the CLI print would
+    bury the test results under a full config dump, the parameter table and a run
+    log — which reads like a failure even when everything passes. Both streams are
+    captured because config errors correctly go to stderr.
+    """
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        code = cli_main(argv)
+    return code, buf.getvalue()
+
+
+def test_cli_reports_a_bad_config_key_and_exits_2():
+    """Deliberate negative test: `no_such_field` is not an IQEConfig field, so the
+    CLI must refuse it by name rather than ignore it."""
+    code, out = _cli(["--set", "no_such_field=1"])
+    assert code == 2, "an unknown config key must be a hard error"
+    assert "no_such_field" in out, "the error must name the offending key"
+
+
 def test_cli_runs_a_simulated_measurement():
     with tempfile.TemporaryDirectory() as tmp:
-        assert cli_main(["--print-config"]) == 0
-        assert cli_main(["--list-params"]) == 0
-        assert cli_main(["--set", "nonsense=1"]) == 2
+        code, out = _cli(["--print-config"])
+        assert code == 0 and '"sample_name"' in out
+        code, out = _cli(["--list-params"])
+        assert code == 0 and "min_pixel_separation" in out
         argv = ["--simulate", "--out", tmp, "--set", "roi=[0,0,3,3]", "--set", "block_size=4",
                 "--set", "pixels_per_block=1", "--set", "n_fine=4", "--set", "warmup_ms=0"]
-        assert cli_main(argv) == 0
+        assert _cli(argv)[0] == 0
         assert list(Path(tmp).glob("*/NVLEDSweep/Sweep/*.csv")), "CLI produced no sweep output"
 
 
