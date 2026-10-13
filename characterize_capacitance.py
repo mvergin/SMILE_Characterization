@@ -381,10 +381,21 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                 # The node is settled by now, so read the light too: at these currents
                 # it is well above the measured optical floor, which turns a settling
                 # characterisation into an EQE point for free.
-                pw, pw_sem = read_power(pm, args.step_n_pm)
+                pw_lit, pw_sem = read_power(pm, args.step_n_pm)
+                # At these currents the emission reaches single-digit pW, where the
+                # PM400's own offset (+/-7 pW, sign-random) is the same size as the
+                # signal. So measure the dark at THIS bias, not once per run: blank the
+                # pixel, read, relight. The next capture has its own pre-settle.
+                pw_dark = args.dark_w
+                if args.step_dark:
+                    smile.blank_frame()
+                    time.sleep(0.05)
+                    pw_dark, _ = read_power(pm, args.step_n_pm)
+                    smile.set_pixel(pixel[0], pixel[1], cfg.bitvals[0])
+                pw = pw_lit - pw_dark
                 eqe = float("nan")
                 if np.isfinite(met["settled"]) and met["settled"]:
-                    eqe = ((pw - args.dark_w) / cfg.photon_energy_j) / (
+                    eqe = (pw / cfg.photon_energy_j) / (
                         abs(met["settled"]) / 1.602176634e-19)
                 err = (err_range + " " + drain_errors(smu)).strip()
                 # A limit below the current the LED wants at this bias means the SMU
@@ -400,7 +411,9 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                                  at_compliance=at_lim,
                                  v_from=args.v_start, v_to=v, **met,
                                  j_settled=to_j(met["settled"], cfg),
-                                 power_W=pw, power_sem=pw_sem, eqe_ext=eqe,
+                                 power_W=pw, power_lit_W=pw_lit, power_dark_W=pw_dark,
+                                 power_sem=pw_sem, eqe_ext=eqe,
+                                 power_sigma=abs(pw) / pw_sem if pw_sem else float("nan"),
                                  i_a_settled=float(np.median(ia_ok[int(0.8 * ia_ok.size):]))
                                  if ia_ok.size else float("nan"),
                                  record_s=float(t[-1]) if t.size else 0.0,
@@ -408,7 +421,8 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                 log(f"    highc={highc!s:5} range={str(rng):>7} V={v:+.2f}  "
                     f"I={met['settled']*1e9:+10.1f} nA (J={to_j(met['settled'], cfg):+8.2f})  "
                     f"t1%={met['t_1pct']:.3f} t0.1%={met['t_01pct']:.3f}  "
-                    f"P={pw*1e12:+9.1f}pW EQE={100*eqe:6.3f}%  "
+                    f"P={pw*1e12:+9.1f}pW({abs(pw)/pw_sem if pw_sem else 0:4.0f}sig) "
+                    f"EQE={100*eqe:6.3f}%  "
                     f"ripple={100*met['ripple']:.0f}%  over={met['n_overflow']}/{met['n']}  "
                     f"rec={float(t[-1]) if t.size else 0:.2f}s"
                     + ("  << NOT SETTLED" if not met["settled_ok"] else "")
@@ -687,6 +701,13 @@ def build_parser():
     ap.add_argument("--step-n-pm", type=int, default=512,
                     help="PM reads after each step capture. 512 gives a ~7.6 pW 3-sigma "
                          "floor (measured), against ~219 pW at J=0.25")
+    ap.add_argument("--step-dark", action=argparse.BooleanOptionalAction, default=True,
+                    help="measure the optical dark at each bias by blanking the pixel. "
+                         "Required below ~100 pW, where the PM offset rivals the signal")
+    ap.add_argument("--pm-range", type=float, default=None,
+                    help="override the PM400 range (W). The floor was measured at the "
+                         "1e-7 default; a lower range may lower it, which is the cheapest "
+                         "route to usable light below J~0.4")
     ap.add_argument("--dark-w", type=float, default=0.0,
                     help="optical dark level to subtract (W). The measured offset is "
                          "under 7 pW and sign-random, so 0 is usually right")
@@ -709,6 +730,9 @@ def main(argv=None):
     what = list(ALL) if "all" in args.what else args.what
     log = m.make_logger()
     cfg = IQEConfig(highc_b=args.highc)
+    if args.pm_range is not None:
+        cfg = dataclasses.replace(cfg, pm_range=args.pm_range)
+        log(f"PM400 range set to {args.pm_range:g} W")
     if args.compliance is not None:
         cfg = dataclasses.replace(cfg, nvled_compliance=args.compliance)
         log(f"ch B current limit set to {args.compliance:g} A"

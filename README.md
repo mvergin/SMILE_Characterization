@@ -630,10 +630,46 @@ Settling at low J is **tens of seconds**, exactly as `C·ΔV/I` predicts. A sepa
 50000-sample run confirmed it: at −0.70 V from −2.6 V, `t_1pct` was 52.3 s of a
 53.0 s record, where an 11 s record had reported not-settled.
 
-The light is not the constraint here. At J = 0.25 the emission is ~219 pW against
-the measured 7.6 pW 3σ floor at `n_pm` 512 — 29σ, or 6σ even if EQE is 5× below
-its peak. `exp_step` therefore reads the PM400 after each capture and records
-`power_W` and `eqe_ext`, so a settling run doubles as an EQE point.
+**Current is now path-independent.** The same three biases reached from −1.00 V,
+−0.90 V and −0.75 V agree to 0.6–1.2%, so the capacitive history error is gone:
+
+| V | from −0.90 | from −1.00 | from −0.75 | spread |
+|---|---|---|---|---|
+| −0.85 | 925.7 nA | 923.6 nA | 917.9 nA | 0.9% |
+| −0.80 | 447.5 nA | 443.4 nA | 441.9 nA | 1.2% |
+| −0.70 | 248.6 nA | 249.9 nA | 249.2 nA | 0.6% |
+
+### The light runs out before the current does
+
+`exp_step` reads the PM400 after each capture and records `power_W` and
+`eqe_ext`. Doing that revealed that the optical signal, not the SMU, now sets the
+low-J limit:
+
+| V | I | J | P | P/I | EQE |
+|---|---|---|---|---|---|
+| −1.35 | 30.5 µA | 30.5 | 60 nW | 1.97 mW/A | 0.070% |
+| −0.85 | 923.6 nA | 0.92 | 984 pW | 1.07 mW/A | 0.038% |
+| −0.80 | 443.4 nA | 0.44 | 233 pW | 0.53 mW/A | 0.019% |
+| −0.70 | 249.9 nA | 0.25 | **6.5 pW** | 0.026 mW/A | 0.001% |
+
+`P/I` halves smoothly down to J = 0.44 and then falls 20× in one step — and the
+−0.70 V readings (6.5 pW and 8.0 pW on two runs) sit **on** the measured 7.6 pW
+3σ floor. That point is censored by the detector, so whether EQE truly collapses
+there cannot be read from this data.
+
+**The practical IQE floor is therefore J ≈ 0.4, not 0.1.** At J = 0.44 the signal
+is 233 pW, about 90σ. The earlier estimate of 219 pW at J = 0.25 assumed EQE stays
+at its peak value; the real EQE there is ~37× lower, so that estimate was 30× too
+optimistic.
+
+Two things follow, both implemented:
+
+* `--step-dark` (on by default) measures the optical dark **at each bias** by
+  blanking the pixel. Below ~100 pW the PM400's own ±7 pW sign-random offset is
+  the same size as the signal, so a single dark per run is not enough.
+* `--pm-range` overrides the PM400 range. The floor was measured at the `1e-7`
+  default, and a lower range is the cheapest route to usable light below J ≈ 0.4 —
+  worth an `optfloor` sweep across ranges before investing in optics.
 
 **No single limit can span the sweep.** At −2.6 V the LED wants ~175 µA, which a
 10 µA limit cannot supply, so it cannot reach the droop side at all; and 1 mA
