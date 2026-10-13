@@ -98,19 +98,45 @@ def read_power(pm, n):
     return float(a.mean()), float(a.std(ddof=1) / np.sqrt(a.size)) if a.size > 1 else 0.0
 
 
+def charge_time_s(capacitance, dv, limit_a):
+    """How long the SMU needs to move the array capacitance through dv at its limit.
+
+    The limit is the only current available to charge C, so this is a hard floor on
+    any settle time. It is what made a 10 uA limit look like a dead array: 50 uF
+    through 1.35 V at 10 uA is 6.75 s, and the liveness check waited 10 ms.
+    """
+    if not limit_a:
+        return 0.0
+    return abs(capacitance * dv / limit_a)
+
+
 def check_alive(pm, smu, smile, cfg, x, y, args, log):
-    """Fast turn-on check. Returns (power_W, dark_W, alive)."""
+    """Fast turn-on check. Returns (power_W, dark_W, alive).
+
+    Deliberately uses its own channel-B setup rather than the measurement one. This
+    is a go/no-go light check, not a measurement, so it wants a healthy current
+    limit to charge the array fast. Inheriting a low measurement compliance made
+    every pixel read dead, because the node had not reached the bias yet. Every
+    experiment reconfigures ch B itself, so changing it here is safe.
+    """
+    probe = dataclasses.replace(cfg, highc_b=False,
+                                nvled_compliance=args.alive_compliance)
+    m.configure_voltage_source_b(smu, probe, log)
+    settle = max(cfg.fastscan_settle_ms / 1000.0, 0.01,
+                 3 * charge_time_s(args.capacitance, cfg.nvled_v_fastscan,
+                                   args.alive_compliance))
     smile.blank_frame()
-    time.sleep(0.02)
-    dark, _ = read_power(pm, args.alive_n_pm)
     smu.set_voltage("b", cfg.nvled_v_fastscan)
+    time.sleep(settle)
+    dark, _ = read_power(pm, args.alive_n_pm)
     smile.set_pixel(x, y, cfg.fastscan_bitval)
-    time.sleep(max(cfg.fastscan_settle_ms, 10.0) / 1000.0)
+    time.sleep(settle)
     p, _ = read_power(pm, args.alive_n_pm)
     smile.blank_frame()
     alive = (p - dark) >= args.alive_nw * 1e-9
     log(f"    ({x},{y}) turn-on {(p-dark)*1e9:+8.2f} nW over dark "
-        f"{dark*1e9:+.2f} nW -> {'ALIVE' if alive else 'DEAD, skipping'}")
+        f"{dark*1e9:+.2f} nW  (probe limit {args.alive_compliance:g} A, "
+        f"settle {settle*1e3:.0f} ms) -> {'ALIVE' if alive else 'DEAD, skipping'}")
     return p, dark, alive
 
 
@@ -166,7 +192,8 @@ def select_pixels(pm, smu, smile, cfg, args, log):
 # ----------------------------------------------------------------------
 
 def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
-                 chunk=2000, log=None):
+                 chunk=2000, log=None, limit_a=None, capacitance=50e-6,
+                 max_presettle_s=60.0):
     """Step ch B from v_from to v_to, then burst-capture I(t) with timestamps.
 
     Returns (t, i_a, i_b), t in seconds from the first sample. Instrument
@@ -184,7 +211,17 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
     m.set_nplc(smu, nplc)
     smu.setup_buffers(timestamps=True)
     smu.set_voltage("b", float(v_from))
-    time.sleep(settle_first_s)                 # start from a known, settled state
+    # The pre-settle has to clear the charge time at the configured limit, or the
+    # capture starts before the node has reached v_from and measures the wrong state.
+    want = max(settle_first_s, 3 * charge_time_s(capacitance, v_from, limit_a))
+    pre = min(want, max_presettle_s)
+    if want > max_presettle_s and log:
+        log(f"      pre-settle CAPPED at {pre:.0f}s, charge needs {want:.0f}s at "
+            f"{limit_a:g} A — the node may not have reached {v_from:+.2f} V. "
+            f"Raise --max-presettle-s or the limit.")
+    elif pre > settle_first_s and log:
+        log(f"      pre-settle {pre:.1f}s (charge-limited at {limit_a:g} A)")
+    time.sleep(pre)                            # start from a known, settled state
     smu.clear_buffers_only()
     smu.set_voltage("b", float(v_to))          # the step
     if not hasattr(smu, "inst"):               # sim rig: no TSP, no instrument clock
@@ -335,12 +372,24 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                 log(f"    SMU rejected range {rng}: {err_range}")
             for v in args.voltages:
                 t, ia, ib = capture_step(smu, args.v_start, v, args.samples, args.nplc,
-                                     chunk=args.chunk, log=log)
+                                     chunk=args.chunk, log=log,
+                                     limit_a=cfg.nvled_compliance,
+                                     capacitance=args.capacitance,
+                                     max_presettle_s=args.max_presettle_s)
                 met = settling_metrics(t, np.abs(ib))
                 ia_ok = ia[np.isfinite(ia) & (np.abs(ia) < OVERFLOW)] if ia.size else ia
                 err = (err_range + " " + drain_errors(smu)).strip()
+                # A limit below the current the LED wants at this bias means the SMU
+                # is in compliance: it is current-sourcing and the node never reached
+                # the requested voltage, so v_to is not the operating point.
+                at_lim = bool(np.isfinite(met["settled"])
+                              and abs(met["settled"]) >= 0.95 * cfg.nvled_compliance)
+                if at_lim:
+                    log(f"      at compliance ({cfg.nvled_compliance:g} A): V={v:+.2f} is "
+                        f"not reachable at this limit, the node is current-limited")
                 rows.append(dict(highc=highc, range_i=rng if rng is not None else "limit",
                                  compliance_a=cfg.nvled_compliance, nplc=args.nplc,
+                                 at_compliance=at_lim,
                                  v_from=args.v_start, v_to=v, **met,
                                  j_settled=to_j(met["settled"], cfg),
                                  i_a_settled=float(np.median(ia_ok[int(0.8 * ia_ok.size):]))
@@ -380,7 +429,10 @@ def exp_cap(pm, smu, smile, pixel, cfg, args, log):
             if abs(dv) < 1e-6:
                 continue
             t, _ia, ib = capture_step(smu, args.v_start, v, args.samples, args.nplc,
-                                     chunk=args.chunk, log=log)
+                                     chunk=args.chunk, log=log,
+                                     limit_a=cfg.nvled_compliance,
+                                     capacitance=args.capacitance,
+                                     max_presettle_s=args.max_presettle_s)
             if t.size < 10:
                 continue
             base = float(np.median(ib[int(0.8 * ib.size):]))
@@ -438,7 +490,10 @@ def exp_stepdir(pm, smu, smile, pixel, cfg, args, log):
     time.sleep(0.05)
     for v_from in args.stepdir_from:
         t, _ia, ib = capture_step(smu, v_from, args.stepdir_target, args.samples, args.nplc,
-                                     chunk=args.chunk, log=log)
+                                     chunk=args.chunk, log=log,
+                                     limit_a=cfg.nvled_compliance,
+                                     capacitance=args.capacitance,
+                                     max_presettle_s=args.max_presettle_s)
         met = settling_metrics(t, np.abs(ib))
         rows.append(dict(v_from=v_from, v_to=args.stepdir_target,
                          dv=args.stepdir_target - v_from, **met))
@@ -566,6 +621,10 @@ def build_parser():
     ap.add_argument("--alive-nw", type=float, default=2.0,
                     help="turn-on power over dark (nW) for a pixel to count as alive")
     ap.add_argument("--alive-n-pm", type=int, default=8, help="PM reads for the liveness check")
+    ap.add_argument("--alive-compliance", type=float, default=1e-3,
+                    help="ch B limit used for the liveness check only. Kept healthy on "
+                         "purpose: the limit is the charging current, so a low measurement "
+                         "compliance makes every pixel read dead")
     ap.add_argument("--out", default=None, help="output root (default: config base_dir)")
     ap.add_argument("--simulate", action="store_true",
                     help="plumbing only - the sim rig has no capacitance model")
@@ -609,6 +668,10 @@ def build_parser():
                     help="ch B source current range while holding 0 A. The finest range "
                          "minimises the regulation error that would add to the decay "
                          "current; the blanked run cancels what is left")
+    ap.add_argument("--max-presettle-s", type=float, default=60.0,
+                    help="cap on the charge-derived pre-settle before each capture. The "
+                         "charge time is C*dV/limit, which at a 1 uA limit is minutes per "
+                         "point; exceeding the cap is logged as a warning")
     ap.add_argument("--capacitance", type=float, default=50e-6,
                     help="C used to turn dV/dt into a current; refine it with --what cap")
     ap.add_argument("--optfloor-n", nargs="+", type=int, default=[4, 8, 32, 128, 512])
