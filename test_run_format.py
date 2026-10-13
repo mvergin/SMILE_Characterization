@@ -105,6 +105,29 @@ def test_trace_keys_decode():
     assert "wat" in pt.label_of("000_step_wat_v-0.800_1")
 
 
+def test_run_settings_names_the_limit():
+    """The compliance limit must reach the figure: in High-C it selects the range."""
+    import json
+    import tempfile
+    import plot_transients as pt
+
+    with tempfile.TemporaryDirectory() as d:
+        run = Path(d)
+        (run / "run_config.json").write_text(json.dumps({"config": {}, "args": {
+            "v_start": -1.0, "compliance": 1e-5, "charge_limit": 1e-3,
+            "nplc": 0.01, "highc": True, "pixels": ["124,135"]}}), encoding="utf-8")
+        got = pt.run_settings(run)
+        for want in ("-1.000 V", "limit 10 uA", "charged at 1 mA", "NPLC 0.01",
+                     "High-C", "124,135"):
+            assert want in got, f"{want!r} missing from {got!r}"
+
+        # a run directory without the config must not crash a plot
+        (run / "run_config.json").unlink()
+        assert pt.run_settings(run) == ""
+
+    assert pt.si(1e-5) == "10 uA" and pt.si(3.2e-7) == "320 nA", pt.si(1e-5)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

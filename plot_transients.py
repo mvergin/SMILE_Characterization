@@ -38,6 +38,48 @@ def load_traces(run_dir: Path) -> dict[str, np.ndarray]:
         return {k: d[k] for k in d.files}
 
 
+def si(x, unit="A"):
+    """3.2e-07 -> "320 nA". Plot labels, not data."""
+    if x is None or not np.isfinite(x) or x == 0:
+        return f"{x}"
+    for scale, p in ((1, ""), (1e-3, "m"), (1e-6, "u"), (1e-9, "n"), (1e-12, "p")):
+        if abs(x) >= scale:
+            return f"{x/scale:g} {p}{unit}"
+    return f"{x:g} {unit}"
+
+
+def run_settings(run_dir: Path) -> str:
+    """The run-wide settings, for the figure subtitle.
+
+    These do not vary between captures, so they are not in the trace key -- but
+    without them a plot is unreadable. The compliance limit above all: in High-C the
+    limit also selects the measure range, so it is the single most important number
+    on the figure, and it appears nowhere in the key or the trace.
+    """
+    import json
+    p = run_dir / "run_config.json"
+    if not p.exists():
+        return ""
+    try:
+        a = json.load(p.open(encoding="utf-8")).get("args", {})
+    except (ValueError, OSError):
+        return ""
+    bits = []
+    if a.get("v_start") is not None:
+        bits.append(f"stepped from {a['v_start']:+.3f} V")
+    if a.get("compliance"):
+        bits.append(f"limit {si(a['compliance'])}")
+    if a.get("charge_limit"):
+        bits.append(f"charged at {si(a['charge_limit'])} first")
+    if a.get("nplc") is not None:
+        bits.append(f"NPLC {a['nplc']:g}")
+    if a.get("highc"):
+        bits.append("High-C: the limit sets the range")
+    if a.get("pixels"):
+        bits.append(f"pixel {','.join(map(str, a['pixels']))}")
+    return "   ".join(bits)
+
+
 def parse_key(key: str) -> dict:
     """Decode a traces.npz key into its settings.
 
@@ -147,6 +189,7 @@ def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    settings = run_settings(run_dir)
     keys = sorted(traces)
     n = len(keys)
     ncol = min(3, n)
@@ -228,6 +271,7 @@ def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
     cx.set_xlabel("time after the voltage step (s)")
     cx.set_ylabel("|I − I∞| / I∞  (%)")
     cx.set_title(f"how the current approaches its final value — {run_dir.name}\n"
+                 f"{settings}\n"
                  "a straight line here is a power law, not an exponential", fontsize=9)
     cx.legend(fontsize=8)
     cx.grid(alpha=0.3, which="both")
@@ -235,11 +279,11 @@ def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
     for f_, a_ in ((fig, ax), (fig2, bx)):
         for j in range(n, nrow * ncol):
             a_[j // ncol][j % ncol].axis("off")
-        f_.tight_layout(rect=(0, 0, 1, 0.94))
+        f_.tight_layout(rect=(0, 0, 1, 0.90))
     fig3.tight_layout()
-    fig.suptitle(f"settling transients — {run_dir.name}", fontsize=11)
-    fig2.suptitle(f"transient spectra — {run_dir.name}  (is a sine riding on it?)",
-                  fontsize=11)
+    fig.suptitle(f"settling transients — {run_dir.name}\n{settings}", fontsize=11)
+    fig2.suptitle(f"transient spectra — {run_dir.name}  (is a sine riding on it?)\n"
+                  f"{settings}", fontsize=11)
     for f_, name in ((fig, "transients.png"), (fig2, "spectra.png"),
                      (fig3, "settling.png")):
         out = run_dir / name
@@ -296,8 +340,9 @@ def plot_isrc(run_dir: Path) -> None:
         ax_.legend(fontsize=8, title="I set")
         ax_.grid(alpha=0.3)
     b.set_yscale("log")
-    fig.suptitle(f"channel B as a current source — {run_dir.name}", fontsize=11)
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.suptitle(f"channel B as a current source — {run_dir.name}\n{run_settings(run_dir)}",
+                 fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
     out = run_dir / "isrc.png"
     fig.savefig(out, dpi=300, bbox_inches="tight")
     print(f"wrote {out}")
