@@ -667,9 +667,30 @@ Two things follow, both implemented:
 * `--step-dark` (on by default) measures the optical dark **at each bias** by
   blanking the pixel. Below ~100 pW the PM400's own ±7 pW sign-random offset is
   the same size as the signal, so a single dark per run is not enough.
-* `--pm-range` overrides the PM400 range. The floor was measured at the `1e-7`
-  default, and a lower range is the cheapest route to usable light below J ≈ 0.4 —
-  worth an `optfloor` sweep across ranges before investing in optics.
+* `--pm-range` overrides the PM400 range. **Measured: it makes no difference.**
+  Five `optfloor` runs across 1e-7, 1e-8 and 1e-9 (three of them the same 1e-9
+  range, one after a PM400 restart) give σ = 2.12 ± 0.46 pW at `n_pm` 512, and the
+  three *identical* runs alone span 1.33–2.57 pW. The run-to-run scatter exceeds
+  any range effect, so the floor is detector-noise-limited and lowering the range
+  buys nothing.
+
+What does work is averaging: the pooled scaling is `σ ∝ N^−0.523`, still ideal.
+
+| `n_pm` | σ | 3σ | s/point | a 5 pW signal is |
+|---|---|---|---|---|
+| 512 | 2.12 pW | 6.35 pW | 2.1 s | 2.4σ |
+| 1024 | 1.50 pW | 4.49 pW | 4.1 s | 3.3σ |
+| 2048 | 1.06 pW | 3.17 pW | 8.3 s | 4.7σ |
+| 4096 | 0.75 pW | 2.24 pW | 16.6 s | 6.7σ |
+
+So J = 0.25 is reachable at `n_pm` 2048–4096, for 8–17 s per point — affordable on
+a sampled subset, and cheaper than reworking the optics. One caveat: the offset at
+`n_pm` 512 was **+2.37 pW and positive in all five runs**, so it is a real pedestal
+rather than noise. Per-point dark subtraction is not optional at these levels.
+
+Every run now writes `run_config.json` with the effective config and arguments.
+Without it the five `optfloor` CSVs were indistinguishable — nothing recorded
+which PM range produced them.
 
 **No single limit can span the sweep.** At −2.6 V the LED wants ~175 µA, which a
 10 µA limit cannot supply, so it cannot reach the droop side at all; and 1 mA

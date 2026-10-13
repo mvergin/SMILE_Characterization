@@ -61,6 +61,7 @@ import argparse
 import csv
 import dataclasses
 import datetime
+import json
 import time
 from pathlib import Path
 
@@ -602,7 +603,8 @@ def exp_optfloor(pm, smu, smile, cfg, args, log):
         per_point_s = (time.perf_counter() - t0) / max(len(reps), 1)
         a = np.asarray(reps, float)
         spread = float(a.std(ddof=1)) if a.size > 1 else float("nan")
-        rows.append(dict(n_pm=n_pm, reps=len(reps), mean_W=float(a.mean()),
+        rows.append(dict(n_pm=n_pm, pm_range=cfg.pm_range, pm_averaging=cfg.pm_averaging,
+                         reps=len(reps), mean_W=float(a.mean()),
                          repeat_std_W=spread,
                          detectable_pW=spread * 3e12,
                          per_point_s=per_point_s,
@@ -743,6 +745,10 @@ def main(argv=None):
     out_dir = root / f"{datetime.datetime.now():%y%m%d-%H%M}_CAPACITANCE"
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"Output: {out_dir}")
+    (out_dir / "run_config.json").write_text(
+        json.dumps({"config": cfg.to_dict(),
+                    "args": {k: v for k, v in sorted(vars(args).items())}},
+                   indent=2, default=str), encoding="utf-8")
     if args.simulate:
         log("SIMULATION - plumbing only, the sim rig has no capacitance model.")
 
