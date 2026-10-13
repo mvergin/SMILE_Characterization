@@ -69,6 +69,34 @@ def amplitude_spectrum(t, i, tail_frac=0.5):
             np.abs(np.fft.rfft(resid * w)) * (4.0 / resid.size))
 
 
+def smooth(i, n):
+    """Moving average over 1% of the record. Returns the window used."""
+    w = max(5, i.size // 100)
+    return np.convolve(i, np.ones(w) / w, mode="valid"), w
+
+
+def settle_time(t, i, settled, frac=0.01):
+    """Last time the smoothed trace was outside the band around `settled`.
+
+    The band is `frac` of the settled value, or 5 sigma of the averaged noise if that
+    is wider -- the same tolerance `characterize_capacitance.py` writes to `t_1pct`,
+    so the marker on the plot matches the number in the CSV. A plain 1% band would
+    report a settling time set by noise at low currents, not by the transient.
+
+    NaN when the trace never gets inside the band. That is the honest answer to "when
+    did it settle?"; do not report 0 for it.
+    """
+    sm, w = smooth(i, i.size)
+    noise = float(np.std(np.diff(i[int(0.8 * i.size):]))) / np.sqrt(2) if i.size > 10 else 0.0
+    tol = max(frac * abs(settled), 5.0 * noise / np.sqrt(w))
+    bad = np.nonzero(np.abs(sm - settled) > tol)[0]
+    if bad.size == 0:
+        return 0.0
+    if bad[-1] + 1 >= sm.size:
+        return float("nan")
+    return float(t[w - 1:][bad[-1]])
+
+
 def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -79,8 +107,9 @@ def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
     ncol = min(3, n)
     nrow = int(np.ceil(n / ncol))
 
-    fig, ax = plt.subplots(nrow, ncol, figsize=(5.2 * ncol, 3.4 * nrow), squeeze=False)
-    fig2, bx = plt.subplots(nrow, ncol, figsize=(5.2 * ncol, 3.4 * nrow), squeeze=False)
+    fig, ax = plt.subplots(nrow, ncol, figsize=(5.2 * ncol, 3.6 * nrow), squeeze=False)
+    fig2, bx = plt.subplots(nrow, ncol, figsize=(5.2 * ncol, 3.6 * nrow), squeeze=False)
+    fig3, cx = plt.subplots(figsize=(7.2, 5.0))
     for idx, key in enumerate(keys):
         a, b = ax[idx // ncol][idx % ncol], bx[idx // ncol][idx % ncol]
         t, _ia, ib = traces[key]
@@ -91,17 +120,41 @@ def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
             continue
 
         settled = float(np.median(ic[int(0.8 * ic.size):]))
-        a.plot(tc, ic * 1e9, lw=0.6, color="tab:blue")
-        a.axhline(settled * 1e9, color="tab:red", ls="--", lw=1,
-                  label=f"settled {settled*1e9:.1f} nA")
-        a.axhspan(settled * 0.99 * 1e9, settled * 1.01 * 1e9, color="tab:red", alpha=0.12,
-                  label="1% band")
-        a.set_xscale("symlog", linthresh=max(tc[1] if tc.size > 1 else 1e-3, 1e-3))
-        a.set_xlabel("t after step (s)")
-        a.set_ylabel("|I| (nA)")
-        a.set_title(label, fontsize=8)
-        a.legend(fontsize=6)
-        a.grid(alpha=0.3, which="both")
+        t1, t01 = settle_time(tc, ic, settled, 0.01), settle_time(tc, ic, settled, 0.001)
+
+        # Linear time axis: the question is "how many seconds", not "how many decades".
+        # The first samples overshoot the settled value by 10-20x, so clip the y axis
+        # to the approach instead of letting the spike set the scale.
+        a.plot(tc, ic * 1e9, lw=0.7, color="tab:blue")
+        a.axhline(settled * 1e9, color="tab:red", ls="--", lw=1.1,
+                  label=f"settled {settled*1e9:,.1f} nA")
+        a.axhspan(settled * 0.99 * 1e9, settled * 1.01 * 1e9, color="tab:red", alpha=0.15,
+                  label="±1% band")
+        for tt, c, nm in ((t1, "tab:green", "1%"), (t01, "tab:olive", "0.1%")):
+            if np.isfinite(tt) and tt > 0:
+                a.axvline(tt, color=c, ls=":", lw=1.2, label=f"settled to {nm}: {tt:.2f} s")
+        a.set_xlim(0, tc[-1])
+        a.set_ylim(0, settled * 1.6 * 1e9)
+        a.set_xlabel("time after the voltage step (s)")
+        a.set_ylabel("|I| through the LED (nA)")
+        a.set_title(label, fontsize=9)
+        a.legend(fontsize=7, loc="lower right")
+        a.grid(alpha=0.3)
+
+        # Same data as a deviation, log-log: this is where the decay law is visible.
+        # Smoothed, or the noise floor buries the straight section.
+        sm, w = smooth(ic, ic.size)
+        dev = np.abs(sm - settled) / abs(settled)
+        ts = tc[w - 1:]
+        m = (ts > 0) & (dev > 0)
+        line, = cx.plot(ts[m], dev[m] * 100, lw=1.0,
+                        label=f"{label.split('_v')[-1]} V   (settled {settled*1e9:,.0f} nA)")
+        fit = m & (ts > 0.8) & (ts < 10) & (dev > 2e-3)
+        if fit.sum() > 20:
+            slope = np.polyfit(np.log(ts[fit]), np.log(dev[fit]), 1)[0]
+            k = int(np.argmax(ts[fit] > 2.0))
+            cx.annotate(f"t^{slope:.1f}", (ts[fit][k], dev[fit][k] * 100), fontsize=8,
+                        color=line.get_color(), textcoords="offset points", xytext=(6, 6))
 
         f, amp = amplitude_spectrum(tc, ic)
         if f.size and np.any(amp[f > 2.0] > 0):
@@ -122,14 +175,28 @@ def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
             b.legend(fontsize=6)
         b.grid(alpha=0.3, which="both")
 
+    cx.set_xscale("log")
+    cx.set_yscale("log")
+    cx.set_ylim(2e-2, None)      # below the 0.1% line is all noise floor
+    cx.axhline(1.0, color="tab:red", ls="--", lw=1, label="1% of settled")
+    cx.axhline(0.1, color="tab:red", ls=":", lw=1, label="0.1% of settled")
+    cx.set_xlabel("time after the voltage step (s)")
+    cx.set_ylabel("|I − I∞| / I∞  (%)")
+    cx.set_title(f"how the current approaches its final value — {run_dir.name}\n"
+                 "a straight line here is a power law, not an exponential", fontsize=9)
+    cx.legend(fontsize=8)
+    cx.grid(alpha=0.3, which="both")
+
     for f_, a_ in ((fig, ax), (fig2, bx)):
         for j in range(n, nrow * ncol):
             a_[j // ncol][j % ncol].axis("off")
-        f_.tight_layout()
-    fig.suptitle(f"settling transients — {run_dir.name}", y=1.0, fontsize=10)
-    fig2.suptitle(f"transient spectra — {run_dir.name} "
-                  f"(is a sine riding on it?)", y=1.0, fontsize=10)
-    for f_, name in ((fig, "transients.png"), (fig2, "spectra.png")):
+        f_.tight_layout(rect=(0, 0, 1, 0.94))
+    fig3.tight_layout()
+    fig.suptitle(f"settling transients — {run_dir.name}", fontsize=11)
+    fig2.suptitle(f"transient spectra — {run_dir.name}  (is a sine riding on it?)",
+                  fontsize=11)
+    for f_, name in ((fig, "transients.png"), (fig2, "spectra.png"),
+                     (fig3, "settling.png")):
         out = run_dir / name
         f_.savefig(out, dpi=140, bbox_inches="tight")
         print(f"wrote {out}")

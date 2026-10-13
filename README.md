@@ -76,9 +76,19 @@ python plot_transients.py "<..._CAPACITANCE>"
 Reads `traces.npz` and the summary CSVs from `characterize_capacitance.py` in the
 measurement repo, and writes into the same run directory:
 
-* `transients.png` — `I(t)` after each voltage step on a log time axis, with the
-  settled value and the 1% band marked
-* `spectra.png` — amplitude spectrum of each trace, mains line marked
+* `transients.png` — `I(t)` after each voltage step, in seconds, with the settled
+  value, the ±1% band and the 1% / 0.1% settling times marked. The y axis is
+  clipped to 1.6x the settled value: the first samples overshoot by 10-20x and
+  would otherwise set the scale and flatten everything worth seeing.
+* `settling.png` — all captures as `|I - I∞| / I∞` on log-log, with the fitted
+  exponent. **This is the one to read.** Straight parallel lines mean the approach
+  is a power law (t^-1.3 on the bench), not an exponential, and where each crosses
+  the 1% line is its settling time.
+* `spectra.png` — amplitude spectrum of each trace's settled tail, mains line marked
+
+The time axis is linear in `transients.png` and log in `settling.png` on purpose.
+An earlier version used `symlog`, which with a 0.5 s `linthresh` invented negative
+time decades and made both unreadable.
 
 The spectra answer one specific question: **is a sine riding on the transient?**
 The SMU integrates `NPLC × 20 ms` and only an *integer* NPLC nulls the mains line,
