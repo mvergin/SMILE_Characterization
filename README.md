@@ -538,13 +538,35 @@ fast-scan point (~22 nW at 25 µA):
 | 0.1 | 100 nA | ~88 pW | ~44 pW |
 | 0.03 | 30 nA | ~26 pW | ~13 pW |
 
-The config notes put the optical noise floor near 100 pW at light averaging,
-which puts J = 0.1 **at or under the floor**. Since the SEM falls as `1/√N_PM`,
-going from `N_PM` 8 to 512 buys 8× — a ~12 pW floor, which makes J = 0.1 a
-few-sigma measurement and J = 0.3 comfortable. That is why `optfloor` exists:
-measure the real floor before planning the sweep, instead of trusting the 100 pW
-estimate. If J = 0.1 has to be solid, the fix is optical collection, not
-averaging.
+**Measured** (`optfloor`, 261013, array blanked, 12 reps per point):
+
+| `n_pm` | offset | repeatability σ | 3σ detectable | min J at 3σ (flat EQE) |
+|---|---|---|---|---|
+| 4 | −3.3 pW | 36.0 pW | 108 pW | 0.123 |
+| 8 | −6.5 pW | 16.3 pW | 48.8 pW | 0.055 |
+| 32 | +4.0 pW | 7.7 pW | 23.0 pW | 0.026 |
+| 128 | −3.6 pW | 5.7 pW | 17.1 pW | 0.019 |
+| 512 | −1.4 pW | 2.5 pW | 7.6 pW | 0.009 |
+
+Two things to take from that. The dark **offset is negligible** — under 7 pW and
+sign-random, so there is no pedestal to subtract. And the noise is **ideal white
+noise**: a log-log fit gives `σ ∝ N^−0.499` across 128× in `n_pm`, so no
+systematic floor has been reached and averaging keeps buying sensitivity.
+
+The `min_j_3sigma` column assumes EQE at the target J equals EQE at the −1.35 V
+fast-scan point (J ≈ 25), so it is a **best case**. If EQE at the target is a
+factor `f` lower, the detectable J scales by `f`:
+
+| `n_pm` | f = 1 | 2 | 5 | 10 | 20 | 50 |
+|---|---|---|---|---|---|---|
+| 32 | 0.026 | 0.052 | 0.131 | 0.261 | 0.522 | 1.31 |
+| 128 | 0.019 | 0.039 | 0.097 | 0.195 | 0.389 | 0.97 |
+| 512 | 0.009 | 0.017 | 0.043 | 0.086 | 0.173 | 0.432 |
+
+So **J = 0.1 is reachable at `n_pm` 512 provided EQE there is within ~11× of its
+peak**, and at `n_pm` 32 only if it is within ~4×. `optfloor` also records
+`per_point_s`, the time each averaging level costs per measured point, which is
+what a sweep has to pay.
 
 On the current side, `decay` is the route below 1 µA. At 100 nA into 50 µF the
 decay slope is `I/C` = **2 mV/s**, which the SMU's voltmeter resolves far better

@@ -390,19 +390,23 @@ def exp_optfloor(pm, smu, smile, cfg, args, log):
     time.sleep(0.2)
     for n_pm in args.optfloor_n:
         reps = []
+        t0 = time.perf_counter()
         for _ in range(args.optfloor_reps):
             p, sem = read_power(pm, n_pm)
             reps.append(p)
+        # per-point cost of this averaging, which is what a sweep has to pay
+        per_point_s = (time.perf_counter() - t0) / max(len(reps), 1)
         a = np.asarray(reps, float)
         spread = float(a.std(ddof=1)) if a.size > 1 else float("nan")
         rows.append(dict(n_pm=n_pm, reps=len(reps), mean_W=float(a.mean()),
                          repeat_std_W=spread,
                          detectable_pW=spread * 3e12,
+                         per_point_s=per_point_s,
                          min_j_3sigma=to_j(spread * 3 / args.responsivity_w_per_a, cfg)
                          if args.responsivity_w_per_a else float("nan")))
         log(f"    N_PM={n_pm:>4} x{args.optfloor_reps}: offset {a.mean()*1e12:+8.1f} pW, "
             f"repeatability {spread*1e12:8.2f} pW  -> 3-sigma detectable "
-            f"{spread*3e12:8.1f} pW")
+            f"{spread*3e12:8.1f} pW  ({per_point_s*1e3:.0f} ms/point)")
     return rows
 
 

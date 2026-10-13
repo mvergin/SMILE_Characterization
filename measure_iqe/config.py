@@ -317,7 +317,9 @@ class IQEConfig:
                                      # fast-scan EQE=P/I here ≈ each pixel's PEAK EQE. That turns the
                                      # fast scan into a full-coverage peak-IQE proxy for all 65 536
                                      # pixels (calibrated to the sweep in analysis), while still emitting
-                                     # ~22 nW (220× the noise floor) for the alive/dead classification.
+                                     # ~22 nW for the alive/dead classification — ~1000× the
+                                     # MEASURED optical floor (3σ = 23 pW at n_pm 32; see the
+                                     # optfloor run of 261013, σ ∝ N^-0.499 from n_pm 4 to 512).
                                      # J≈25 keeps ~5 A/cm² of margin before the droop starts (~J30). The
                                      # current there (~25 µA) is high enough for a fast (NPLC 0.01) read.
                                      # (Was −2.6 V / J≈95 — the droop side at only ~78% of peak.)
