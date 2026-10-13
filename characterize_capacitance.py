@@ -807,8 +807,13 @@ def exp_stepdir(pm, smu, smile, pixel, cfg, args, log):
                                       cfg=cfg, charge_limit=args.charge_limit,
                                       switch_settle_s=args.switch_settle_s)
         met = settling_metrics(t, np.abs(ib))
+        # Keep the trace: stepdir is the experiment that measures settle time against
+        # step size, which is what sets the sweep's budget, so it wants the same plots.
+        spec = keep_trace(f"stepdir_hc{int(cfg.highc_b)}_f{v_from:+.3f}"
+                          f"_v{args.stepdir_target:+.3f}", t, _ia, ib, args.trace_points)
         rows.append(dict(v_from=v_from, v_to=args.stepdir_target,
-                         dv=args.stepdir_target - v_from, **met))
+                         dv=args.stepdir_target - v_from, **met,
+                         **{f"spec_{k}": v for k, v in spec.items()}))
         log(f"    {v_from:+.2f} -> {args.stepdir_target:+.2f} V "
             f"(dV={args.stepdir_target-v_from:+.2f}): I={met['settled']*1e9:+8.1f} nA  "
             f"t1%={met['t_1pct']:.3f}s t0.1%={met['t_01pct']:.3f}s")
