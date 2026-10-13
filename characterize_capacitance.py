@@ -328,7 +328,7 @@ def keep_trace(tag, t, ia, ib, n_max):
 _TRACES: list = []
 
 
-def spectrum_summary(t, i, mains_hz=50.0):
+def spectrum_summary(t, i, mains_hz=50.0, tail_frac=0.5):
     """Dominant periodic component of a trace, and the amplitude at the mains line.
 
     A sine riding on the transient is the hypothesis this answers. At NPLC 0.01 the
@@ -336,6 +336,12 @@ def spectrum_summary(t, i, mains_hz=50.0):
     integer NPLC does -- and the ~940 Hz sample rate resolves 50 Hz easily. Returns
     the peak frequency and amplitude outside the DC/drift region, plus the amplitude
     in a narrow band at the mains line and its first harmonic.
+
+    Only the last `tail_frac` of the trace is used. The settling is a power law, not
+    an exponential, so a quadratic cannot detrend it: over the whole trace the
+    residual transient dominates every low bin and inflates `rms_ac` by ~30x over the
+    real noise. The tail is also the only part that matters, because that is where
+    the sweep averages.
     """
     out = dict(fs_hz=float("nan"), peak_hz=float("nan"), peak_amp=float("nan"),
                mains_amp=float("nan"), mains2_amp=float("nan"), rms_ac=float("nan"))
@@ -343,6 +349,9 @@ def spectrum_summary(t, i, mains_hz=50.0):
     if ok.sum() < 64 or t.size < 2:
         return out
     tv, iv = t[ok], i[ok]
+    cut = int((1.0 - tail_frac) * tv.size)
+    if tv.size - cut >= 64:
+        tv, iv = tv[cut:], iv[cut:]
     dt = float(np.median(np.diff(tv)))
     if not dt > 0:
         return out

@@ -740,19 +740,33 @@ Worth knowing before trusting any ripple number. The SMU's integration window is
 | 0.1 | 2 ms | 0.1 | none |
 | 1.0 | 20 ms | 1.0 | **full** |
 
-Every characterisation run so far used NPLC 0.01, chosen for time resolution, so
-the 1–4% ripple at the 10 µA limit and 79–90% at 1 mA may be substantially mains
-pickup rather than device noise. The bench sample rate is ~943 Hz, so 50 Hz is well
-inside Nyquist and a line would be visible in the trace.
-
-Each capture therefore records a spectrum summary — `spec_peak_hz`,
-`spec_peak_amp`, `spec_mains_amp`, `spec_mains2_amp`, `spec_rms_ac` — and the raw
-`I(t)` is saved to `traces.npz` (uniformly thinned to `--trace-points`, so the
-frequency content survives). `plot_transients.py` in the analysis repo draws both
+Each capture records a spectrum summary — `spec_peak_hz`, `spec_peak_amp`,
+`spec_mains_amp`, `spec_mains2_amp`, `spec_rms_ac`, all over the **settled tail** —
+and the raw `I(t)` is saved to `traces.npz` (uniformly thinned to `--trace-points`,
+so the frequency content survives). `plot_transients.py` in the analysis repo draws
 the settling curves and their spectra.
 
-If the mains line dominates, the fix for the final sweep is an integer NPLC on the
-measurement points, which costs time but nulls it completely.
+Tail only, because the settling is a power law and a quadratic cannot detrend it.
+Measured over the whole trace, `rms_ac` came out at 133–283 nA against a real noise
+of 9.3 nA: all residual transient.
+
+### Answered: there is no sine (runs 261013-2140 / -2201)
+
+The tail spectrum is **flat**. The amplitude at the mains line, 1.0–1.35 nA, is no
+larger than the biggest random bin, 1.26–1.54 nA, and both match what a flat noise
+floor of 9.3 nA rms predicts. There is no line anywhere, at any bias.
+
+The oscillation is therefore white noise, not pickup — and an integer NPLC still
+fixes it, by averaging rather than by rejection:
+
+| NPLC | per-sample noise | ripple at −0.80 V | settled value |
+|---|---|---|---|
+| 0.01 | 9.3 nA | 2.09% | 446.9 nA |
+| **1.0** | **1.0–1.4 nA** | **0.22%** | 447.8 nA |
+
+7.8× less noise, consistent with √100 for white noise, and the same answer. Use an
+integer NPLC on the measurement points. It costs nothing, because the relaxation
+below forces a wait anyway.
 
 ### Two-phase settling
 
@@ -765,11 +779,45 @@ measurement limit, because the limit is the only current available to move C:
 | 100 µA | 0.87 s |
 | 10 µA | 8.7 s |
 
-So charging at 1 mA and measuring at 10 µA should replace a 9–40 s settle with
-~0.1 s. **Unverified.** In High-C the limit also selects the range, so this
-switches the range mid-point, and a range change is what corrupted the rising side
-in run 260630. Compare against a single-limit run at the same bias — there is
-ground truth to check against: 925.7 nA at −0.85 V, 447.5 at −0.80, 248.6 at −0.70.
+So charging at 1 mA and measuring at 10 µA *should* replace a 9–40 s settle with
+~0.1 s. It does not, and the reason is worth knowing.
+
+**Verified safe, but only 1.2–1.8× faster** (runs 261013-2140 vs -2155, pixel
+124,135, four biases). The range switch does not corrupt the reading — the two
+agree within 1.1%, and both land +0.3…+2.6% from the independent `leak` ground
+truth:
+
+| V | single limit | two-phase | `leak` i_lit | t_1pct single → two-phase |
+|---|---|---|---|---|
+| −0.95 | 3610.3 nA | 3617.5 nA | 3582.4 nA | 1.13 s → 0.62 s |
+| −0.90 | 1985.5 nA | 1989.3 nA | 1969.0 nA | 4.10 s → 2.89 s |
+| −0.85 | 948.9 nA | 957.1 nA | 942.3 nA | 8.04 s → 6.12 s |
+| −0.80 | 446.9 nA | 451.7 nA | 440.1 nA | 13.24 s → 10.72 s |
+
+### Why it barely helps: the settling is not RC
+
+At 10 µA, moving 0.2 V across 42.8 µF takes 0.86 s. `t_1pct` at that step is
+13.2 s — 15× longer. So charging was never the bottleneck.
+
+The excess current above the asymptote decays as **t^−1.2±0.2**, a power law, not an
+exponential, and its amplitude is proportional to the voltage step:
+
+| step from −1.00 V | ΔV | excess at 1 s | at 2 s | at 4 s | at 8 s |
+|---|---|---|---|---|---|
+| −0.95 | 0.05 V | 40 nA | 12 nA | 0 nA | — |
+| −0.90 | 0.10 V | 94 nA | 44 nA | 19 nA | 6 nA |
+| −0.85 | 0.15 V | 150 nA | 65 nA | 30 nA | 9 nA |
+| −0.80 | 0.20 V | 234 nA | 93 nA | 38 nA | 13 nA |
+
+Excess ∝ ΔV at fixed t is what a relaxation of the displaced charge `Q = C·ΔV`
+gives — dielectric absorption or trap emission in the same 42.8 µF structure. No
+current limit shortens it, which is exactly why two-phase charging gains so little.
+
+**The free lever is step size, not current.** `t_1pct` tracks ΔV almost linearly,
+1.13 s at 0.05 V against 13.24 s at 0.20 V. The 13 s figures are an artifact of
+parking at −1.00 V and jumping. A monotone sweep in 0.05 V steps should cost ~1 s
+per point, and the relaxation current that contaminates it is 6× smaller. Sweep
+monotonically in small steps and never jump back to a park voltage.
 
 ### The open question: is the low-J current actually LED current?
 
