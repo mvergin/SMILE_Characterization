@@ -67,6 +67,29 @@ The split is deliberate: measuring a variation needs the hardware, judging it
 needs the ABC fit. The measurement repo writes the fit-free precision metrics
 and stops; this script does the rest.
 
+### `plot_transients.py` — settling curves and their spectra
+
+```bash
+python plot_transients.py "<..._CAPACITANCE>"
+```
+
+Reads `traces.npz` and the summary CSVs from `characterize_capacitance.py` in the
+measurement repo, and writes into the same run directory:
+
+* `transients.png` — `I(t)` after each voltage step on a log time axis, with the
+  settled value and the 1% band marked
+* `spectra.png` — amplitude spectrum of each trace, mains line marked
+
+The spectra answer one specific question: **is a sine riding on the transient?**
+The SMU integrates `NPLC × 20 ms` and only an *integer* NPLC nulls the mains line,
+so a characterisation run at NPLC 0.01 has no mains rejection at all while its
+~943 Hz sample rate puts 50 Hz well inside Nyquist. The measurement script records
+`spec_peak_hz`, `spec_peak_amp` and `spec_mains_amp` per capture; this draws the
+spectrum behind those numbers, and prints them as a table first.
+
+`traces.npz` holds one `(3, N)` array per capture — time, channel A, channel B —
+thinned uniformly so the frequency content is preserved.
+
 ### Smaller tools
 
 | script | what it answers |
