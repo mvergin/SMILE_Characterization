@@ -729,6 +729,48 @@ At 100 nA it still fails, for a fixable reason: every setpoint was sourced on th
 1 mA range, where 100 nA is 0.01% of full scale, and the SMU delivered 60 nA. The
 source range is now chosen per setpoint.
 
+### Mains rejection: NPLC 0.01 has none
+
+Worth knowing before trusting any ripple number. The SMU's integration window is
+`NPLC × 20 ms` at 50 Hz, and only an **integer** NPLC nulls the mains line:
+
+| NPLC | integrates | mains cycles | rejection |
+|---|---|---|---|
+| 0.01 | 0.2 ms | 0.01 | **none** |
+| 0.1 | 2 ms | 0.1 | none |
+| 1.0 | 20 ms | 1.0 | **full** |
+
+Every characterisation run so far used NPLC 0.01, chosen for time resolution, so
+the 1–4% ripple at the 10 µA limit and 79–90% at 1 mA may be substantially mains
+pickup rather than device noise. The bench sample rate is ~943 Hz, so 50 Hz is well
+inside Nyquist and a line would be visible in the trace.
+
+Each capture therefore records a spectrum summary — `spec_peak_hz`,
+`spec_peak_amp`, `spec_mains_amp`, `spec_mains2_amp`, `spec_rms_ac` — and the raw
+`I(t)` is saved to `traces.npz` (uniformly thinned to `--trace-points`, so the
+frequency content survives). `plot_transients.py` in the analysis repo draws both
+the settling curves and their spectra.
+
+If the mains line dominates, the fix for the final sweep is an integer NPLC on the
+measurement points, which costs time but nulls it completely.
+
+### Two-phase settling
+
+`--charge-limit` charges the array at a high limit and then drops to the
+measurement limit, because the limit is the only current available to move C:
+
+| limit | time to move 95 µC |
+|---|---|
+| 1 mA | 0.09 s |
+| 100 µA | 0.87 s |
+| 10 µA | 8.7 s |
+
+So charging at 1 mA and measuring at 10 µA should replace a 9–40 s settle with
+~0.1 s. **Unverified.** In High-C the limit also selects the range, so this
+switches the range mid-point, and a range change is what corrupted the rising side
+in run 260630. Compare against a single-limit run at the same bias — there is
+ground truth to check against: 925.7 nA at −0.85 V, 447.5 at −0.80, 248.6 at −0.70.
+
 ### The open question: is the low-J current actually LED current?
 
 Both source modes measure the *total* cathode current, so neither separates LED

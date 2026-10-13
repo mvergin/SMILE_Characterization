@@ -217,8 +217,9 @@ def select_pixels(pm, smu, smile, cfg, args, log):
 # ----------------------------------------------------------------------
 
 def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
-                 chunk=2000, log=None, limit_a=None, capacitance=50e-6,
-                 max_presettle_s=60.0):
+                 chunk=2000, log=None, limit_a=None, capacitance=45.7e-6,
+                 max_presettle_s=60.0, cfg=None, charge_limit=None,
+                 switch_settle_s=0.5):
     """Step ch B from v_from to v_to, then burst-capture I(t) with timestamps.
 
     Returns (t, i_a, i_b), t in seconds from the first sample. Instrument
@@ -233,12 +234,32 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
     interface is cleared so the stale 'DONE' cannot desync later queries, and
     whatever was captured so far is returned.
     """
+    # Two-phase settle. The limit is the only current available to charge C, so a low
+    # measurement limit makes the node take 9-40 s to arrive. Charging at a high limit
+    # first takes ~0.09 s instead, then the limit drops for the measurement. The catch:
+    # in High-C the limit SELECTS the range, so this switches the range mid-point, and
+    # a range change is what corrupted the rising side in run 260630. Verify against a
+    # single-limit run at the same bias before trusting it.
+    if charge_limit and cfg is not None and hasattr(smu, "inst"):
+        m.configure_voltage_source_b(
+            smu, dataclasses.replace(cfg, nvled_compliance=charge_limit), log)
+        smu.set_voltage("b", float(v_from))
+        time.sleep(max(0.05, 3 * charge_time_s(capacitance, v_from, charge_limit)))
+        smu.set_voltage("b", float(v_to))
+        time.sleep(max(0.05, 3 * charge_time_s(capacitance, v_to - v_from, charge_limit)))
+        m.configure_voltage_source_b(smu, cfg, log)       # back to the measure limit
+        time.sleep(switch_settle_s)
+        if log:
+            log(f"      charged at {charge_limit:g} A, measuring at {limit_a:g} A "
+                f"(switch settle {switch_settle_s:.2f}s)")
     m.set_nplc(smu, nplc)
     smu.setup_buffers(timestamps=True)
     smu.set_voltage("b", float(v_from))
     # The pre-settle has to clear the charge time at the configured limit, or the
     # capture starts before the node has reached v_from and measures the wrong state.
-    want = max(settle_first_s, 3 * charge_time_s(capacitance, v_from, limit_a))
+    # the charge phase already brought the node there, so the slow pre-settle is moot
+    want = (settle_first_s if charge_limit
+            else max(settle_first_s, 3 * charge_time_s(capacitance, v_from, limit_a)))
     pre = min(want, max_presettle_s)
     if want > max_presettle_s and log:
         log(f"      pre-settle CAPPED at {pre:.0f}s, charge needs {want:.0f}s at "
@@ -287,6 +308,74 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
     n = min(len(ia), len(ib), len(ta))
     return (np.asarray(ta[:n], float) - ta[0],
             np.asarray(ia[:n], float), np.asarray(ib[:n], float))
+
+
+def keep_trace(tag, t, ia, ib, n_max):
+    """Stash one trace for the run's traces.npz, and return its spectrum summary."""
+    spec = spectrum_summary(t, np.abs(ib))
+    if n_max and t.size:
+        td, ibd, k = decimate_trace(t, ib, n_max)
+        _, iad, _ = decimate_trace(t, ia, n_max)
+        _TRACES.append((tag, td.astype(np.float32), iad.astype(np.float32),
+                        ibd.astype(np.float32), k))
+    return spec
+
+
+# Raw traces, collected by capture_step and written per experiment by main(). A
+# module-level sink keeps capture_step's signature and the six experiment signatures
+# unchanged; this is a script, not a library.
+# ponytail: global collector, pass a sink explicitly if this ever grows a second caller.
+_TRACES: list = []
+
+
+def spectrum_summary(t, i, mains_hz=50.0):
+    """Dominant periodic component of a trace, and the amplitude at the mains line.
+
+    A sine riding on the transient is the hypothesis this answers. At NPLC 0.01 the
+    SMU integrates 1/100 of a mains cycle, so it has NO mains rejection -- only an
+    integer NPLC does -- and the ~940 Hz sample rate resolves 50 Hz easily. Returns
+    the peak frequency and amplitude outside the DC/drift region, plus the amplitude
+    in a narrow band at the mains line and its first harmonic.
+    """
+    out = dict(fs_hz=float("nan"), peak_hz=float("nan"), peak_amp=float("nan"),
+               mains_amp=float("nan"), mains2_amp=float("nan"), rms_ac=float("nan"))
+    ok = np.isfinite(i) & (np.abs(i) < OVERFLOW)
+    if ok.sum() < 64 or t.size < 2:
+        return out
+    tv, iv = t[ok], i[ok]
+    dt = float(np.median(np.diff(tv)))
+    if not dt > 0:
+        return out
+    fs = 1.0 / dt
+    # detrend: the transient itself is a huge low-frequency component
+    iv = iv - np.polyval(np.polyfit(tv, iv, 2), tv)
+    w = np.hanning(iv.size)
+    amp = np.abs(np.fft.rfft(iv * w)) * (4.0 / iv.size)      # ~peak amplitude
+    f = np.fft.rfftfreq(iv.size, dt)
+    lo = f > 2.0                                              # skip residual drift
+    out.update(fs_hz=fs, rms_ac=float(np.std(iv)))
+    if lo.any():
+        k = int(np.argmax(amp[lo]))
+        out.update(peak_hz=float(f[lo][k]), peak_amp=float(amp[lo][k]))
+    for key, target in (("mains_amp", mains_hz), ("mains2_amp", 2 * mains_hz)):
+        if target < fs / 2:
+            band = np.abs(f - target) < max(2.0, 3 * fs / iv.size)
+            if band.any():
+                out[key] = float(np.max(amp[band]))
+    return out
+
+
+def decimate_trace(t, i, n_max):
+    """Uniformly thin a trace to at most n_max points, preserving the sample interval.
+
+    Uniform, not log-spaced: log spacing would destroy the frequency content that the
+    sine-wave question depends on. Returns the stride used so a reader knows the
+    effective sample rate.
+    """
+    if n_max <= 0 or t.size <= n_max:
+        return t, i, 1
+    k = int(np.ceil(t.size / n_max))
+    return t[::k], i[::k], k
 
 
 def settling_metrics(t, i):
@@ -400,8 +489,12 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                                      chunk=args.chunk, log=log,
                                      limit_a=cfg.nvled_compliance,
                                      capacitance=args.capacitance,
-                                     max_presettle_s=args.max_presettle_s)
+                                     max_presettle_s=args.max_presettle_s,
+                                      cfg=cfg, charge_limit=args.charge_limit,
+                                      switch_settle_s=args.switch_settle_s)
                 met = settling_metrics(t, np.abs(ib))
+                spec = keep_trace(f"step_hc{int(highc)}_r{rng}_v{v:+.3f}",
+                                  t, ia, ib, args.trace_points)
                 ia_ok = ia[np.isfinite(ia) & (np.abs(ia) < OVERFLOW)] if ia.size else ia
                 # The node is settled by now, so read the light too: at these currents
                 # it is well above the measured optical floor, which turns a settling
@@ -442,6 +535,8 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                                  i_a_settled=float(np.median(ia_ok[int(0.8 * ia_ok.size):]))
                                  if ia_ok.size else float("nan"),
                                  record_s=float(t[-1]) if t.size else 0.0,
+                                 charge_limit=args.charge_limit or "",
+                                 **{f"spec_{k}": v2 for k, v2 in spec.items()},
                                  smu_errors=err))
                 log(f"    highc={highc!s:5} range={str(rng):>7} V={v:+.2f}  "
                     f"I={met['settled']*1e9:+10.1f} nA (J={to_j(met['settled'], cfg):+8.2f})  "
@@ -449,7 +544,9 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                     f"P={pw*1e12:+9.1f}pW({abs(pw)/pw_sem if pw_sem else 0:4.0f}sig) "
                     f"EQE={100*eqe:6.3f}%  "
                     f"ripple={100*met['ripple']:.0f}%  over={met['n_overflow']}/{met['n']}  "
-                    f"rec={float(t[-1]) if t.size else 0:.2f}s"
+                    f"rec={float(t[-1]) if t.size else 0:.2f}s  "
+                    f"sine {spec['peak_hz']:.1f}Hz@{spec['peak_amp']*1e9:.1f}nA "
+                    f"(50Hz {spec['mains_amp']*1e9:.1f}nA)"
                     + ("  << NOT SETTLED" if not met["settled_ok"] else "")
                     + (f"  ERR: {err}" if err else ""))
     smile.blank_frame()
@@ -586,11 +683,15 @@ def exp_leak(pm, smu, smile, pixel, cfg, args, log):
                                       chunk=args.chunk, log=log,
                                       limit_a=cfg.nvled_compliance,
                                       capacitance=args.capacitance,
-                                      max_presettle_s=args.max_presettle_s)
+                                      max_presettle_s=args.max_presettle_s,
+                                      cfg=cfg, charge_limit=args.charge_limit,
+                                      switch_settle_s=args.switch_settle_s)
             met = settling_metrics(t, np.abs(ib))
+            spec = keep_trace(f"leak_{state}_v{v:+.3f}", t, _ia, ib, args.trace_points)
             pw, pw_sem = read_power(pm, args.step_n_pm)
-            meas[state] = (met, pw, pw_sem)
+            meas[state] = (met, pw, pw_sem, spec)
         lit, off, blank = (meas[k] for k in ("lit", "off", "blank"))
+        spec = lit[3]
         i_led = lit[0]["settled"] - off[0]["settled"]
         # SEM of each settled value, then added in quadrature. This is the number
         # that decides how far down in J the subtraction stays meaningful: at 95%
@@ -622,6 +723,8 @@ def exp_leak(pm, smu, smile, pixel, cfg, args, log):
                          eqe_led=eqe,
                          settled_lit=lit[0]["settled_ok"], settled_off=off[0]["settled_ok"],
                          over_lit=lit[0]["n_overflow"], over_off=off[0]["n_overflow"],
+                         charge_limit=args.charge_limit or "",
+                         **{f"spec_{k}": v2 for k, v2 in spec.items()},
                          smu_errors=drain_errors(smu)))
         log(f"    V={v:+.2f}  lit {lit[0]['settled']*1e9:+8.1f}  off "
             f"{off[0]['settled']*1e9:+8.1f}  blank {blank[0]['settled']*1e9:+8.1f} nA"
@@ -690,7 +793,9 @@ def exp_stepdir(pm, smu, smile, pixel, cfg, args, log):
                                      chunk=args.chunk, log=log,
                                      limit_a=cfg.nvled_compliance,
                                      capacitance=args.capacitance,
-                                     max_presettle_s=args.max_presettle_s)
+                                     max_presettle_s=args.max_presettle_s,
+                                      cfg=cfg, charge_limit=args.charge_limit,
+                                      switch_settle_s=args.switch_settle_s)
         met = settling_metrics(t, np.abs(ib))
         rows.append(dict(v_from=v_from, v_to=args.stepdir_target,
                          dv=args.stepdir_target - v_from, **met))
@@ -868,6 +973,10 @@ def build_parser():
     ap.add_argument("--samples", type=int, default=6000,
                     help="buffer samples per step. record_s in the CSV says how much time "
                          "that bought; raise it until the record outlasts the settling")
+    ap.add_argument("--trace-points", type=int, default=4000,
+                    help="raw I(t) samples kept per capture, written to traces.npz for "
+                         "plotting and spectra. Thinned UNIFORMLY so the frequency "
+                         "content survives; 0 disables trace saving")
     ap.add_argument("--chunk", type=int, default=2000,
                     help="samples per TSP burst. The buffer appends, so this only bounds "
                          "how long a single blocking VISA read lasts; lower it if a burst "
@@ -924,6 +1033,13 @@ def build_parser():
     ap.add_argument("--dark-w", type=float, default=0.0,
                     help="optical dark level to subtract (W). The measured offset is "
                          "under 7 pW and sign-random, so 0 is usually right")
+    ap.add_argument("--charge-limit", type=float, default=None,
+                    help="two-phase settle: charge the array at THIS limit, then drop to "
+                         "--compliance to measure. 1e-3 moves the 95 uC in 0.09 s against "
+                         "8.7 s at a 10 uA limit. In High-C the limit also selects the "
+                         "range, so verify against a single-limit run before trusting it")
+    ap.add_argument("--switch-settle-s", type=float, default=0.5,
+                    help="wait after the charge-to-measure limit switch")
     ap.add_argument("--max-presettle-s", type=float, default=60.0,
                     help="cap on the charge-derived pre-settle before each capture. The "
                          "charge time is C*dV/limit, which at a 1 uA limit is minutes per "
@@ -1032,6 +1148,13 @@ def main(argv=None):
         # Writing in the finally is the point: previously an exception here skipped
         # the writes entirely and a run that died partway lost every completed row.
         log("=" * 56)
+        if _TRACES:
+            npz = out_dir / "traces.npz"
+            np.savez_compressed(npz, **{
+                f"{i:03d}_{tag}_{k}": np.vstack([t, ia, ib])
+                for i, (tag, t, ia, ib, k) in enumerate(_TRACES)})
+            log(f"wrote {npz} ({len(_TRACES)} traces, "
+                f"{npz.stat().st_size / 1e6:.1f} MB)")
         wrote = [p for p in (write_csv(out_dir, n, r) for n, r in collected.items()) if p]
         for p in wrote:
             log(f"wrote {p}")
