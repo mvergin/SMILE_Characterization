@@ -165,7 +165,20 @@ def select_pixels(pm, smu, smile, cfg, args, log):
         return [dict(X=x, Y=y, quadrant="given") for x, y in out]
 
     picked = []
+    # Same reasoning as check_alive, and the same bug if omitted: this is a brightness
+    # scan, not a measurement, so it needs a healthy limit. Inheriting a low
+    # measurement compliance cannot charge the array to the fast-scan bias (45.7 uF
+    # through 1.35 V at 10 uA is 6.2 s per pixel), so every pixel would read dark and
+    # the run would find nothing to characterise.
+    probe = dataclasses.replace(cfg, highc_b=False,
+                                nvled_compliance=args.alive_compliance)
+    m.configure_voltage_source_b(smu, probe, log)
+    settle = max(cfg.fastscan_settle_ms / 1000.0, 0.005,
+                 3 * charge_time_s(args.capacitance, cfg.nvled_v_fastscan,
+                                   args.alive_compliance))
     smu.set_voltage("b", cfg.nvled_v_fastscan)
+    time.sleep(max(settle, 0.2))
+    log(f"  scan probe: limit {args.alive_compliance:g} A, {settle*1e3:.0f} ms/pixel settle")
     for quad in args.quadrants:
         x1, y1, x2, y2 = m.NAMED_ROIS[quad]
         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
@@ -181,7 +194,7 @@ def select_pixels(pm, smu, smile, cfg, args, log):
             for x in range(wx1, wx2 + 1):
                 smile.blank_frame()
                 smile.set_pixel(x, y, cfg.fastscan_bitval)
-                time.sleep(max(cfg.fastscan_settle_ms, 5.0) / 1000.0)
+                time.sleep(settle)
                 p, _ = read_power(pm, 2)
                 rows.append(dict(X=x, Y=y, PM400_POWER_MEAN=p - dark))
         smile.blank_frame()
@@ -762,6 +775,41 @@ def write_csv(out_dir: Path, name: str, rows: list[dict]) -> Path | None:
     return path
 
 
+def estimate_seconds(what, cfg, args, n_pixels):
+    """Rough wall-clock estimate, so a 12-pixel run is a decision and not a surprise.
+
+    Calibrated against the bench: 20000 samples at NPLC 0.01 took 21 s, and the PM
+    reads cost ~4 ms each. The pre-settle is the charge time at the configured limit,
+    which dominates at low compliance.
+    """
+    pre = min(max(2.0, 3 * charge_time_s(args.capacitance, args.v_start,
+                                         cfg.nvled_compliance)), args.max_presettle_s)
+    rec = args.samples * (max(2 * args.nplc / 50.0, 200e-6) + 3e-4)
+    pm_s = args.step_n_pm * 4e-3
+    per_capture = pre + rec
+    total = 0.0
+    n_hc = 2 if args.highc_both else 1
+    if "step" in what:
+        n_rng = 1 if (args.highc and not args.highc_both) else len(args.ranges)
+        total += n_pixels * n_hc * n_rng * len(args.voltages) * (
+            per_capture + pm_s * (2 if args.step_dark else 1))
+    if "leak" in what:
+        total += n_pixels * len(args.voltages) * 2 * (per_capture + pm_s)
+    if "stepdir" in what:
+        total += n_pixels * len(args.stepdir_from) * per_capture
+    if "cap" in what:
+        total += n_pixels * 2 * len(args.cap_currents) * (4.0 + args.cap_seconds)
+    if "isrc" in what:
+        total += n_pixels * len(args.isrc_currents) * args.isrc_seconds
+    if "decay" in what:
+        total += n_pixels * 2 * (args.decay_charge_s + args.decay_seconds)
+    if "optfloor" in what:
+        total += sum(n * 4e-3 * args.optfloor_reps for n in args.optfloor_n)
+    if not args.pixels:
+        total += len(args.quadrants) * args.quadrant_window ** 2 * 0.21
+    return total
+
+
 def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -900,6 +948,10 @@ def main(argv=None):
             f"High-C. Below ~10 uA that reads ~50% of the selected range regardless of "
             f"bias. Pass --highc (and --compliance, e.g. 1e-5) unless you are "
             f"deliberately reproducing the artifact.")
+    n_px = len(args.pixels) if args.pixels else args.per_quadrant * len(args.quadrants)
+    est = estimate_seconds(what, cfg, args, n_px)
+    log(f"estimated {est/60:.0f} min for {', '.join(what)} on "
+        f"{n_px} pixel(s){'' if args.pixels else ' (plus the selection scan)'}")
     pm, smu, smile = m.connect(cfg, log, simulate=args.simulate)
     collected: dict[str, list[dict]] = {name: [] for name in what}
     try:

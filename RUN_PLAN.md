@@ -152,21 +152,49 @@ first — on 12 pixels it is hours, and the parameters may change.
 
 ---
 
-## Stage 4 — spatial: is C uniform?  (~50 min, 12 pixels)
+## Stage 3b — is the low-J current actually LED current?  (~3 min, one pixel)
+
+```powershell
+.venv\Scripts\python.exe characterize_capacitance.py --what leak --out D:\caprun ^
+  --pixels 80,15 --highc --compliance 1e-5 --nplc 0.01 --samples 20000 ^
+  --max-presettle-s 90 --v-start -0.9 --voltages -0.85 -0.80 -0.70 --step-n-pm 2048
+```
+
+**Send back:** `leak.csv`.
+
+Both source modes read the *total* cathode current. The `cap` ramps implied a few
+hundred nA of parallel current near −0.35 V, comparable to the 249 nA measured at
+−0.70 V, so the apparent EQE collapse below J ≈ 0.4 may be a contaminated
+denominator rather than device physics. `leak` measures each bias lit and blanked;
+`i_led` is the difference and `leak_frac` says how much of the cathode current is
+not injection.
+
+---
+
+## Stage 4 — spatial: is any of this uniform?  (~60 min, 12 pixels)
 
 Only after stage 1 tells us which ranges and which High-C setting are worth
 using. Substitute those below.
 
+Everything up to here has been **one pixel in one quadrant**, so C, the leakage
+and the settling times are all still assumed uniform.
+
 ```powershell
-.venv\Scripts\python.exe characterize_capacitance.py --what step cap stepdir --out D:\caprun ^
-  --per-quadrant 3 --quadrant-window 24 ^
-  --voltages -0.7 -0.85 -1.0 -1.3 -2.6 --ranges 1e-3 1e-6
+.venv\Scripts\python.exe characterize_capacitance.py --what cap leak --out D:\caprun ^
+  --highc --compliance 1e-5 --per-quadrant 3 --quadrant-window 24 ^
+  --nplc 0.01 --samples 20000 --v-start -0.9 --voltages -0.85 -0.80 -0.70 ^
+  --step-n-pm 2048 --max-presettle-s 90
 ```
 
 Finds 3 alive pixels per quadrant by scanning a window at each quadrant centre,
-checks each for light, and skips the dead ones. **Send back:** `step.csv`,
-`cap.csv`, `stepdir.csv` — every row is tagged with `pixel_x`, `pixel_y` and
-`quadrant`, so the spatial comparison is in the file.
+checks each for light, and skips the dead ones. The script prints a wall-clock
+estimate before it connects, so a long run is a decision rather than a surprise.
+Halve it with `--per-quadrant 2 --quadrant-window 16` and two voltages (~27 min).
+
+**Send back:** `cap.csv`, `leak.csv` — every row is tagged with `pixel_x`,
+`pixel_y` and `quadrant`, so the spatial comparison is in the file. What it
+decides: whether one compliance schedule and one settle budget work array-wide, or
+whether the sweep needs per-region margin.
 
 ## Stage 5 — charge decay, only if stage 0 allowed it  (~10 min/pixel)
 
