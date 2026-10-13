@@ -660,6 +660,12 @@ def enrich(df, dark_W=0.0):
     # and plotted purely as a diagnostic — the LED current is ch B regardless. (The
     # noise-floor + scatter gates already drop genuinely bad NVLED readings.)
     reliable = df["I_LED"] >= NOISE_FLOOR_A
+    # A point that sat on the compliance limit is not a measurement of the device -- the
+    # current is the instrument's. Run 261014-0007 had 8 such points in a row reading
+    # exactly 10000.4 nA, which would otherwise have entered the fit as a plateau.
+    if "NVLED_AT_COMPLIANCE" in df.columns:
+        clamped = df["NVLED_AT_COMPLIANCE"].astype(str).str.lower().isin(("true", "1"))
+        reliable &= ~clamped
     if "NVLED_CURR_STD" in df.columns:
         relstd = df["NVLED_CURR_STD"].astype(float) / df["I_NVLED"].replace(0, np.nan)
         reliable &= relstd.fillna(np.inf) <= NVLED_RELSTD_MAX
