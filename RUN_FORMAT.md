@@ -82,6 +82,43 @@ The primary table. One row per measured point.
 
 A reader must treat these as optional and fall back to the `*_MEAN` columns.
 
+### Present only when `leak_reference` is on (default since 261013)
+
+The same pixel re-measured at `LEAK_REF_BITVAL` (0: addressed, but not driven),
+back to back with the lit point at the same bias.
+
+| column | unit | meaning |
+|---|---|---|
+| `NVLED_CURR_REF` | A | ch B current with the pixel addressed and off |
+| `NVLED_CURR_REF_STD` | A | SEM of that |
+| `VLED_CURR_REF` | A | ch A current in the same state |
+| `PM400_POWER_REF` | W | optical power in the same state: the true local dark |
+| `PM400_POWER_REF_STD` | W | SEM of that |
+| `LEAK_REF_BITVAL` | - | the drive level used as the reference |
+
+**This is not optional precision, it is the measurement.** Channel B reads the
+*total* cathode current. Measured over 12 pixels in 4 quadrants on 261013:
+
+| bias | reference as a fraction of the reading |
+|---|---|
+| -0.95 V | 8% |
+| -0.90 V | 14% |
+| -0.85 V | 29% |
+| **-0.80 V** | **58%** |
+
+Without the subtraction the EQE appears to collapse ~20x below J = 0.4. With it
+the curve is smooth and monotone. **Every rising-side EQE this project produced
+before 261013 is wrong**, and uncorrected runs cannot be fixed afterwards,
+because the reference was never recorded.
+
+So: `I_LED = |NVLED_CURR_MEAN| - |NVLED_CURR_REF|`, and the error propagates as
+`sqrt(sig_lit^2 + sig_ref^2)` against the smaller corrected current. Subtract
+`PM400_POWER_REF` rather than the run-wide dark when it is present: it is the
+same pixel, the same frame, the same instant.
+
+A reader without these columns must fall back to `I_LED = |NVLED_CURR_MEAN|`
+and say so, rather than silently reporting an uncorrected rising side.
+
 ### Conventions that are easy to get wrong
 
 * **`*_STD` is the SEM**, kept under that name for backwards compatibility.
@@ -94,7 +131,12 @@ A reader must treat these as optional and fall back to the `*_MEAN` columns.
   else `*_MEAN`.**
 * **Channel B current is negative** (the SMU sinks it). Take `abs()`.
 * **Use `NVLED_*` as the LED current, not `VLED_*`.** Channel A can carry other
-  current paths. A large `VLED/NVLED` ratio means leakage, not signal.
+  current paths. A large `VLED/NVLED` ratio means leakage, not signal. Measured
+  261013: channel A sits at ~466 uA of array background with ~29 uA of noise,
+  against channel B's 9 nA, so it is a supply-rail monitor and nothing more.
+* **A blanked frame is not a valid zero.** It draws ~4x *more* than the addressed
+  pixel at bitval 0 (943-956 nA against 236-254 nA), so lit-minus-blanked gives a
+  negative LED current. The reference must leave the backplane addressing alone.
 * Floats are written with `repr()` for full round-trip precision. Values may be
   `nan`. A dead-skipped pixel contributes exactly one row.
 

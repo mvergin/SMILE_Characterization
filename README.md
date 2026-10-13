@@ -164,7 +164,15 @@ These bite everyone once. RUN_FORMAT.md has the full list.
   already held a robust median; when the `*_MEDIAN` columns exist, `*_MEAN` is
   the true arithmetic mean.
 * **`NVLED_*` (channel B) is the LED current**, and it is negative — take
-  `abs()`. `VLED_*` (channel A) is a leakage cross-check, not signal.
+  `abs()`. `VLED_*` (channel A) is a leakage cross-check, not signal: measured
+  261013 it sits at ~466 µA of array background with ~29 µA of noise, against
+  channel B's 9 nA.
+* **Subtract `NVLED_CURR_REF` when it is present.** Channel B reads the *total*
+  cathode current, and at −0.80 V 58% of it is backplane leakage, not injection.
+  `enrich()` does this and sets `I_LED`, `LEAK_FRAC` and `I_NVLED_REF`. Runs
+  without the column keep the old meaning (`I_LED = |I_NVLED|`) and get
+  `LEAK_FRAC = NaN` — those runs' rising sides cannot be corrected afterwards,
+  because the reference was never recorded.
 * **Subtract the median `DARK_PM400`** from the optical power before computing
   EQE, then clip at zero.
 * A run from an interrupted measurement is valid and must stay readable; it just

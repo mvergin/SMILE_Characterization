@@ -84,6 +84,29 @@ def test_missing_optional_columns_still_load():
     assert "EQE_LED" in enriched.columns and len(enriched) == len(trimmed)
 
 
+def test_leakage_reference_is_subtracted():
+    """I_LED must be the corrected current, or the rising side stays wrong."""
+    df = aa._load_aggregated(SWEEP)
+    for col in ("NVLED_CURR_REF", "NVLED_CURR_REF_STD", "PM400_POWER_REF"):
+        assert col in df.columns, f"{col} missing: the fixture predates the leakage fix"
+    enriched = aa.enrich(df.copy(), dark_W=0.0)
+
+    ref = enriched["I_NVLED_REF"]
+    assert (ref > 0).any(), "reference is all zero"
+    # I_LED = |lit| - |ref|, strictly smaller than the raw current wherever there is leakage
+    assert ((enriched["I_LED"] <= enriched["I_NVLED"] + 1e-18).all()), "I_LED exceeds the raw current"
+    assert (enriched["I_LED"] < enriched["I_NVLED"]).any(), "nothing was subtracted"
+    assert (enriched["LEAK_FRAC"].dropna().between(0, 1)).all()
+    # EQE follows the corrected current, so it must be HIGHER than the uncorrected one
+    assert (enriched["EQE_LED"] >= enriched["EQE_NVLED"] - 1e-18).all()
+
+    # an old run without the columns keeps the old meaning rather than failing
+    old = df.drop(columns=[c for c in df.columns if c.endswith(("_REF", "_REF_STD"))])
+    old = aa.enrich(old, dark_W=0.0)
+    assert (old["I_LED"] == old["I_NVLED"]).all()
+    assert old["LEAK_FRAC"].isna().all()
+
+
 def test_trace_keys_decode():
     """traces.npz keys are part of the contract: the plotter must decode them."""
     import plot_transients as pt

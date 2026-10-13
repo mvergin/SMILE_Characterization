@@ -599,15 +599,36 @@ def enrich(df, dark_W=0.0):
     # The NVLED channel (ch B) carries the actual LED current; the VLED channel
     # (ch A) can include other current paths. Use NVLED as the LED current and
     # keep |Iv+Inv|/max only as a *diagnostic* of how much VLED leaks.
-    df["I_LED"] = Inv.abs()
+    #
+    # LEAKAGE SUBTRACTION. ch B reads the TOTAL cathode current, not the injected one.
+    # When the run carries NVLED_CURR_REF -- the same pixel at bitval 0, measured back to
+    # back at the same bias -- subtract it. Measured 261013 over 12 pixels: the reference
+    # is 8% of the reading at -0.95 V and 58% at -0.80 V, and without the subtraction the
+    # EQE appears to collapse 20x on the rising side. With it the curve is smooth.
+    # Runs without the column keep the old meaning, and LEAK_FRAC says which you have.
+    if "NVLED_CURR_REF" in df.columns:
+        Iref = df["NVLED_CURR_REF"].astype(float)
+        df["I_NVLED_REF"] = Iref.abs()
+        df["I_LED"] = (Inv.abs() - Iref.abs()).clip(lower=0.0)
+        df["LEAK_FRAC"] = (Iref.abs() / Inv.abs().replace(0, np.nan)).clip(upper=1.0)
+        # The optical reference is the light with the pixel addressed but not driven, so
+        # it is the true local dark for this pixel -- better than the run-wide dark.
+        if "PM400_POWER_REF" in df.columns:
+            P = (_val("PM400_POWER") - df["PM400_POWER_REF"].astype(float)).clip(lower=0.0)
+            df["P_W"] = P
+    else:
+        df["I_LED"] = Inv.abs()
+        df["LEAK_FRAC"] = np.nan
     denom = np.maximum(Iv.abs(), Inv.abs()).replace(0, np.nan)
     df["LEAKAGE"] = (Iv + Inv).abs() / denom
     df["J_VLED"] = current_density(Iv, PIXEL_AREA_UM2)
     df["J_NVLED"] = current_density(Inv, PIXEL_AREA_UM2)
-    df["J_LED"] = df["J_NVLED"]
+    df["J_LED"] = current_density(df["I_LED"], PIXEL_AREA_UM2)
     df["EQE_VLED"] = compute_eqe(P, Iv, WAVELENGTH_NM)
     df["EQE_NVLED"] = compute_eqe(P, Inv, WAVELENGTH_NM)
-    df["EQE_LED"] = df["EQE_NVLED"]
+    # EQE on the LEAKAGE-CORRECTED current. On an uncorrected run I_LED is |Inv| and this
+    # is identical to EQE_NVLED, so the meaning of the column does not change under you.
+    df["EQE_LED"] = compute_eqe(P, df["I_LED"], WAVELENGTH_NM)
     # Error bar on EQE = EQE·√((σP/P)² + (σI/I)²), propagated from the stored SEM columns.
     # NOTE: this is the RANDOM within-point scatter only — it does NOT capture the systematic
     # low-J errors (range offset, parasitic, dark) that dominate here, which is exactly why it
@@ -618,11 +639,16 @@ def enrich(df, dark_W=0.0):
         if "PM400_POWER_STD" in df
         else 0.0
     )
-    relI = (
-        (df["NVLED_CURR_STD"].astype(float) / Inv.abs().replace(0, np.nan))
-        if "NVLED_CURR_STD" in df
-        else 0.0
-    )
+    # The subtraction propagates: sigma(I_LED) = sqrt(sigma_lit^2 + sigma_ref^2), and the
+    # relative error is against the (smaller) corrected current, so it grows exactly where
+    # the leakage dominates. That growth is the real low-J limit now, not the raw scatter.
+    if "NVLED_CURR_STD" in df:
+        sigI = df["NVLED_CURR_STD"].astype(float)
+        if "NVLED_CURR_REF_STD" in df.columns:
+            sigI = np.sqrt(sigI ** 2 + df["NVLED_CURR_REF_STD"].astype(float) ** 2)
+        relI = sigI / df["I_LED"].replace(0, np.nan)
+    else:
+        relI = 0.0
     df["EQE_LED_ERR"] = df["EQE_LED"] * np.sqrt(
         np.asarray(relP, float) ** 2 + np.asarray(relI, float) ** 2
     )
