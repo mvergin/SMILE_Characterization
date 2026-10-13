@@ -217,3 +217,4 @@ data/*.csv
 *.stackdump
 pm400.html
 gui_config_v9.json
+charatests/

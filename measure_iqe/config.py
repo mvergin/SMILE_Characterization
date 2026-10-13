@@ -374,6 +374,18 @@ class IQEConfig:
             raise ValueError("n_fine and n_coarse must be >= 2")
         if not 0.0 <= self.vramp_low_frac <= 1.0:
             raise ValueError(f"vramp_low_frac={self.vramp_low_frac} must be in [0, 1]")
+        # Measured 261013: in High-C the LIMIT selects the current measure range, so a
+        # 0.5 A limit leaves milliamp resolution and a microamp reading is pure noise.
+        # The same run showed High-C is what makes low-J readings correct at all, so
+        # enabling it with the stock compliance is the one configuration that looks
+        # right and measures nothing.
+        if self.highc_b and self.nvled_compliance > 1e-3:
+            raise ValueError(
+                f"highc_b=True with nvled_compliance={self.nvled_compliance} A: in High-C "
+                "the limit selects the measure range, so this resolves no better than "
+                "~milliamps. Use <=1e-3 (1e-3 still moves the array's ~95 uC in under a "
+                "millisecond); go lower for sub-microamp points, at the cost of slower "
+                "charging")
         if self.highc_b and self.perpoint_range:
             raise ValueError("highc_b and perpoint_range are incompatible: High-C derives the "
                              "current range from the limit, so per-point range switching "

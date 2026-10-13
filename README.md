@@ -576,16 +576,47 @@ Two caveats it already handles: leakage discharges the cap too, and a 0 A
 setpoint is only as good as the source range's regulation — the blanked run
 cancels both, and `--decay-source-range` defaults to the finest range.
 
-### High-C mode
+### High-C mode is mandatory for low J — measured
 
-`highc_b = True` had never worked, for a concrete reason: in High-C mode the
-2602B derives the current range from the **limit**, so writing `measure.rangei`
+`highc_b = True` had never worked, for a concrete reason: in High-C the 2602B
+derives the current range from the **limit**, so writing `measure.rangei`
 afterwards conflicts with it. The code wrote the range once at configure time and
 again per pixel. It now sets the range *before* enabling High-C and never touches
 it again, uses `AUTOZERO_ONCE` as the driver's own notes require, and drains the
-SMU error queue so a rejected setting is reported instead of silently
-misreading. `highc_b` with `perpoint_range` is rejected by `validate()` — they
-cannot both own the range.
+SMU error queue after every range change and capture.
+
+With that fixed, the 261013 `step` runs on pixel (54,46) show High-C is not an
+optimisation — **without it the low-J readings are wrong, not merely noisy:**
+
+| V | High-C off | High-C on (1 mA limit) | ratio |
+|---|---|---|---|
+| −0.70 | 351.5 µA | **0.680 µA** | 517× |
+| −1.00 | 426.7 µA | **5.628 µA** | 76× |
+| −1.30 | 30.48 µA | **30.56 µA** | 1.00× |
+
+The two agree at −1.3 V, where the current is tens of µA, and diverge by up to
+517× as the current falls. On the fine ranges without High-C it is worse: 63–87%
+of samples over-range, and the surviving median lands at **42–52% of whatever
+range is selected, independent of bias** — a range artifact, not a measurement.
+
+With High-C the current is physical, monotonic, and **path-independent**: −0.70 V
+reads 0.680 µA arriving from −2.6 V and 0.662 µA arriving from −0.9 V, agreeing to
+2.7%. The direction hysteresis that motivated `sweep_direction` is gone.
+
+Two consequences:
+
+* **The limit is both the charging current and the measure range.** 1 mA moves the
+  array's ~95 µC in under a millisecond but resolves only ~µA; lower it for
+  sub-µA points and charging slows proportionally. `validate()` rejects `highc_b`
+  with a compliance above 1 mA, because the stock 0.5 A is the one setting that
+  looks correct and measures nothing.
+* **Channel A is not a usable leakage cross-check as configured.** It read
+  495.7–498.1 µA in *every* row — constant to ±0.3% across bias, range and High-C
+  state, while ch B varied 70× — so it is an array-level background or a ch A
+  measurement artifact, not the LED current.
+
+`highc_b` with `perpoint_range` is rejected by `validate()`: they cannot both own
+the range.
 
 ---
 
