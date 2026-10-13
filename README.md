@@ -20,6 +20,7 @@ directory on disk is the whole interface, specified in
 | `smile/`, `instruments/` | SMILE FPGA driver and the PM400 / Keithley 2602B instrument drivers |
 | `measurement/`, `data/`, `smile_postprocess.py` | **reference only, unmaintained** — the transient / ultra-fast / hardware-paced-TSP techniques that predate `measure_iqe`. See [MEASUREMENT_MODES.md](MEASUREMENT_MODES.md) |
 | `benchmark_sweep.py`, `autozero_bench.py`, `sweep_variants.py` | parameter benchmarks built on the `measure_iqe` API |
+| `characterize_capacitance.py` | measures the array's ~50 µF capacitance and what it does to a low-current reading |
 
 ---
 
@@ -477,6 +478,51 @@ breaks one side fails on both.
 To change the format: edit RUN_FORMAT.md, copy it to the analysis repo,
 regenerate the fixture with the command at the bottom of that file, copy the
 fixture across, and update both tests.
+
+---
+
+## The 50 µF problem
+
+The array carries a large capacitor in parallel with the LED. Traversing the
+rising-side span (−0.8 → −1.3 V) moves `C·ΔV ≈ 25 µC` of charge. At LED currents
+(1–10 µA) that is **seconds per pixel**; at the SMU's compliance it is
+microseconds. Which of those supplies the charge decides whether a low-J current
+reading is right, and it is the likely cause of:
+
+* the direction hysteresis between `low_to_high` and `high_to_low` (charging vs
+  discharging the cap adds to or subtracts from the LED current);
+* the fine current ranges reading low J *wrong*, not merely noisily;
+* the current oscillating in the SMU buffer at low NPLC (loop instability into a
+  capacitive load — which is what High-C mode exists to fix);
+* possibly the "slow non-radiative parasitic current" that `--warmup-diag` found,
+  since 25 µC at ~1 µA is ~25 s and a high-current dwell settles the cap fast.
+
+```bash
+python characterize_capacitance.py --pixel 54 33 --what all --highc-both
+```
+
+Four experiments, each writing a CSV:
+
+| experiment | what it settles |
+|---|---|
+| `step` | I(t) after a voltage step at the lowest NPLC, per voltage × range × High-C state. Gives the settled value, time to 1% and 0.1%, overshoot and ripple. |
+| `cap` | `C = ∫I dt / ΔV` with the pixel blanked, so only the capacitor conducts. The actual capacitance and its absorption tail. |
+| `isrc` | Channel B sinks a small current and **holds for minutes**. If chA converges toward chB's setpoint as the voltage settles, there is no bypass path and the earlier "current-source mode does not work" conclusion was the capacitor. |
+| `stepdir` | One voltage reached from a small and from a large step. Parasitic conduction depends on time since turn-on; a capacitor depends on the charge moved. If settling scales with \|ΔV\|, it is the capacitor. |
+
+`--simulate` exercises the plumbing only — the built-in rig has no capacitance
+model, so it reports instant settling.
+
+### High-C mode
+
+`highc_b = True` had never worked, for a concrete reason: in High-C mode the
+2602B derives the current range from the **limit**, so writing `measure.rangei`
+afterwards conflicts with it. The code wrote the range once at configure time and
+again per pixel. It now sets the range *before* enabling High-C and never touches
+it again, uses `AUTOZERO_ONCE` as the driver's own notes require, and drains the
+SMU error queue so a rejected setting is reported instead of silently
+misreading. `highc_b` with `perpoint_range` is rejected by `validate()` — they
+cannot both own the range.
 
 ---
 

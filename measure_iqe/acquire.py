@@ -599,7 +599,7 @@ def configure_common(pm, smu, cfg: IQEConfig, log: Logger) -> None:
                           range_i=cfg.vled_range_i)
     # ch B starts as a voltage source — the fast scan voltage-drives it. The
     # current-source sweep reconfigures it later (configure_current_source_b).
-    configure_voltage_source_b(smu, cfg)
+    configure_voltage_source_b(smu, cfg, log)
     smu.setup_buffers(timestamps=False)
     if hasattr(smu, "inst"):
         smu.inst.write("smub.nvbuffer2.appendmode = 1")
@@ -610,24 +610,38 @@ def configure_common(pm, smu, cfg: IQEConfig, log: Logger) -> None:
             pass
 
 
-def configure_voltage_source_b(smu, cfg: IQEConfig) -> None:
-    """ch B = voltage source / current measure (the adaptive sweep). Fixed range here;
-    the fine sweep narrows it deterministically per point (set_measure_range_b).
+def configure_voltage_source_b(smu, cfg: IQEConfig, log: Logger | None = None) -> None:
+    """ch B = voltage source / current measure (the adaptive sweep).
 
-    With HIGHC_B we don't request zero delays (High-C needs settling time) and enable
-    High-C via TSP since the driver refuses high_c=True on channel B."""
+    Without High-C: a fixed measure range, which the fine sweep may narrow per point
+    (``set_measure_range_b``).
+
+    With ``highc_b``: High-C mode is enabled via raw TSP, because the driver refuses
+    ``high_c=True`` on channel B. In High-C mode the 2602B derives the current range
+    from the *limit*, so writing ``measure.rangei`` afterwards conflicts with it and
+    errors — which is why earlier High-C attempts "didn't work". So we set the range
+    BEFORE enabling High-C and never touch it again (``set_measure_range_b`` and
+    ``perpoint_range`` are both suppressed), and we use AUTOZERO_ONCE, which is what
+    the driver's own notes say High-C needs. The SMU error queue is drained
+    afterwards so a rejected setting is reported instead of silently misreading.
+    """
     smu.configure_channel("b", cfg.nvled_compliance, cfg.sweep_nplc, False,
                           zero_delays=not cfg.highc_b, range_i=cfg.nvled_range_i)
     if hasattr(smu, "inst"):
         if cfg.highc_b:
+            # order matters: range first (above), then High-C, then nothing else.
             smu.inst.write("smub.source.highc = smub.ENABLE")
             smu.inst.write("smub.source.delay = smub.DELAY_AUTO")
             smu.inst.write("smub.measure.delay = smub.DELAY_AUTO")
+            smu.inst.write("smub.measure.autozero = smub.AUTOZERO_ONCE")
         else:
             smu.inst.write("smub.source.highc = smub.DISABLE")
-        # Explicitly manage autozero (was previously left in whatever state the SMU happened to be
-        # in) — this is what fixes the NPLC-switch current step at the knee. See SWEEP_AUTOZERO.
-        smu.inst.write(f"smub.measure.autozero = smub.AUTOZERO_{cfg.sweep_autozero}")
+            # Explicitly manage autozero (was previously left in whatever state the SMU happened
+            # to be in) — this is what fixes the NPLC-switch current step at the knee.
+            smu.inst.write(f"smub.measure.autozero = smub.AUTOZERO_{cfg.sweep_autozero}")
+        errs = smu.check_error_queue() if hasattr(smu, "check_error_queue") else []
+        if errs and log is not None:
+            log(f"  SMU rejected a ch B setting: {errs}")
     else:
         smu._mode = "voltage"
 
@@ -936,7 +950,7 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
         log(f"VOLTAGE SWEEP — {len(selected)} pixels × bitvals {list(cfg.bitvals)}, {cfg.sweep_direction}, "
             f"current-targeted (w={cfg.lowj_weight}); adaptive low-J NPLC {cfg.lowj_nplc}, high-J {cfg.highj_nplc}; "
             f"per-point range={cfg.perpoint_range}")
-    configure_voltage_source_b(smu, cfg)
+    configure_voltage_source_b(smu, cfg, log)
     sweep_dir = run_dir / "NVLEDSweep" / "Sweep"
     (sweep_dir / "raw_data").mkdir(parents=True, exist_ok=True)
     # Config up front so it exists even if the run is interrupted.
@@ -1004,7 +1018,9 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                     # range from the ACTUAL current (probe-then-measure), not the coarse map
                     p, ps, iv, ivs, inv, invs, _, _ = acquire_autoranged(pm, smu, n_smu, n_pm, cfg)
                 else:
-                    if cfg.nvled_range_i != cur_range:
+                    if not cfg.highc_b and cfg.nvled_range_i != cur_range:
+                        # In High-C the limit governs the range — writing it here is the
+                        # conflict that made earlier High-C runs fail. Leave it alone.
                         set_measure_range_b(smu, cfg.nvled_range_i); cur_range = cfg.nvled_range_i
                     if cfg.save_raw_samples:
                         (p, ps, iv, ivs, inv, invs, _, _), raw_s = acquire_point(
@@ -1073,7 +1089,7 @@ def run_warmup_diag(pm, smu, smile, pixels: list[tuple[int, int]], run_dir: Path
     log("=" * 56)
     log(f"WARM-UP DIAGNOSTIC on {len(pixels)} pixel(s) at NVLED={cfg.warmup_diag_v} V "
         f"({cfg.warmup_diag_seconds:.0f}s fresh + {cfg.warmup_diag_seconds:.0f}s after conditioning each)")
-    configure_voltage_source_b(smu, cfg)
+    configure_voltage_source_b(smu, cfg, log)
     set_nplc(smu, cfg.warmup_diag_nplc)
     rows = []
 

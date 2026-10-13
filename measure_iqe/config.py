@@ -372,6 +372,10 @@ class IQEConfig:
             raise ValueError("n_fine and n_coarse must be >= 2")
         if not 0.0 <= self.vramp_low_frac <= 1.0:
             raise ValueError(f"vramp_low_frac={self.vramp_low_frac} must be in [0, 1]")
+        if self.highc_b and self.perpoint_range:
+            raise ValueError("highc_b and perpoint_range are incompatible: High-C derives the "
+                             "current range from the limit, so per-point range switching "
+                             "conflicts with it")
         if self.min_pixel_separation < 1:
             raise ValueError("min_pixel_separation must be >= 1 (1 disables the guard)")
         if not 0 <= self.fastscan_alive_pctl <= 100:
