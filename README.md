@@ -787,6 +787,12 @@ below forces a wait anyway.
 
 ### What the sweep now does, and why (261013)
 
+> The full write-up, with figures, is **`INVESTIGATION_REPORT.md` in the analysis
+> repo** (`SMILE_IQE_Analysis`). Regenerate it with
+> `python make_capacitance_figures.py ../SMILE_Characterization`. What follows is
+> the summary.
+
+
 The investigation rewrote the sweep's settings. The short version:
 
 | setting | was | is | because |
