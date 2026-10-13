@@ -63,6 +63,15 @@ class IQEConfig:
     block_size: int = 8  # blocks mode: block edge in pixels (ROI → ~ROI/BLOCK_SIZE blocks/axis)
     pixels_per_block: int = 4  # blocks mode: alive pixels sampled per block
     block_seed: int = 0  # blocks mode: RNG seed (vary across runs to sample new pixels)
+    # blocks mode: no two measured pixels may sit closer than this (Chebyshev, so 2 =
+    # never sharing an edge or a corner). Without it, each block's farthest-point walk
+    # ran to the block's own border and the block next door did the same, so pairs of
+    # measured LEDs landed side by side across the shared edge — the sample looked
+    # stratified but was really clustered, and neighbouring blocks' statistics blurred
+    # into each other. Raise it to spread the sample further (thermal/optical crosstalk
+    # between nearby pixels is a physical question, so it is a knob); 1 disables the
+    # guard. A block too dead or too small to honour it falls back and says so in the log.
+    min_pixel_separation: int = 2
     sweep_fraction: float = 0.10  # spatial mode: fraction of ALIVE pixels to sweep
     min_sweep_pixels: int = 6  # spatial mode: floor on the count (so tiny ROIs still map)
     nth_pixel_sweep: int = 5  # stride mode: sweep every Nth alive pixel
@@ -363,6 +372,8 @@ class IQEConfig:
             raise ValueError("n_fine and n_coarse must be >= 2")
         if not 0.0 <= self.vramp_low_frac <= 1.0:
             raise ValueError(f"vramp_low_frac={self.vramp_low_frac} must be in [0, 1]")
+        if self.min_pixel_separation < 1:
+            raise ValueError("min_pixel_separation must be >= 1 (1 disables the guard)")
         if not 0 <= self.fastscan_alive_pctl <= 100:
             raise ValueError(f"fastscan_alive_pctl={self.fastscan_alive_pctl} must be in [0, 100]")
         if self.pixel_area_um2 <= 0:

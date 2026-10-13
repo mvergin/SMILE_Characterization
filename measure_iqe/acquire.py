@@ -85,19 +85,67 @@ def roi_pixels(x1: int, y1: int, x2: int, y2: int) -> list[tuple[int, int]]:
             for x in range(min(x1, x2), max(x1, x2) + 1)]
 
 
-def _fps_pick(rows, k, start_idx):
-    """Farthest-point sampling of k rows, seeded at start_idx (spreads within the set)."""
-    if k >= len(rows):
-        return list(rows)
+def spacing_summary(rows, min_sep: int = 0) -> str:
+    """How spread out a pixel selection actually is, as a one-line log string.
+
+    The nearest-neighbour distance is the number that distinguishes a genuine
+    spatial sample from one that only looks stratified: if picks touch, the
+    per-block statistics blur into their neighbours.
+    """
+    if len(rows) < 2:
+        return f"spacing: {len(rows)} pixel(s), nothing to compare"
+    # ponytail: O(n^2) pairwise, skipped above 2000 picks (a >9 h run); chunk or use a
+    # KD-tree if a sweep ever gets that big.
+    if len(rows) > 2000:
+        return f"spacing: {len(rows)} pixels (pairwise spacing check skipped)"
+    p = np.array([[r["X"], r["Y"]] for r in rows], float)
+    d = np.abs(p[:, None, :] - p[None, :, :]).max(-1)
+    np.fill_diagonal(d, np.inf)
+    nn = d.min(axis=1)
+    return (f"spacing: nearest-neighbour min {nn.min():.0f} px, median {np.median(nn):.0f} px"
+            f" (target ≥ {min_sep}); {int((nn <= 1).sum())} touching pixel(s)")
+
+
+def _fps_pick(rows, k, start_idx, avoid=None, min_sep=0):
+    """Up to k rows by farthest-point sampling, seeded at start_idx.
+
+    ``avoid`` holds pixels already selected in OTHER blocks. They enter the distance
+    objective, so each pick is pushed away from the neighbouring blocks' picks and
+    towards this block's interior. Without it the walk only ever maximised distance
+    *within* the block, whose extreme points are its own border — and the block next
+    door did the same, so the two border picks landed side by side across the shared
+    edge. The seeded first pick keeps ``block_seed`` varying runs.
+
+    ``min_sep`` is a hard Chebyshev floor against everything already chosen, in this
+    block and in ``avoid`` alike. A candidate closer than that is never taken, so a
+    block too sparse to supply k separated pixels returns FEWER rather than two
+    touching LEDs whose readings would be redundant anyway. Pass 0 or 1 to allow
+    neighbours.
+    """
     pts = np.array([[r["X"], r["Y"]] for r in rows], float)
-    chosen = [int(start_idx)]
-    d2 = ((pts - pts[chosen[0]]) ** 2).sum(axis=1)
+    far = np.full(len(rows), np.inf)      # squared Euclidean to nearest chosen — the spread objective
+    sep = np.full(len(rows), np.inf)      # Chebyshev to nearest chosen — the hard floor
+
+    def mark(px, py):
+        nonlocal far, sep
+        far = np.minimum(far, (pts[:, 0] - px) ** 2 + (pts[:, 1] - py) ** 2)
+        sep = np.minimum(sep, np.maximum(np.abs(pts[:, 0] - px), np.abs(pts[:, 1] - py)))
+
+    for px, py in (avoid or ()):
+        mark(px, py)
+
+    chosen: list[int] = []
     while len(chosen) < k:
-        i = int(np.argmax(d2))
-        if d2[i] <= 0:
-            break
+        ok = sep >= min_sep
+        ok[chosen] = False                             # never pick the same pixel twice
+        if not ok.any():
+            break                                      # block exhausted at this separation
+        if not chosen and ok[int(start_idx)]:
+            i = int(start_idx)                         # seeded start → block_seed varies runs
+        else:
+            i = int(np.argmax(np.where(ok, far, -np.inf)))
         chosen.append(i)
-        d2 = np.minimum(d2, ((pts - pts[i]) ** 2).sum(axis=1))
+        mark(pts[i, 0], pts[i, 1])
     return [rows[i] for i in chosen]
 
 
@@ -119,16 +167,29 @@ def select_sweep_pixels(alive: list[Row], cfg: IQEConfig, log: Logger) -> list[R
         ye = np.linspace(ylo, yhi + 1, nby + 1)
         rng = np.random.default_rng(cfg.block_seed)
         picks = []                                     # one list of K pixels per non-empty block
+        taken: list[tuple[int, int]] = []              # every pixel chosen so far, ALL blocks
+        bs = cfg.block_size
+        n_short = 0
         for bx in range(nbx):
             for by in range(nby):
                 block = [r for r in alive if xe[bx] <= r["X"] < xe[bx + 1]
                          and ye[by] <= r["Y"] < ye[by + 1]]
                 if not block:
                     continue
+                # Only picks within one block of this one can end up touching it, so the
+                # avoid-set stays small however big the ROI is.
+                near = [p for p in taken if xe[bx] - bs <= p[0] < xe[bx + 1] + bs
+                        and ye[by] - bs <= p[1] < ye[by + 1] + bs]
                 # RANDOM start per block → each block's FPS pattern differs → sampled
                 # rows/columns diversified across blocks (no repeating sub-lattice).
-                picks.append(_fps_pick(block, min(cfg.pixels_per_block, len(block)),
-                                       int(rng.integers(len(block)))))
+                got = _fps_pick(block, cfg.pixels_per_block, int(rng.integers(len(block))),
+                                avoid=near, min_sep=cfg.min_pixel_separation)
+                if not got:
+                    continue
+                if len(got) < cfg.pixels_per_block:
+                    n_short += 1          # too few well-separated alive pixels in this block
+                picks.append(got)
+                taken.extend((r["X"], r["Y"]) for r in got)
         # Round-robin MEASUREMENT ORDER: pass 0 takes the 1st pixel of every block, pass 1 the
         # 2nd, etc. So consecutive measurements hop between blocks and each block's K pixels are
         # spread across the whole run → slow thermal drift is decorrelated from spatial position
@@ -142,6 +203,11 @@ def select_sweep_pixels(alive: list[Row], cfg: IQEConfig, log: Logger) -> list[R
         log(f"  selected {len(sel)} pixels: {nbx}×{nby} blocks (~{cfg.block_size}px), "
             f"{cfg.pixels_per_block}/block, {len(picks)} non-empty blocks, seed {cfg.block_seed} "
             f"(randomized-start FPS, round-robin order → drift-decorrelated)")
+        # Report the realised spacing — this is the number that says whether the sample is
+        # spatially spread or secretly clustered, so it belongs in the run log.
+        log("  " + spacing_summary(sel, cfg.min_pixel_separation)
+            + (f"; {n_short} block(s) gave fewer than {cfg.pixels_per_block} "
+               f"well-separated alive pixels" if n_short else ""))
         return sel
 
     # "spatial": global farthest-point sampling of a fraction of the alive pixels

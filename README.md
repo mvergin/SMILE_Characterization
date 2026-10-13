@@ -204,7 +204,7 @@ runs that pinned each value.
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `sample_name` | `str` | `'Array38_IQE'` |  |
+| `sample_name` | `str` | `'Array38_IQE'` | base_dir is relative to the working directory unless you pass an absolute path. Nothing outside it is ever written. |
 | `base_dir` | `str` | `'results'` | output root; a timestamped run dir is created inside |
 
 #### ROI & pixel selection
@@ -216,6 +216,7 @@ runs that pinned each value.
 | `block_size` | `int` | `8` | blocks mode: block edge in pixels (ROI → ~ROI/BLOCK_SIZE blocks/axis) |
 | `pixels_per_block` | `int` | `4` | blocks mode: alive pixels sampled per block |
 | `block_seed` | `int` | `0` | blocks mode: RNG seed (vary across runs to sample new pixels) |
+| `min_pixel_separation` | `int` | `2` | blocks mode: no two measured pixels may sit closer than this (Chebyshev, so 2 = never sharing an edge or a corner). Without it, each block's farthest-point walk ran to the block's own border and the block next door … |
 | `sweep_fraction` | `float` | `0.1` | spatial mode: fraction of ALIVE pixels to sweep |
 | `min_sweep_pixels` | `int` | `6` | spatial mode: floor on the count (so tiny ROIs still map) |
 | `nth_pixel_sweep` | `int` | `5` | stride mode: sweep every Nth alive pixel |
@@ -226,9 +227,9 @@ runs that pinned each value.
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `source_mode` | `str` | `'voltage'` |  |
+| `source_mode` | `str` | `'voltage'` | "voltage": ch B sources voltage, adaptive current-targeted sweep. PROVEN on Array38 — the 10 mA voltage sweep captured the IQE peak (J≈6, ~59%). USE THIS. "current": ch B sources (sinks) current, measures voltage. … |
 
-#### Current-source sweep (SOURCE_MODE = "current")
+#### Current-source sweep (source_mode = "current")
 
 | parameter | type | default | meaning |
 |---|---|---|---|
@@ -240,12 +241,12 @@ runs that pinned each value.
 | `current_source_range_i` | `float` | `0.001` | fixed source current range (covers 120 µA; gives good low-current resolution). Tune on the bench. |
 | `measure_v_range` | `float` | `6.0` | ch B voltage measure range (covers ±3.2 V) |
 
-#### Voltage-source sweep (SOURCE_MODE = "voltage", DEFAULT)
+#### Voltage-source sweep (source_mode = "voltage", DEFAULT)
 
 | parameter | type | default | meaning |
 |---|---|---|---|
 | `bitvals` | `tuple[int, ...]` | `(15,)` | single bitval — densify low-J via spacing instead |
-| `fine_sweep_mode` | `str` | `'voltage'` |  |
+| `fine_sweep_mode` | `str` | `'voltage'` | Fine-sweep mode: "voltage" — plain UNIFORM voltage ramp NVLED_V_COARSE_START → STOP (no coarse map). Hits every voltage including the steep turn-on, so the rising side is densely sampled. Simple, robust — this is … |
 | `nvled_v_coarse_start` | `float` | `-0.8` | least-negative sweep voltage (just below turn-on) |
 | `nvled_v_coarse_stop` | `float` | `-2.6` | most-negative sweep voltage (below saturation knee) |
 | `n_coarse` | `int` | `26` | coarse pre-sweep points |
@@ -319,9 +320,9 @@ runs that pinned each value.
 | `probe_range_i` | `float` | `0.001` | wide probe range: covers the device max (~175 µA), never overflows, gives the magnitude to pick the real range from |
 | `probe_n_smu` | `int` | `4` | quick samples for the magnitude probe |
 | `range_settle_ms` | `float` | `50.0` | settle after a measure-range change before reading |
-| `highc_b` | `bool` | `False` |  |
+| `highc_b` | `bool` | `False` | 2602B High-C mode on ch B. The driver guards High-C on B (raises), so we enable it via TSP. High-C adds settling delays (slower) but damps a capacitive load that can make the low current ranges ring/never settle — … |
 | `sweep_autozero` | `str` | `'AUTO'` | AUTO \| ONCE \| OFF |
-| `save_raw_samples` | `bool` | `True` |  |
+| `save_raw_samples` | `bool` | `True` | Save every individual burst sample (not just the per-point summary) to a raw-samples CSV, and write mean/median/std/SEM (not just one summary) into the aggregated file. Off → old behaviour. |
 
 #### Integration time (NPLC) per phase
 
@@ -346,18 +347,18 @@ runs that pinned each value.
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `dead_abort` | `bool` | `True` |  |
+| `dead_abort` | `bool` | `True` | Liveness is gated by the fast scan, which has an optical background floor that can mark a dead edge pixel "alive" (run 1405: 3/4 corner pixels read ~71 nW in the fast scan but 0.05 nW in the sweep). The sweep runs … |
 | `dead_abort_nw` | `float` | `2.0` | absolute floor (nW): first-point power below this ⇒ dead |
 | `dead_abort_frac` | `float` | `0.1` | or below this fraction of the running median of live pixels |
 | `thermal_settle_ms` | `float` | `100.0` | before the fine sweep, sit at the FIRST point this long so the pixel reaches its starting-current thermal steady state (clears heat left by the coarse pre-sweep) |
 | `n_smu_samples` | `int` | `8` | SMU samples averaged per point |
 | `n_pm_samples` | `int` | `12` | PM400 readings averaged per point |
 
-#### Per-segment effort (FINE_SWEEP_MODE="voltage")
+#### Per-segment effort (fine_sweep_mode="voltage")
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `vramp_perseg_effort` | `bool` | `True` |  |
+| `vramp_perseg_effort` | `bool` | `True` | The knee (VRAMP_KNEE_V) splits not just point DENSITY but measurement EFFORT. The low-V / rising-side segment (\|V\| < \|knee\|) has faint light near the dark floor, so take more PM reads there (σ_light ∝ 1/√N_PM); the … |
 | `vramp_lowv_nplc` | `float` | `2.0` |  |
 | `vramp_lowv_n_pm` | `int` | `32` |  |
 | `vramp_lowv_n_smu` | `int` | `12` |  |
@@ -376,6 +377,7 @@ runs that pinned each value.
 | `fastscan_alive_pctl` | `int` | `90` | "typical lit" level = this percentile of the fast-scan power. NOT the median: the median collapses to the noise floor on a majority-DEAD ROI (then ~everything is mislabelled alive — e.g. quadrant 260703-1307 was 57% … |
 | `pixel_area_um2` | `float` | `100.0` |  |
 | `smu_display_off` | `bool` | `False` |  |
+
 ### Valid ranges and constraints
 
 `IQEConfig.validate()` runs before any hardware is touched and rejects:
@@ -391,6 +393,7 @@ runs that pinned each value.
 | `pm_wavelength` | `> 0` nm |
 | `n_fine`, `n_coarse` | `>= 2` |
 | `vramp_low_frac` | `0.0 .. 1.0` |
+| `min_pixel_separation` | `>= 1` (1 disables the guard) |
 | `fastscan_alive_pctl` | `0 .. 100` |
 | `pixel_area_um2` | `> 0` |
 
@@ -410,6 +413,34 @@ compliance, and `nvled_range_i` / `probe_range_i` must be one of
 * **`vramp_lowv_n_pm` / `vramp_lowv_nplc`** — the low-J precision budget. The
   light is the limiting channel at low current, so spend on `*_n_pm` before
   `*_nplc`.
+
+### How blocks mode samples
+
+`sweep_select="blocks"` tiles the ROI into `block_size`x`block_size` blocks and
+takes `pixels_per_block` alive pixels from **each** block, so every block
+contributes equally and per-block / row-band / column-band statistics are
+comparable. Within a block the picks are spread by farthest-point sampling from
+a random start, which `block_seed` varies — change the seed between runs to
+measure new pixels and accumulate coverage of the array.
+
+Two rules keep the sample genuinely spatial rather than only nominally
+stratified:
+
+* Each block's walk is pushed away from the pixels already chosen in
+  **neighbouring** blocks, not just its own, so picks drift towards block
+  interiors instead of piling onto the shared edges.
+* `min_pixel_separation` (default 2, Chebyshev) is a hard floor: no two measured
+  pixels ever share an edge or a corner. A block without that many
+  well-separated alive pixels contributes **fewer** rather than a touching pair,
+  and the run log says how many blocks fell short. Raise it to spread the sample
+  further; set it to 1 to allow neighbours.
+
+The log line reports the realised spacing, so you can see what you got:
+
+```
+selected 256 pixels: 8x8 blocks (~8px), 4/block, 64 non-empty blocks, seed 0 ...
+spacing: nearest-neighbour min 2 px, median 3 px (target >= 2); 0 touching pixel(s)
+```
 
 ---
 

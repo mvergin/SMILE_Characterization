@@ -16,7 +16,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from measure_iqe import IQEConfig, run_iqe_measurement
+from measure_iqe import IQEConfig, run_iqe_measurement, select_sweep_pixels
 from measure_iqe.cli import main as cli_main
 from measure_iqe.cli import parse_override
 
@@ -91,6 +91,71 @@ def test_config_coerces_and_rejects_value_types():
         except ValueError:
             continue
         raise AssertionError(f"{bad} should be rejected")
+
+
+def _nearest_neighbour(sel):
+    import numpy as np
+    p = np.array([[r["X"], r["Y"]] for r in sel], float)
+    d = np.abs(p[:, None, :] - p[None, :, :]).max(-1)       # Chebyshev
+    np.fill_diagonal(d, np.inf)
+    return d.min(axis=1)
+
+
+def test_blocks_mode_never_selects_touching_pixels():
+    """The regression this guards: per-block farthest-point sampling used to run to
+    each block's own border, and the block next door did the same, so pairs of
+    measured LEDs ended up side by side across the shared edge (at k=4, 87% of
+    picks sat on a border and 2/3 of them had an adjacent partner)."""
+    alive = [dict(X=x, Y=y) for y in range(64) for x in range(64)]
+    for k in (1, 2, 4, 8):
+        cfg = IQEConfig(roi=(0, 0, 63, 63), block_size=8, pixels_per_block=k)
+        sel = select_sweep_pixels(alive, cfg, QUIET)
+        assert len(sel) == 64 * k, f"k={k}: expected equal per-block sampling"
+        nn = _nearest_neighbour(sel)
+        assert nn.min() >= cfg.min_pixel_separation, f"k={k}: min separation {nn.min()}"
+
+
+def test_blocks_mode_keeps_equal_per_block_counts():
+    from collections import Counter
+    alive = [dict(X=x, Y=y) for y in range(64) for x in range(64)]
+    cfg = IQEConfig(roi=(0, 0, 63, 63), block_size=8, pixels_per_block=4)
+    sel = select_sweep_pixels(alive, cfg, QUIET)
+    counts = Counter((r["X"] // 8, r["Y"] // 8) for r in sel)
+    assert len(counts) == 64 and set(counts.values()) == {4}
+
+
+def test_blocks_mode_seed_still_varies_the_sample():
+    """block_seed must keep selecting different pixels so repeated runs accumulate
+    coverage of the array."""
+    alive = [dict(X=x, Y=y) for y in range(64) for x in range(64)]
+    sets = []
+    for seed in (0, 1, 2):
+        cfg = IQEConfig(roi=(0, 0, 63, 63), block_size=8, pixels_per_block=4, block_seed=seed)
+        sets.append({(r["X"], r["Y"]) for r in select_sweep_pixels(alive, cfg, QUIET)})
+    for a, b in ((0, 1), (0, 2), (1, 2)):
+        overlap = len(sets[a] & sets[b]) / len(sets[a])
+        assert overlap < 0.5, f"seeds {a}/{b} overlap {overlap:.0%} — seed barely matters"
+
+
+def test_blocks_mode_takes_fewer_rather_than_touching_when_sparse():
+    """A block without k well-separated alive pixels must return fewer, not neighbours."""
+    import numpy as np
+    rng = np.random.default_rng(7)
+    sparse = [dict(X=x, Y=y) for y in range(64) for x in range(64) if rng.random() < 0.08]
+    cfg = IQEConfig(roi=(0, 0, 63, 63), block_size=8, pixels_per_block=4)
+    lines: list[str] = []
+    sel = select_sweep_pixels(sparse, cfg, lines.append)
+    assert 0 < len(sel) < 64 * 4, "a sparse ROI cannot fill every block"
+    assert _nearest_neighbour(sel).min() >= 2
+    assert any("gave fewer than" in ln for ln in lines), "short blocks must be reported"
+
+
+def test_separation_guard_can_be_disabled():
+    alive = [dict(X=x, Y=y) for y in range(64) for x in range(64)]
+    cfg = IQEConfig(roi=(0, 0, 63, 63), block_size=8, pixels_per_block=4,
+                    min_pixel_separation=1)
+    sel = select_sweep_pixels(alive, cfg, QUIET)
+    assert len(sel) == 256 and _nearest_neighbour(sel).min() == 1
 
 
 def test_cli_override_parsing():
