@@ -18,7 +18,7 @@ directory on disk is the whole interface, specified in
 |---|---|
 | `measure_iqe/` | **the measurement: library + CLI** — fast scan, pixel selection, IQE sweep |
 | `smile/`, `instruments/` | SMILE FPGA driver and the PM400 / Keithley 2602B instrument drivers |
-| `auto_measure.py` + `measurement/`, `data/` | the older automated run (transient and ultra-fast modes), with its own post-processing in `smile_postprocess.py` |
+| `measurement/`, `data/`, `smile_postprocess.py` | **reference only, unmaintained** — the transient / ultra-fast / hardware-paced-TSP techniques that predate `measure_iqe`. See [MEASUREMENT_MODES.md](MEASUREMENT_MODES.md) |
 | `benchmark_sweep.py`, `autozero_bench.py`, `sweep_variants.py` | parameter benchmarks built on the `measure_iqe` API |
 
 ---
@@ -488,13 +488,13 @@ fixture across, and update both tests.
 * Hardware autorange is broken with the fast zero-delay burst read; the current
   measure range is always set explicitly. Leave `perpoint_range` off unless you
   are reproducing the probe-then-narrow experiment.
-* `auto_measure.py` still configures itself with module-level constants rather
-  than an `IQEConfig`. The "LabView PC, 1 ms settle" variant that used to be a
-  906-line copy of it is now a preset comment block at the top of that file.
-* `smile_postprocess.py` and `smile_heatmap.py` are analysis-shaped but stayed
-  here: `auto_measure.py` calls them inline during a run, on its own CSV format
-  rather than the one in RUN_FORMAT.md. If `auto_measure.py` is ever retired or
-  ported onto `measure_iqe`, they go to the analysis repo with it.
+* `measurement/`, `data/`, `smile_postprocess.py` and `smile_heatmap.py` are
+  unmaintained reference implementations with nothing importing them. They hold
+  three acquisition techniques `measure_iqe` does not implement, two of which
+  are the right instruments for the 50 µF capacitance problem.
+  [MEASUREMENT_MODES.md](MEASUREMENT_MODES.md) records each one's status and open
+  bugs. Their monolithic driver `auto_measure.py` was removed; it is in git
+  history at `2c598d1`.
 * The PyQt GUI was removed in the split. It was an intermediary for checking
   things by hand, and the scripts replaced it. A thin wrapper that shells out to
   `python -m measure_iqe` would be the way to bring that convenience back —
