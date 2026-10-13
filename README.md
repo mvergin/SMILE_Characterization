@@ -818,6 +818,29 @@ both carry the same history.
 
 Cost: ~30 points x 2 drive states x ~8 s, about 4-5 min of settling per pixel.
 
+### Where the low-J limit now sits (runs 261014-0007 / -0035)
+
+Two full sweeps on pixel 124,135, 28 minutes apart. The **current** reproduces to
+0.03-0.6% over almost the whole range and 1.3% at the very last point, and the
+sweep agrees with the independent `leak` measurement to 4%. The current is no
+longer the problem.
+
+The **light** is. At the dimmest point the signal is ~250 pW and the optical
+reference wanders:
+
+| V | P_led | within-burst error | run-to-run |
+|---|---|---|---|
+| -0.911 | 3343 pW | 1.0% | 0.1% |
+| -0.883 | 2139 pW | 1.8% | 1.6% |
+| -0.856 | 1180 pW | 3.1% | 0.9% |
+| -0.828 | 595 pW | 6.8% | 7.6% |
+| **-0.800** | **281 pW** | **11.8%** | **33%** |
+
+So J = 0.2 is reachable but its EQE carries tens of percent. J >= 0.5 (-0.856 V
+and below) is good to a few percent. Pushing lower needs optical collection or
+far heavier PM averaging -- sigma falls as N^-0.5, so 4x the readings halves it --
+not more electrical care.
+
 ### Two-phase settling
 
 `--charge-limit` charges the array at a high limit and then drops to the

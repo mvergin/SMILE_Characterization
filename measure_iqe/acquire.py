@@ -1128,7 +1128,13 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                 if cfg.leak_reference:
                     smile.set_pixel(x, y, cfg.leak_ref_bitval)
                     time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
-                    ref = acquire_point(pm, smu, n_smu, max(3, n_pm // 4))
+                    # FULL n_pm, not a quarter of it. The reference current is stable to
+                    # ~0.2 nA and needs almost no averaging, but the reference POWER is the
+                    # dark level being subtracted from a ~250 pW signal, so at the dim end
+                    # it is the dominant error. Run 261014-0035 with n_pm//4: the reference
+                    # SEM was 30 pW against the lit reading's 14 pW -- the term that mattered
+                    # most was averaged the least.
+                    ref = acquire_point(pm, smu, n_smu, n_pm)
                     smile.set_pixel(x, y, bitval)
                     time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
                 vr = round(float(v), 4)
