@@ -704,10 +704,38 @@ Two further consequences:
   sub-µA points and charging slows proportionally. `validate()` rejects `highc_b`
   with a compliance above 1 mA, because the stock 0.5 A is the one setting that
   looks correct and measures nothing.
-* **Channel A is not a usable leakage cross-check as configured.** It read
-  495.7–498.1 µA in *every* row — constant to ±0.3% across bias, range and High-C
-  state, while ch B varied 70× — so it is an array-level background or a ch A
-  measurement artifact, not the LED current.
+* **Channel A is an array background plus the LED current.** It read 490.6, 491.4
+  and 501.2 µA while ch B spanned 166× (60 nA to 10 µA) — but it *tracks*: +9.7 µA
+  when ch B went from 1 to 10 µA. So it is a real measurement, not an artifact; the
+  per-pixel signal simply sits on a ~490 µA array-level background, which makes the
+  `VLED/NVLED` ratio meaningless as a per-pixel leakage check.
+
+### Capacitance and current-source mode: measured
+
+`C = 45.7 ± 3.8 µF` from the 10 µA and 100 µA ramps, confirming the ~50 µF
+estimate. The 1 µA setpoint is invalidated by a parallel current, exactly as the
+method's own cross-check predicts: decomposing `I_set = C·dV/dt + I_parallel`
+gives **866 nA parallel when blanked and 162 nA when lit** at −0.35 V. That
+difference is unexplained and matters — it is comparable to the 249 nA measured at
+−0.70 V.
+
+**Current-source mode works.** Held at 1 µA, ch B delivers 953.7 nA, the node
+fully equilibrates (`dV/dt` → 0.002 mV/s after 180 s) at −0.8568 V, and that
+agrees with the voltage-mode measurement at −0.85 V (923.6 nA) to **3.3%**. The
+original "ch B as a current source DOES NOT WORK on this device" conclusion is
+refuted — it was measured with a 15 ms settle against 46 µF.
+
+At 100 nA it still fails, for a fixable reason: every setpoint was sourced on the
+1 mA range, where 100 nA is 0.01% of full scale, and the SMU delivered 60 nA. The
+source range is now chosen per setpoint.
+
+### The open question: is the low-J current actually LED current?
+
+Both source modes measure the *total* cathode current. If a few hundred nA of
+leakage flows at low bias, the 249 nA at −0.70 V is mostly not injection — and
+that would explain the 20× EQE drop below J ≈ 0.4 as a contaminated denominator
+rather than device physics. The `leak` experiment settles it by measuring each bias
+lit and blanked; lit minus blanked is the LED current.
 
 `highc_b` with `perpoint_range` is rejected by `validate()`: they cannot both own
 the range.

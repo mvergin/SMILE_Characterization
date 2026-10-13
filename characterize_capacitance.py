@@ -23,6 +23,15 @@ Experiments (``--what``):
 
   step      I(t) after a voltage step at the lowest NPLC, per voltage x range x
             High-C state. Settled value, time to 1% and 0.1%, overshoot, ripple.
+  leak      Settled current and light at each bias, pixel LIT and BLANKED. Both
+            source modes read the TOTAL cathode current, so neither separates LED
+            injection from leakage; blanking at the same bias removes the LED and
+            leaves the leakage, and lit minus blanked is the true LED current. The
+            cap ramps implied a few hundred nA of parallel current near -0.35 V,
+            comparable to the 249 nA measured at -0.70 V, so this decides whether
+            the apparent EQE collapse below J ~ 0.4 is physics or a contaminated
+            denominator.
+
   cap       C per pixel from a known current and the voltage slope it produces:
             C = I/(dV/dt). Park below turn-on, hand the node to a current source,
             time the ramp. Needs only a voltage slope, so it is immune to the
@@ -526,13 +535,75 @@ def cap_source_range(i_set):
     return m.SMU_I_RANGES[-1]
 
 
+def exp_leak(pm, smu, smile, pixel, cfg, args, log):
+    """Settled current and light at each bias, pixel LIT and BLANKED.
+
+    The missing measurement. Both source modes read the TOTAL cathode current, so
+    neither separates LED injection from a parallel leakage path. Blanking the pixel
+    at the same bias removes the LED and leaves the leakage, so lit minus blanked is
+    the true LED current.
+
+    This matters because the cap ramps implied a few hundred nA of parallel current
+    near -0.35 V, which is comparable to the 249 nA measured at -0.70 V. If much of
+    that is leakage then the LED current at low J is far smaller than the cathode
+    current, and the apparent EQE collapse below J ~ 0.4 is a contaminated
+    denominator rather than device physics. Same bias, same range, same timing, so
+    the subtraction is valid.
+    """
+    rows = []
+    m.configure_voltage_source_b(smu, cfg, log)
+    for v in args.voltages:
+        meas = {}
+        for lit in (True, False):
+            if lit:
+                smile.set_pixel(pixel[0], pixel[1], cfg.bitvals[0])
+            else:
+                smile.blank_frame()
+            time.sleep(0.05)
+            t, _ia, ib = capture_step(smu, args.v_start, v, args.samples, args.nplc,
+                                      chunk=args.chunk, log=log,
+                                      limit_a=cfg.nvled_compliance,
+                                      capacitance=args.capacitance,
+                                      max_presettle_s=args.max_presettle_s)
+            met = settling_metrics(t, np.abs(ib))
+            pw, pw_sem = read_power(pm, args.step_n_pm)
+            meas[lit] = (met, pw, pw_sem)
+        (mlit, plit, plit_sem), (mdark, pdark, pdark_sem) = meas[True], meas[False]
+        i_led = mlit["settled"] - mdark["settled"]
+        p_led = plit - pdark
+        eqe = float("nan")
+        if np.isfinite(i_led) and i_led:
+            eqe = (p_led / cfg.photon_energy_j) / (abs(i_led) / 1.602176634e-19)
+        rows.append(dict(v_to=v, i_lit=mlit["settled"], i_dark=mdark["settled"],
+                         i_led=i_led, j_led=to_j(i_led, cfg),
+                         leak_frac=(abs(mdark["settled"]) / abs(mlit["settled"])
+                                    if mlit["settled"] else float("nan")),
+                         p_lit=plit, p_dark=pdark, p_led=p_led, p_sem=plit_sem,
+                         eqe_led=eqe, settled_lit=mlit["settled_ok"],
+                         settled_dark=mdark["settled_ok"],
+                         over_lit=mlit["n_overflow"], over_dark=mdark["n_overflow"],
+                         smu_errors=drain_errors(smu)))
+        log(f"    V={v:+.2f}  lit {mlit['settled']*1e9:+9.1f} nA  dark "
+            f"{mdark['settled']*1e9:+9.1f} nA  -> LED {i_led*1e9:+9.1f} nA "
+            f"(J={to_j(i_led, cfg):+7.3f}, leak "
+            f"{100*abs(mdark['settled']/mlit['settled']) if mlit['settled'] else float('nan'):.0f}%)"
+            f"  P {p_led*1e12:+8.1f} pW  EQE {100*eqe:6.3f}%")
+    smile.blank_frame()
+    return rows
+
+
 def exp_isrc(pm, smu, smile, pixel, cfg, args, log):
     """Current-source mode, held long enough to actually equilibrate."""
     rows = []
     smile.set_pixel(pixel[0], pixel[1], cfg.bitvals[0])
-    m.configure_current_source_b(smu, cfg)
     m.set_nplc(smu, max(args.nplc, 0.1))
     for i_set in args.isrc_currents:
+        # Source range PER setpoint. On the 1 mA default a 100 nA setpoint is 0.01% of
+        # range and the SMU delivered 60 nA instead of 100 - measured 261013.
+        src_range = cap_source_range(i_set)
+        m.configure_current_source_b(
+            smu, dataclasses.replace(cfg, current_source_range_i=src_range))
+        m.set_nplc(smu, max(args.nplc, 0.1))
         m.set_current_b(smu, -abs(i_set))      # ch B sinks the LED current
         t0 = time.perf_counter()
         last = None
@@ -547,6 +618,7 @@ def exp_isrc(pm, smu, smile, pixel, cfg, args, log):
             dvdt = ((vb - last[1]) / (dt - last[0])) if last else float("nan")
             rows.append(dict(i_set=i_set, j_set=to_j(i_set, cfg), t_s=dt, i_a=ia, i_b=ib,
                              v_b=vb, dvdt=dvdt, power_W=p,
+                             src_range=src_range,
                              leak_ratio=abs(ia / ib) if ib else float("nan")))
             last = (dt, vb)
             time.sleep(args.isrc_period)
@@ -668,7 +740,7 @@ def exp_optfloor(pm, smu, smile, cfg, args, log):
     return rows
 
 
-PER_PIXEL = {"step": exp_step, "cap": exp_cap, "isrc": exp_isrc,
+PER_PIXEL = {"step": exp_step, "cap": exp_cap, "leak": exp_leak, "isrc": exp_isrc,
              "stepdir": exp_stepdir, "decay": exp_decay}
 ARRAY_WIDE = {"optfloor": exp_optfloor}
 ALL = [*PER_PIXEL, *ARRAY_WIDE]
@@ -778,8 +850,10 @@ def build_parser():
                     help="cap on the charge-derived pre-settle before each capture. The "
                          "charge time is C*dV/limit, which at a 1 uA limit is minutes per "
                          "point; exceeding the cap is logged as a warning")
-    ap.add_argument("--capacitance", type=float, default=50e-6,
-                    help="C used to turn dV/dt into a current; refine it with --what cap")
+    ap.add_argument("--capacitance", type=float, default=45.7e-6,
+                    help="C used to turn dV/dt into a current. Default is the MEASURED "
+                         "value: 45.7 +/- 3.8 uF, from the 10 uA and 100 uA cap ramps "
+                         "on pixel (54,46), 261013")
     ap.add_argument("--optfloor-n", nargs="+", type=int, default=[4, 8, 32, 128, 512])
     ap.add_argument("--optfloor-reps", type=int, default=12,
                     help="repeats per N_PM, for the repeatability spread")
@@ -820,7 +894,7 @@ def main(argv=None):
     # artifact below ~10 uA, not a noisy measurement - it lands at 42-58% of
     # whatever range is selected regardless of bias. step and stepdir read current
     # in voltage mode, so they need it. cap does not: it measures a voltage slope.
-    needs_highc = [n for n in what if n in ("step", "stepdir")]
+    needs_highc = [n for n in what if n in ("step", "stepdir", "leak")]
     if needs_highc and not (args.highc or args.highc_both):
         log(f"WARNING: {', '.join(needs_highc)} measure current in voltage mode without "
             f"High-C. Below ~10 uA that reads ~50% of the selected range regardless of "
