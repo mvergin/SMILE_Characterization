@@ -603,7 +603,44 @@ With High-C the current is physical, monotonic, and **path-independent**: −0.7
 reads 0.680 µA arriving from −2.6 V and 0.662 µA arriving from −0.9 V, agreeing to
 2.7%. The direction hysteresis that motivated `sweep_direction` is gone.
 
-Two consequences:
+### The limit sets the resolution: measured
+
+Lowering the High-C limit from 1 mA to 10 µA, same pixel, same points:
+
+| V | 1 mA limit | 10 µA limit | they differ by |
+|---|---|---|---|
+| −0.85 | 934.2 nA, 79% ripple, 735 nA noise | **925.7 nA, 1% ripple, 9.4 nA noise** | 1% |
+| −0.80 | 715.5 nA, 89% ripple, 633 nA noise | **447.5 nA, 2% ripple, 9.3 nA noise** | 60% |
+| −0.70 | 661.7 nA, 90% ripple, 598 nA noise | **248.6 nA, 4% ripple, 9.5 nA noise** | 166% |
+
+**63× less noise**, and `settled_ok` is True for the first time (tail drift
+0.24–0.93%). The 1 mA readings agree only at −0.85 V and run high below that, so
+the 1 mA limit is not usable under about 1 µA.
+
+The resulting curve reaches **J = 0.249** — the sub-unity current density that was
+the goal — with an ideality factor of 4.4 over −0.70 to −0.85 V:
+
+| V | I | J | time to settle |
+|---|---|---|---|
+| −0.70 | 248.6 nA | 0.249 | 15.5 s |
+| −0.80 | 447.5 nA | 0.447 | 11.3 s |
+| −0.85 | 925.7 nA | 0.926 | 2.7 s |
+
+Settling at low J is **tens of seconds**, exactly as `C·ΔV/I` predicts. A separate
+50000-sample run confirmed it: at −0.70 V from −2.6 V, `t_1pct` was 52.3 s of a
+53.0 s record, where an 11 s record had reported not-settled.
+
+The light is not the constraint here. At J = 0.25 the emission is ~219 pW against
+the measured 7.6 pW 3σ floor at `n_pm` 512 — 29σ, or 6σ even if EQE is 5× below
+its peak. `exp_step` therefore reads the PM400 after each capture and records
+`power_W` and `eqe_ext`, so a settling run doubles as an EQE point.
+
+**No single limit can span the sweep.** At −2.6 V the LED wants ~175 µA, which a
+10 µA limit cannot supply, so it cannot reach the droop side at all; and 1 mA
+cannot resolve the rising side. A full sweep needs the limit scheduled per segment,
+the way effort already is.
+
+Two further consequences:
 
 * **The limit is both the charging current and the measure range.** 1 mA moves the
   array's ~95 µC in under a millisecond but resolves only ~µA; lower it for

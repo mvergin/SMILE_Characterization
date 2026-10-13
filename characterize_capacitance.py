@@ -378,6 +378,14 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                                      max_presettle_s=args.max_presettle_s)
                 met = settling_metrics(t, np.abs(ib))
                 ia_ok = ia[np.isfinite(ia) & (np.abs(ia) < OVERFLOW)] if ia.size else ia
+                # The node is settled by now, so read the light too: at these currents
+                # it is well above the measured optical floor, which turns a settling
+                # characterisation into an EQE point for free.
+                pw, pw_sem = read_power(pm, args.step_n_pm)
+                eqe = float("nan")
+                if np.isfinite(met["settled"]) and met["settled"]:
+                    eqe = ((pw - args.dark_w) / cfg.photon_energy_j) / (
+                        abs(met["settled"]) / 1.602176634e-19)
                 err = (err_range + " " + drain_errors(smu)).strip()
                 # A limit below the current the LED wants at this bias means the SMU
                 # is in compliance: it is current-sourcing and the node never reached
@@ -392,6 +400,7 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                                  at_compliance=at_lim,
                                  v_from=args.v_start, v_to=v, **met,
                                  j_settled=to_j(met["settled"], cfg),
+                                 power_W=pw, power_sem=pw_sem, eqe_ext=eqe,
                                  i_a_settled=float(np.median(ia_ok[int(0.8 * ia_ok.size):]))
                                  if ia_ok.size else float("nan"),
                                  record_s=float(t[-1]) if t.size else 0.0,
@@ -399,6 +408,7 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                 log(f"    highc={highc!s:5} range={str(rng):>7} V={v:+.2f}  "
                     f"I={met['settled']*1e9:+10.1f} nA (J={to_j(met['settled'], cfg):+8.2f})  "
                     f"t1%={met['t_1pct']:.3f} t0.1%={met['t_01pct']:.3f}  "
+                    f"P={pw*1e12:+9.1f}pW EQE={100*eqe:6.3f}%  "
                     f"ripple={100*met['ripple']:.0f}%  over={met['n_overflow']}/{met['n']}  "
                     f"rec={float(t[-1]) if t.size else 0:.2f}s"
                     + ("  << NOT SETTLED" if not met["settled_ok"] else "")
@@ -674,6 +684,12 @@ def build_parser():
                     help="ch B source current range while holding 0 A. The finest range "
                          "minimises the regulation error that would add to the decay "
                          "current; the blanked run cancels what is left")
+    ap.add_argument("--step-n-pm", type=int, default=512,
+                    help="PM reads after each step capture. 512 gives a ~7.6 pW 3-sigma "
+                         "floor (measured), against ~219 pW at J=0.25")
+    ap.add_argument("--dark-w", type=float, default=0.0,
+                    help="optical dark level to subtract (W). The measured offset is "
+                         "under 7 pW and sign-random, so 0 is usually right")
     ap.add_argument("--max-presettle-s", type=float, default=60.0,
                     help="cap on the charge-derived pre-settle before each capture. The "
                          "charge time is C*dV/limit, which at a 1 uA limit is minutes per "
