@@ -85,6 +85,10 @@ measurement repo, and writes into the same run directory:
   is a power law (t^-1.3 on the bench), not an exponential, and where each crosses
   the 1% line is its settling time.
 * `spectra.png` — amplitude spectrum of each trace's settled tail, mains line marked
+* `isrc.png` — only for a run with an `isrc.csv`: channel B held as a **current**
+  source. The forced quantity is the current, so here the *voltage* is the
+  transient. Written from the ~2 Hz poll log, not from `traces.npz`, which `isrc`
+  does not produce.
 
 The time axis is linear in `transients.png` and log in `settling.png` on purpose.
 An earlier version used `symlog`, which with a 0.5 s `linthresh` invented negative

@@ -248,6 +248,62 @@ def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
         plt.close(f_)
 
 
+def plot_isrc(run_dir: Path) -> None:
+    """V(t) and I(t) with channel B held as a CURRENT source, from isrc.csv.
+
+    A different transient to the voltage-mode ones: there the current settles, here
+    the current is forced and the *voltage* settles. `isrc` polls at ~2 Hz for minutes
+    instead of filling the SMU buffer, so these are slow curves by construction and
+    there is no traces.npz for them.
+
+    The plot answers whether current-sourcing the cathode can hold a bias at all. It
+    cannot below the backplane leakage: the source has no way to supply the leak as
+    well as the LED, so the node walks away.
+    """
+    import csv
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path = run_dir / "isrc.csv"
+    if not path.exists():
+        return
+    rows = list(csv.DictReader(path.open()))
+    if not rows:
+        return
+    sets = sorted({float(r["i_set"]) for r in rows})
+    fig, (a, b) = plt.subplots(1, 2, figsize=(12.0, 4.6))
+    print(f"\ncurrent-source mode ({len(sets)} setpoints, {path.name})")
+    print(f"  {'I_set':>9} {'V final':>9} {'drift, last 60 s':>18} {'I measured':>12} {'held?':>7}")
+    for i_set in sets:
+        rs = [r for r in rows if float(r["i_set"]) == i_set]
+        t = np.array([float(r["t_s"]) for r in rs])
+        v = np.array([float(r["v_b"]) for r in rs])
+        ib = np.abs(np.array([float(r["i_b"]) for r in rs]))
+        lbl = f"{i_set*1e9:,.0f} nA"
+        a.plot(t, v, lw=1.2, label=lbl)
+        b.plot(t, ib * 1e9, lw=1.2, label=lbl)
+        m = t > t[-1] - 60
+        drift = np.polyfit(t[m], v[m], 1)[0] if m.sum() > 2 else float("nan")
+        held = abs(drift) < 1e-4                     # < 100 uV/s is settled
+        print(f"  {i_set*1e9:>8.0f}n {np.mean(v[-10:]):>+9.4f} {drift*1e6:>+15.1f} uV/s "
+              f"{np.mean(ib[-5:])*1e9:>10.1f}n {'yes' if held else 'NO':>7}")
+    for ax_, yl, ti in ((a, "V at the cathode (V)", "voltage, with the current forced"),
+                        (b, "|I| through the LED (nA)", "delivered current")):
+        ax_.set_xlabel("time at this setpoint (s)")
+        ax_.set_ylabel(yl)
+        ax_.set_title(ti, fontsize=9)
+        ax_.legend(fontsize=8, title="I set")
+        ax_.grid(alpha=0.3)
+    b.set_yscale("log")
+    fig.suptitle(f"channel B as a current source — {run_dir.name}", fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    out = run_dir / "isrc.png"
+    fig.savefig(out, dpi=300, bbox_inches="tight")
+    print(f"wrote {out}")
+    plt.close(fig)
+
+
 def summarise(traces: dict[str, np.ndarray], mains_hz: float) -> None:
     """Periodic content per capture, computed from the traces themselves.
 
@@ -290,9 +346,14 @@ def main():
     run_dir = Path(args.run_dir)
     if not run_dir.is_dir():
         sys.exit(f"{run_dir} is not a directory")
-    traces = load_traces(run_dir)
-    summarise(traces, args.mains_hz)
-    plot(run_dir, traces, args.mains_hz)
+    plot_isrc(run_dir)                       # no-op unless the run has an isrc.csv
+    if (run_dir / "traces.npz").exists():
+        traces = load_traces(run_dir)
+        summarise(traces, args.mains_hz)
+        plot(run_dir, traces, args.mains_hz)
+    elif not (run_dir / "isrc.csv").exists():
+        sys.exit(f"{run_dir} has neither traces.npz nor isrc.csv. For traces, re-run "
+                 "the measurement with --trace-points > 0 (default 4000).")
 
 
 if __name__ == "__main__":
