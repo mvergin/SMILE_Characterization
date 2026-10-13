@@ -40,7 +40,7 @@ PIXEL_AREA_UM2 = 100.0             # 10 x 10 um^2
 ACTIVE_THICKNESS_NM = 10.0         # total active region thickness (sum of QWs)
 
 # ── Emission wavelength ─────────────────────────────────────────────
-WAVELENGTH_NM = 450.0              # for photon energy calculation
+WAVELENGTH_NM = 440.0              # for photon energy calculation
 
 # ── ABC fit ─────────────────────────────────────────────────────────
 # Initial guesses for [A, B, C, eta_LEE]
@@ -194,32 +194,6 @@ def fit_abc_model(J, eqe_measured, d_cm, init=None, bounds=None):
 #  Additional LED metrics
 # =====================================================================
 
-def compute_wall_plug_efficiency(optical_power_W, current_A, voltage_V):
-    """WPE = P_optical / P_electrical = P_optical / (I * V)."""
-    with np.errstate(divide="ignore", invalid="ignore"):
-        wpe = np.abs(optical_power_W) / (np.abs(current_A) * np.abs(voltage_V))
-    wpe[~np.isfinite(wpe)] = np.nan
-    return np.clip(wpe, 0, 1.0)
-
-
-def compute_responsivity(optical_power_W, current_A):
-    """Slope efficiency / responsivity = dP/dI (W/A).
-
-    Computed as finite differences.
-    """
-    sort_idx = np.argsort(np.abs(current_A))
-    I_sorted = np.abs(current_A[sort_idx])
-    P_sorted = np.abs(optical_power_W[sort_idx])
-    dP = np.diff(P_sorted)
-    dI = np.diff(I_sorted)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        resp = dP / dI
-    resp[~np.isfinite(resp)] = np.nan
-    # Map back: assign each diff value to the midpoint
-    I_mid = (I_sorted[:-1] + I_sorted[1:]) / 2
-    return I_mid, resp
-
-
 def estimate_ideality_factor(voltage_V, current_A, T_K=300.0):
     """Estimate diode ideality factor n from I-V data.
 
@@ -363,21 +337,6 @@ def plot_eqe_comparison(vled_eqe, nvled_eqe, J_vled, J_nvled, title, out_path, p
     ax.set_title(title)
     ax.set_xscale("log")
     ax.legend()
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(str(out_path), dpi=200)
-    plt.close(fig)
-
-
-def plot_wpe(J, wpe, title, out_path, plt):
-    """Wall-plug efficiency vs J."""
-    fig, ax = plt.subplots(figsize=(8, 6))
-    mask = np.isfinite(J) & np.isfinite(wpe) & (J > 0)
-    ax.scatter(J[mask], wpe[mask] * 100, s=8, alpha=0.5, color="tab:purple")
-    ax.set_xlabel("Current density J (A/cm$^2$)")
-    ax.set_ylabel("WPE (%)")
-    ax.set_title(title)
-    ax.set_xscale("log")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(str(out_path), dpi=200)

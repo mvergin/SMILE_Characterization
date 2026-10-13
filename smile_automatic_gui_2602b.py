@@ -103,15 +103,6 @@ from instruments.sim import SmileFPGASim as _SmileFPGASim
 # =============================================================================
 
 
-def steady_state_mean(arr, tail_pct=20.0):
-    """Returns mean of the last tail_pct% of arr as a formatted string."""
-    if not arr:
-        return float("nan")
-    n = max(1, int(len(arr) * tail_pct / 100.0))
-    v = float(np.mean(arr[-n:]))
-    return f"{v:.6e}"
-
-
 def generate_timing_ratio_matrix(timing_json_path, output_txt_path=None):
     if not os.path.exists(timing_json_path):
         print(f"Error: {timing_json_path} not found.")
@@ -303,24 +294,6 @@ def _write_readme(run_dir, cfg, versions):
     readme_path = Path(run_dir) / "README.txt"
     with open(readme_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
-
-
-def _check_versions():
-    import instrumentlib as _il
-
-    warnings = []
-    if getattr(_il, "VERSION", None) not in ACCEPTABLE_VERSIONS["instrumentlib"]:
-        warnings.append(
-            f"instrumentlib version '{getattr(_il, 'VERSION', 'MISSING')}' not in accepted set {ACCEPTABLE_VERSIONS['instrumentlib']}"
-        )
-    if (
-        getattr(_postprocess, "VERSION", None)
-        not in ACCEPTABLE_VERSIONS["smile_postprocess"]
-    ):
-        warnings.append(
-            f"smile_postprocess version '{getattr(_postprocess, 'VERSION', 'MISSING')}' not in accepted set {ACCEPTABLE_VERSIONS['smile_postprocess']}"
-        )
-    return warnings
 
 
 # =============================================================================

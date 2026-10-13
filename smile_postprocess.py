@@ -17,31 +17,6 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 
-def steady_state_stats(arr, tail_pct=20.0):
-    """Returns (mean_str, std_str) of the last tail_pct% of arr."""
-    if not arr:
-        return "nan", "nan"
-    n = max(1, int(len(arr) * tail_pct / 100.0))
-    tail = np.array(arr[-n:], dtype=np.float64)
-    return f"{float(tail.mean()):.6e}", f"{float(tail.std()):.6e}"
-
-
-def _read_pm400_waveform(fpath):
-    """Return sorted (time_s, power_W) list of PM400 rows from a secondary CSV."""
-    rows = []
-    with open(fpath, newline="") as f:
-        reader = csv.reader(f)
-        header = next(reader)
-        t_idx = header.index("TIME_s")
-        type_idx = header.index("TYPE")
-        val_idx = header.index("VALUE")
-        for row in reader:
-            if row[type_idx] == "PM400":
-                rows.append((float(row[t_idx]), float(row[val_idx])))
-    rows.sort(key=lambda r: r[0])
-    return rows
-
-
 def _read_all_channels(fpath):
     """Return dict of TYPE → sorted [(time_s, value)] from a secondary CSV."""
     channels = {}

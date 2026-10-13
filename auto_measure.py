@@ -27,6 +27,27 @@ import numpy as np
 # =====================================================================
 #  CONFIGURATION — edit these before running
 # =====================================================================
+#
+# PRESET: "LabView PC, 1 ms settle". This used to be a full 906-line copy of
+# this file (auto_measure_labviewpcversion.py); it differed only in the 15
+# values below. Paste them over the defaults to reproduce that run — the fast,
+# short-settle variant for a 20x20 ROI:
+#
+#     SAMPLE_NAME = "Array38_Experimental_1ms_settle"
+#     ROI = (50, 50, 70, 70)
+#     VLED_NPLC = 0.005
+#     NVLED_NPLC = 0.005
+#     NVLED_SWEEP_N = 70
+#     NVLED_SWEEP_POWER = 2.7
+#     SWEEP_MODE_NVLED = "Fast Scan"
+#     SWEEP_VLED_NPLC = 0.001
+#     SWEEP_NVLED_NPLC = 0.001
+#     SWEEP_NVLED_SETTLE_MS = 1.0
+#     SWEEP_FAST_SCAN_SETTLE_MS = 10.0
+#     SWEEP_FAST_SCAN_N_PTS = 30
+#     SWEEP_PRE_SETTLE_MS = 10.0
+#     SWEEP_WITHIN_TIME_LIMIT_MIN = 60
+#     SWEEP_OUTSIDE_TIME_LIMIT_MIN = 60
 
 # ── Sample & output ──────────────────────────────────────────────────
 SAMPLE_NAME = "AutoTest"

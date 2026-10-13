@@ -1,0 +1,5 @@
+High Capacitance Mode geht atm nicht. Weil er momentan dann trotzdem noch die Range ändern will und dann kommt es zum Fehler.
+Dark Acquisition after Pixel geht momentan nur im Fast Scan. Für den Transient Modus müssten Dark Werte aus den Werten vor dem Einschalten gezogen werden. Es gibt noch Dark Tail, das ist momentan aber auch noch falsch. Idee hier war den Dunkelframe dann einfach während des Aufzeichnungsfensters zu schicken. 
+NVLED Sweep und Transient ist nicht das man den Sprung in der Spannung mit aufnimmt. Sondern bei jeder Spannung ne Transiente Messung macht. Während das Keithley in den Buffer misst, kann man die Spannung nicht so einfach ändern, Mittlerweile weiß ich das es da verschiedene Möglichkeiten gibt mit minimaler Downtime, aber das war noch getrennt implementiert.
+Kannst post-processing jetzt ausschalten und im zweiten Tab später machen oder auch nicht
+Er schreibt jetzt auch immer den version namen mit in die config damit wir später nachvollziehen können wie gemessen wurde

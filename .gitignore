@@ -205,3 +205,15 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ── SMILE_Characterization: measurement output & local artefacts ──
+results/
+results_georg/
+benchmark_report*/
+benchmark_report*.zip
+investigation_report/
+autozero_bench/
+data/*.csv
+*.stackdump
+pm400.html
+gui_config_v9.json

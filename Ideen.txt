@@ -1,0 +1,2 @@
+Niedrig Strom Messen mit den Ranges. Muss ja prob high to low, aber ist die osci nach jedem schritt da?
+Das low to high nicht geht indiziert ja schon das es ne cap ist

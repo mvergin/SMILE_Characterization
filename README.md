@@ -1,2 +1,439 @@
 # SMILE_Characterization
-Graphical User Interface to characterize the SMILE Platform developed in the EU Project: Scalable Structured Micro Illumination Light Engines
+
+Tooling to characterize the SMILE platform developed in the EU project
+*Scalable Structured Micro Illumination Light Engines*: a PyQt GUI for manual
+work, plus scripted IQE/EQE acquisition and analysis for the micro-LED array.
+
+| piece | what it is |
+|---|---|
+| `measure_iqe/` | **acquisition library + CLI** — fast scan, pixel selection, IQE sweep. Writes CSVs only. |
+| `analyze_array.py` | analysis: loads a run directory, fits the ABC model, writes the report and plots. |
+| `smile_automatic_gui_2602b.py` | the PyQt GUI. |
+| `smile/`, `instruments/` | SMILE FPGA driver and the PM400 / Keithley 2602B instrument drivers. |
+| `benchmark_sweep.py`, `autozero_bench.py` | parameter benchmarks built on the `measure_iqe` API. |
+
+---
+
+## Setup
+
+```bash
+uv sync                      # or: pip install -r requirements.txt
+```
+
+Python **3.13** (`.python-version`). Dependencies are pinned in
+`pyproject.toml` and compiled into `requirements.txt`.
+
+Hardware needed for a real run: a Thorlabs PM400 power meter, a Keithley 2602B
+SMU and the SMILE FPGA board. **You need none of them to try the tool** — every
+path runs against a built-in ABC-model simulation rig:
+
+```bash
+python -m measure_iqe --simulate --set roi='[0,0,15,15]'
+```
+
+---
+
+## Module usage
+
+The package is importable and has no module-level state: every parameter lives
+on an `IQEConfig`, and nothing is read from the environment.
+
+```python
+from measure_iqe import IQEConfig, run_iqe_measurement
+
+cfg = IQEConfig(
+    sample_name="Array38_IQE",
+    roi=(32, 32, 63, 63),        # or "FULL" / "TL" / "TR" / "BL" / "BR"
+    base_dir="D:/runs",
+    sweep_direction="low_to_high",
+)
+result = run_iqe_measurement(cfg)        # add simulate=True for no hardware
+
+print(result.run_dir)      # Path to <stamp>_<sample>_ROI_(...)
+print(result.n_pixels)     # pixels selected for the full sweep
+print(result.n_points)     # sweep points written
+print(result.config)       # the IQEConfig actually used
+```
+
+Load the configuration from a file instead:
+
+```python
+from measure_iqe import IQEConfig, run_iqe_measurement
+
+cfg = IQEConfig.from_file("config.example.yaml")     # .yaml, .yml or .json
+run_iqe_measurement(cfg, simulate=True)
+```
+
+Change one knob on an existing config without touching the rest — the dataclass
+is ordinary, so `dataclasses.replace` works:
+
+```python
+import dataclasses
+from measure_iqe import IQEConfig
+
+base = IQEConfig.from_file("bench.yaml")
+lean = dataclasses.replace(base, n_fine=30, vramp_lowv_n_pm=8)
+```
+
+Capture the log instead of printing it:
+
+```python
+lines: list[str] = []
+result = run_iqe_measurement(cfg, simulate=True, log=lines.append)
+```
+
+Drive the phases yourself when you want just one of them — this is what
+`benchmark_sweep.py` does:
+
+```python
+import measure_iqe as m
+
+cfg = m.IQEConfig(roi="TL")
+pm, smu, smile = m.connect(cfg, log=print, simulate=True)
+try:
+    m.configure_common(pm, smu, cfg, print)
+    smu.enable_output("a", True)
+    smu.enable_output("b", True)
+    selected = m.run_fast_scan(pm, smu, smile, *cfg.resolve_roi(), run_dir, cfg, print)
+    n = m.run_sweep_voltage(pm, smu, smile, selected, run_dir, cfg, print)
+finally:
+    m.shutdown(pm, smu, smile, cfg)
+```
+
+### Public API
+
+| name | purpose |
+|---|---|
+| `IQEConfig` | every measurement parameter, with defaults; `from_file`, `from_dict`, `to_dict`, `write_file`, `resolve_roi`, `validate`, `photon_energy_j` |
+| `run_iqe_measurement(config=None, *, simulate, warmup_diag, base_dir, run_dir, log)` | the whole flow; returns `IQEResult` |
+| `IQEResult` | `(run_dir, n_pixels, n_points, config)` |
+| `connect(cfg, log, simulate=False)` / `shutdown(pm, smu, smile, cfg)` | open / safely close the instruments |
+| `configure_common`, `configure_voltage_source_b`, `set_nplc`, `set_measure_range_b` | instrument setup primitives |
+| `run_fast_scan`, `run_sweep_voltage`, `run_sweep_current`, `run_warmup_diag` | the individual phases |
+| `select_sweep_pixels`, `build_fine_voltages` | pixel selection and sweep-point placement |
+| `acquire_point`, `burst_stats` | one overlapped SMU+PM measurement, and burst statistics |
+| `make_logger`, `make_run_dir` | encode-safe timestamped logger; timestamped run directory |
+| `NAMED_ROIS`, `SMU_I_RANGES` | ROI presets and the 2602B current ranges |
+
+Everything writes CSVs only. Fit and plot them separately:
+
+```bash
+python analyze_array.py "<run_dir>"
+```
+
+---
+
+## CLI usage
+
+```bash
+python -m measure_iqe [options]
+```
+
+| flag | argument | effect |
+|---|---|---|
+| `--config` | `PATH` | load a `.json`, `.yaml` or `.yml` config file |
+| `--set` | `KEY=VALUE` | override one field; repeatable; applied on top of `--config` |
+| `--out` | `DIR` | output root, overriding `base_dir` |
+| `--simulate` | — | run against the built-in ABC-model rig, no hardware |
+| `--warmup-diag` | — | run the warm-up/conditioning diagnostic instead of the sweep |
+| `--dump-config` | `PATH` | write the effective config to `PATH` (`.json`/`.yaml`) and exit |
+| `--print-config` | — | print the effective config as JSON and exit |
+| `--list-params` | — | list every field with its type and default, and exit |
+| `-h`, `--help` | — | usage |
+
+`--set` values are parsed as JSON, so types survive; anything that is not valid
+JSON stays a string (`--set sweep_direction=low_to_high` needs no quoting).
+
+```bash
+# dry-run the whole flow on a 16x16 ROI, nothing attached
+python -m measure_iqe --simulate --set roi='[0,0,15,15]'
+
+# real run from a config file, output elsewhere
+python -m measure_iqe --config bench.yaml --out D:/runs
+
+# a config file plus two tweaks
+python -m measure_iqe --config bench.yaml --set n_fine=60 --set sweep_direction=low_to_high
+
+# record exactly what a run would use, then run it
+python -m measure_iqe --config bench.yaml --set n_fine=60 --dump-config run.yaml
+python -m measure_iqe --config run.yaml
+```
+
+**Exit codes:** `0` success, `2` bad configuration (the message names the key),
+`130` interrupted with Ctrl-C — partial results stay on disk.
+
+### Output
+
+```
+<base_dir>/<YYMMDD-HHMM>_<sample_name>_ROI_(x1, y1, x2, y2)/
+├── FastScan/
+│   ├── aggregated_bitval=<b>_mean_std.csv     one row per ROI pixel
+│   └── raw_data/{FastScan.csv, FastScan_config.json}
+└── NVLEDSweep/Sweep/
+    ├── aggregated_bitval=<b>_mean_std.csv     one row per sweep point
+    └── raw_data/{Sweep.csv, Sweep_samples.csv, Sweep_config.json}
+```
+
+`*_config.json` holds the complete `IQEConfig` under `"settings"`, so a run is
+reproducible from its own output. `--warmup-diag` writes `warmup_diag.csv`
+instead of the sweep.
+
+Aggregated columns: `X, Y, BITVAL, NVLED_V, TIME_START, TIME_END,
+NVLED_CURR_MEAN, NVLED_CURR_STD, VLED_CURR_MEAN, VLED_CURR_STD,
+PM400_POWER_MEAN, PM400_POWER_STD` — plus `*_MEDIAN`, `*_SAMPSTD` and
+`NVLED_CURR_N` when `save_raw_samples` is on. `*_STD` is the **standard error of
+the mean** (σ/√N), not the per-sample scatter.
+
+Writes are incremental and flushed per pixel, on a background thread for the
+voltage sweep, so an interrupted run leaves directly analysable files.
+
+---
+
+## Configuration reference
+
+Every field below is a constructor argument of `IQEConfig`, a key in a
+JSON/YAML config file, and a `--set` target. All are optional. Unknown keys and
+wrong types are rejected with an error naming the key. `config.example.yaml` is
+an annotated copy of these defaults.
+
+Comments in `measure_iqe/config.py` keep the historical UPPERCASE names of some
+parameters (`BLOCK_SIZE` is today's `block_size`) because they quote the bench
+runs that pinned each value.
+
+#### Run identity & output
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `sample_name` | `str` | `'Array38_IQE'` |  |
+| `base_dir` | `str` | `'results'` | output root; a timestamped run dir is created inside |
+
+#### ROI & pixel selection
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `roi` | `tuple[int, int, int, int] \| str` | `(32, 32, 63, 63)` | (x1,y1,x2,y2) or "FULL"/"TL"/"TR"/"BL"/"BR" |
+| `sweep_select` | `str` | `'blocks'` | "blocks" \| "spatial" \| "stride" |
+| `block_size` | `int` | `8` | blocks mode: block edge in pixels (ROI → ~ROI/BLOCK_SIZE blocks/axis) |
+| `pixels_per_block` | `int` | `4` | blocks mode: alive pixels sampled per block |
+| `block_seed` | `int` | `0` | blocks mode: RNG seed (vary across runs to sample new pixels) |
+| `sweep_fraction` | `float` | `0.1` | spatial mode: fraction of ALIVE pixels to sweep |
+| `min_sweep_pixels` | `int` | `6` | spatial mode: floor on the count (so tiny ROIs still map) |
+| `nth_pixel_sweep` | `int` | `5` | stride mode: sweep every Nth alive pixel |
+| `max_sweep_pixels` | `int` | `40` | hard cap (spatial/stride only; blocks controls its own count) |
+| `fastscan_bitval` | `int` | `15` | bitval for the alive/dead fast scan (brightest) |
+
+#### Source mode
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `source_mode` | `str` | `'voltage'` |  |
+
+#### Current-source sweep (SOURCE_MODE = "current")
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `current_sweep_low_a` | `float` | `3e-07` | lowest LED current setpoint (1 µA → J ≈ 1) |
+| `current_sweep_high_a` | `float` | `0.00012` | highest setpoint (~120 µA; capped by V compliance) |
+| `current_sweep_n` | `int` | `50` | log-spaced current setpoints |
+| `nvled_v_limit` | `float` | `3.2` | \|voltage\| compliance while sourcing current (V) |
+| `current_sweep_bitval` | `int` | `15` | single bitval — CMOS fully open, we set I directly |
+| `current_source_range_i` | `float` | `0.001` | fixed source current range (covers 120 µA; gives good low-current resolution). Tune on the bench. |
+| `measure_v_range` | `float` | `6.0` | ch B voltage measure range (covers ±3.2 V) |
+
+#### Voltage-source sweep (SOURCE_MODE = "voltage", DEFAULT)
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `bitvals` | `tuple[int, ...]` | `(15,)` | single bitval — densify low-J via spacing instead |
+| `fine_sweep_mode` | `str` | `'voltage'` |  |
+| `nvled_v_coarse_start` | `float` | `-0.8` | least-negative sweep voltage (just below turn-on) |
+| `nvled_v_coarse_stop` | `float` | `-2.6` | most-negative sweep voltage (below saturation knee) |
+| `n_coarse` | `int` | `26` | coarse pre-sweep points |
+| `coarse_settle_ms` | `float` | `6.0` |  |
+| `coarse_n_smu` | `int` | `4` |  |
+| `low_current_target_a` | `float` | `1e-06` | lowest LED current the sweep targets (~J 1, the rise foot) |
+| `high_current_frac` | `float` | `0.97` |  |
+| `n_fine` | `int` | `45` | fine voltage-sweep points (was 45; more, single bitval) |
+| `lowj_weight` | `float` | `1.5` | >1 concentrates fine points toward LOW current (the SRH rising side J≈1–5 that pins peak IQE). 1.0 = uniform log. |
+| `vramp_knee_v` | `float \| None` | `-1.3` | split voltage between the dense (rising) and sparse (droop) halves |
+| `vramp_low_frac` | `float` | `0.6` | fraction of points placed in the rising-side segment |
+| `sweep_direction` | `str` | `'high_to_low'` | "low_to_high" \| "high_to_low" |
+
+#### Pixel warm-up / conditioning
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `warmup_ms` | `float` | `1500.0` | 0 = off. Dwell at WARMUP_NVLED_V before each sweep. |
+| `warmup_nvled_v` | `float` | `-2.6` | warm-up bias (high current, clears the parasitic) |
+| `warmup_diag_v` | `float` | `-0.85` | ≈J 1: stresses current readout, light still > dark |
+| `warmup_diag_n_pixels` | `int` | `3` | how many of the selected pixels to characterise |
+| `warmup_diag_seconds` | `float` | `30.0` | log duration per phase (fresh turn-on / conditioned) |
+| `warmup_diag_nplc` | `float` | `1.0` |  |
+| `warmup_diag_n_smu` | `int` | `8` |  |
+| `warmup_diag_n_pm` | `int` | `4` |  |
+
+#### Adaptive per-point effort by current zone
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `adaptive_threshold_a` | `float` | `1e-05` | 10 µA: boundary between the low-J and high-J zones |
+| `lowj_nplc` | `float` | `2.0` |  |
+| `lowj_n_pm` | `int` | `8` |  |
+| `lowj_n_smu` | `int` | `16` | low J: integrate the CURRENT harder |
+| `highj_nplc` | `float` | `0.5` |  |
+| `highj_n_pm` | `int` | `4` |  |
+| `highj_n_smu` | `int` | `8` | high J: fast |
+| `lowj_settle_ms` | `float` | `200.0` |  |
+| `highj_settle_ms` | `float` | `15.0` | fine low-J range needs more settle time |
+
+#### Instruments
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `pm400_addr` | `str` | `'USB0::0x1313::0x8075::P5006526::INSTR'` |  |
+| `smu_addr` | `str` | `'USB0::0x05E6::0x2602::4649721::INSTR'` |  |
+
+#### PM400
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `pm_wavelength` | `float` | `440.0` |  |
+| `pm_range` | `float` | `1e-07` | W, fixed (no autorange) |
+| `pm_averaging` | `int` | `3` | internal averaging per reading |
+
+#### VLED (ch A) — constant LED anode drive
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `vled_voltage` | `float` | `1.8` |  |
+| `vled_compliance` | `float` | `1.0` |  |
+| `vled_range_i` | `float` | `0.01` |  |
+
+#### NVLED (ch B) — voltage-mode current range
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `nvled_compliance` | `float` | `0.5` | current compliance (voltage mode) |
+| `nvled_range_i` | `float` | `0.01` | default fixed measure current range (coarse pre-sweep, fast scan, and any point with no current target). |
+| `perpoint_range` | `bool` | `False` | False = fixed NVLED_RANGE_I (10 mA): consistent (offsets and all) so the curve SHAPE comes through — what the old clean runs used. True = per-point software ranging (accurate value, but range offsets/settling … |
+| `probe_range_i` | `float` | `0.001` | wide probe range: covers the device max (~175 µA), never overflows, gives the magnitude to pick the real range from |
+| `probe_n_smu` | `int` | `4` | quick samples for the magnitude probe |
+| `range_settle_ms` | `float` | `50.0` | settle after a measure-range change before reading |
+| `highc_b` | `bool` | `False` |  |
+| `sweep_autozero` | `str` | `'AUTO'` | AUTO \| ONCE \| OFF |
+| `save_raw_samples` | `bool` | `True` |  |
+
+#### Integration time (NPLC) per phase
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `fastscan_nplc` | `float` | `0.05` | Now the fast-scan CURRENT matters: at −1.35 V the fast scan is a full-coverage peak-IQE proxy (EQE=P/I on the EQE plateau), so its current noise sets the proxy quality. Sweep test (260704-1456/1618/ 1659): NPLC … |
+| `fastscan_n_smu` | `int` | `4` | SMU samples/pixel in the fast scan |
+| `coarse_nplc` | `float` | `0.1` | voltage-mode coarse I(V) map: rough, quick |
+| `sweep_nplc` | `float` | `1.0` | the accurate IQE data (raise toward 2–5 for very low J) |
+
+#### Settle + averaging
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `settle_ms` | `float` | `15.0` | wait after each setpoint before averaging |
+| `fastscan_settle_ms` | `float` | `10.0` | fast scan settle after lighting a pixel. Back to 10 ms (was 5) — the 5 ms save wasn't worth risking a not-fully-settled optical read on the liveness classifier. |
+| `fastscan_random_order` | `bool` | `True` | visit fast-scan pixels in a shuffled order (not a raster). A raster correlates any residual/crosstalk with spatial position; randomizing turns it into position-independent noise. |
+| `fastscan_order_seed` | `int` | `0` | seed for the shuffle (reproducible) |
+| `fastscan_blank_between` | `bool` | `True` | send a black (all-off) frame before lighting each pixel, so exactly ONE pixel is ever emitting when the PM reads — guards against a lingering previous pixel / accumulated frame inflating the optical power (the ~71 nW … |
+
+#### Dead-pixel early abort (voltage sweep)
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `dead_abort` | `bool` | `True` |  |
+| `dead_abort_nw` | `float` | `2.0` | absolute floor (nW): first-point power below this ⇒ dead |
+| `dead_abort_frac` | `float` | `0.1` | or below this fraction of the running median of live pixels |
+| `thermal_settle_ms` | `float` | `100.0` | before the fine sweep, sit at the FIRST point this long so the pixel reaches its starting-current thermal steady state (clears heat left by the coarse pre-sweep) |
+| `n_smu_samples` | `int` | `8` | SMU samples averaged per point |
+| `n_pm_samples` | `int` | `12` | PM400 readings averaged per point |
+
+#### Per-segment effort (FINE_SWEEP_MODE="voltage")
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `vramp_perseg_effort` | `bool` | `True` |  |
+| `vramp_lowv_nplc` | `float` | `2.0` |  |
+| `vramp_lowv_n_pm` | `int` | `32` |  |
+| `vramp_lowv_n_smu` | `int` | `12` |  |
+| `vramp_lowv_settle_ms` | `float` | `20.0` |  |
+| `vramp_highv_nplc` | `float` | `0.5` |  |
+| `vramp_highv_n_pm` | `int` | `8` |  |
+| `vramp_highv_n_smu` | `int` | `8` |  |
+| `vramp_highv_settle_ms` | `float` | `15.0` |  |
+
+#### Dead-pixel threshold (fast scan)
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `nvled_v_fastscan` | `float` | `-1.35` | single fast-scan bias — does DOUBLE duty. At −1.35 V the pixels sit at J≈25 A/cm², which is dead on the (broad, flat) EQE peak plateau: EQE is within ~1% of its peak across J≈8–30, so the fast-scan EQE=P/I here ≈ … |
+| `dead_threshold_frac` | `float` | `0.2` | a pixel is alive if P ≥ this × the "typical lit" level |
+| `fastscan_alive_pctl` | `int` | `90` | "typical lit" level = this percentile of the fast-scan power. NOT the median: the median collapses to the noise floor on a majority-DEAD ROI (then ~everything is mislabelled alive — e.g. quadrant 260703-1307 was 57% … |
+| `pixel_area_um2` | `float` | `100.0` |  |
+| `smu_display_off` | `bool` | `False` |  |
+### Valid ranges and constraints
+
+`IQEConfig.validate()` runs before any hardware is touched and rejects:
+
+| field | accepted |
+|---|---|
+| `roi` | `(x1, y1, x2, y2)` with each value `0..511`, or `"FULL"`, `"TL"`, `"TR"`, `"BL"`, `"BR"` |
+| `source_mode`, `fine_sweep_mode` | `"voltage"`, `"current"` |
+| `sweep_select` | `"blocks"`, `"spatial"`, `"stride"` |
+| `sweep_direction` | `"low_to_high"`, `"high_to_low"` |
+| `sweep_autozero` | `"AUTO"`, `"ONCE"`, `"OFF"` |
+| `bitvals` | non-empty; each value `0..15` |
+| `pm_wavelength` | `> 0` nm |
+| `n_fine`, `n_coarse` | `>= 2` |
+| `vramp_low_frac` | `0.0 .. 1.0` |
+| `fastscan_alive_pctl` | `0 .. 100` |
+| `pixel_area_um2` | `> 0` |
+
+Physical limits the validator does *not* police, because the hardware does:
+`nvled_compliance` is the SMU current compliance, `nvled_v_limit` the voltage
+compliance, and `nvled_range_i` / `probe_range_i` must be one of
+`SMU_I_RANGES` (1e-7 … 1e-2 A) for the 2602B to accept them.
+
+### The three knobs that matter most
+
+* **`source_mode`** — keep `"voltage"`. `"current"` does not work on this
+  device: the +1.8 V anode bypasses channel B through a leakage path, so the
+  cathode current setpoint never becomes the LED current.
+* **`sweep_direction`** — `"high_to_low"` starts hot and conditioned;
+  `"low_to_high"` measures the rising side coolest. Run both on the same pixels
+  to gauge self-heating.
+* **`vramp_lowv_n_pm` / `vramp_lowv_nplc`** — the low-J precision budget. The
+  light is the limiting channel at low current, so spend on `*_n_pm` before
+  `*_nplc`.
+
+---
+
+## Tests
+
+```bash
+python test_measure_iqe.py       # no pytest needed; also collects under pytest
+```
+
+The checks run the whole acquisition against the simulation rig: every source
+mode, every pixel-selection mode, the warm-up diagnostic, the dead-pixel abort,
+the CLI, the config round trip, and the CSV column contract that
+`analyze_array.py` depends on.
+
+---
+
+## Known limitations
+
+* The fast scan holds its rows in memory and writes them once at the end, so an
+  interrupt during the scan itself loses that phase. The sweep, which is the
+  long one, is flushed per pixel.
+* Hardware autorange is broken with the fast zero-delay burst read; the current
+  measure range is always set explicitly. Leave `perpoint_range` off unless you
+  are reproducing the probe-then-narrow experiment.
+* `auto_measure.py` still configures itself with module-level constants rather
+  than an `IQEConfig`. The "LabView PC, 1 ms settle" variant that used to be a
+  906-line copy of it is now a preset comment block at the top of that file.
