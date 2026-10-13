@@ -760,6 +760,41 @@ backplane addressing alone. `leak` now measures **three** frame states per bias:
 `led_current_physical` is False when `i_led` comes out ≤ 0, and no EQE is published
 from a reference that is still wrong.
 
+### Result: the EQE collapse was a contaminated denominator
+
+With the bitval-0 reference, measured on pixel (54,46):
+
+| V | `i_lit` | `i_off` (leak) | **`i_led`** | leak | EQE raw | **EQE corrected** |
+|---|---|---|---|---|---|---|
+| −0.85 | 951.9 nA | 260.0 nA | **692.0 nA** | 27% | 0.036% | **0.0498%** |
+| −0.80 | 449.8 nA | 244.8 nA | **205.1 nA** | 54% | 0.019% | **0.0410%** |
+| −0.70 | 247.2 nA | 234.3 nA | **13.0 nA** | 95% | 0.001% | **0.0256%** |
+
+**The 20× collapse below J ≈ 0.4 is gone.** The corrected EQE falls only
+0.050 → 0.041 → 0.026%, a smooth factor of 2, which is what SRH on the rising side
+looks like. The collapse was the leakage inflating the denominator: at −0.70 V,
+**95% of the cathode current is not injection**, only 13 nA of 247 nA is.
+
+The `off` current is 234–260 nA and mildly bias-dependent, while `blank` stays at
+934–957 nA — a constant 3.7–4.0× more, which confirms the backplane-state effect
+independently at every bias.
+
+This invalidates every rising-side EQE this project has produced, including the
+corrected numbers above wherever the leak fraction is high.
+
+**The new low-J limit is the subtraction, not the optics.** `i_led` is a difference
+of two large numbers, so `leak_frac` sets the error:
+
+| V | `i_led` | 1% error on each state → | 2% → |
+|---|---|---|---|
+| −0.85 | 692 nA | ±1.8% | ±3.5% |
+| −0.80 | 205 nA | ±3.4% | ±6.8% |
+| −0.70 | 13 nA | **±37%** | **±75%** |
+
+So the usable floor is around **J ≈ 0.2** (−0.80 V, 54% leak), not the J ≈ 0.013
+the corrected current at −0.70 V implies. `leak` now reports `i_led_sem` and
+`i_led_sigma` so this is visible per point rather than inferred.
+
 One useful side result from the same run: at `step_n_pm` 2048 the optical SEM was
 1.8 pW, so the 6.0 pW at −0.70 V is a 3.3σ detection. The averaging extrapolation
 held.

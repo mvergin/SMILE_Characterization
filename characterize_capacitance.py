@@ -592,6 +592,15 @@ def exp_leak(pm, smu, smile, pixel, cfg, args, log):
             meas[state] = (met, pw, pw_sem)
         lit, off, blank = (meas[k] for k in ("lit", "off", "blank"))
         i_led = lit[0]["settled"] - off[0]["settled"]
+        # SEM of each settled value, then added in quadrature. This is the number
+        # that decides how far down in J the subtraction stays meaningful: at 95%
+        # leakage a 1% error on each state is a 37% error on i_led.
+        sems = []
+        for st in (lit[0], off[0]):
+            n_tail = max(int(0.2 * (st["n"] - st["n_overflow"])), 1)
+            sems.append(st["tail_noise"] / np.sqrt(n_tail)
+                        if np.isfinite(st["tail_noise"]) else float("nan"))
+        i_led_sem = float(np.hypot(*sems))
         p_led = lit[1] - off[1]
         # A non-physical LED current means the reference is still wrong for this
         # device. Say so rather than publishing an EQE computed from it.
@@ -602,6 +611,8 @@ def exp_leak(pm, smu, smile, pixel, cfg, args, log):
                          i_blank=blank[0]["settled"], i_led=i_led,
                          j_led=to_j(i_led, cfg) if ok else float("nan"),
                          led_current_physical=ok,
+                         i_led_sem=i_led_sem,
+                         i_led_sigma=abs(i_led) / i_led_sem if i_led_sem else float("nan"),
                          leak_frac=(abs(off[0]["settled"] / lit[0]["settled"])
                                     if lit[0]["settled"] else float("nan")),
                          blank_vs_off=(abs(blank[0]["settled"] / off[0]["settled"])
@@ -614,7 +625,9 @@ def exp_leak(pm, smu, smile, pixel, cfg, args, log):
                          smu_errors=drain_errors(smu)))
         log(f"    V={v:+.2f}  lit {lit[0]['settled']*1e9:+8.1f}  off "
             f"{off[0]['settled']*1e9:+8.1f}  blank {blank[0]['settled']*1e9:+8.1f} nA"
-            f"  -> LED {i_led*1e9:+8.1f} nA" + ("" if ok else " << NON-PHYSICAL")
+            f"  -> LED {i_led*1e9:+8.1f}+-{i_led_sem*1e9:.1f} nA "
+            f"({abs(i_led)/i_led_sem if i_led_sem else 0:.0f}sig)"
+            + ("" if ok else " << NON-PHYSICAL")
             + f"  P {p_led*1e12:+7.1f} pW ({abs(p_led)/lit[2] if lit[2] else 0:.0f}sig)"
             + (f"  EQE {100*eqe:6.3f}%" if ok else ""))
     smile.blank_frame()
