@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 
 from measure_iqe import IQEConfig, run_iqe_measurement, select_sweep_pixels
+from measure_iqe import acquire
 from measure_iqe.cli import main as cli_main
 from measure_iqe.cli import parse_override
 
@@ -27,7 +28,7 @@ QUIET = lambda _msg: None                                 # noqa: E731 - tests s
 # small but exercises every branch: 2x2 blocks, both ramp segments, raw samples on
 FAST = dict(roi=(0, 0, 7, 7), block_size=4, pixels_per_block=1, n_fine=6, n_coarse=4,
             warmup_ms=0.0, thermal_settle_ms=1.0, settle_ms=1.0, fastscan_settle_ms=0.0,
-            vramp_lowv_settle_ms=1.0, vramp_highv_settle_ms=1.0,
+            settle_scale=0.0,   # the real settles are seconds; a test must not wait them
             vramp_lowv_n_pm=2, vramp_highv_n_pm=2, lowj_n_pm=2, highj_n_pm=2, n_pm_samples=2)
 
 AGG_COLS = ["X", "Y", "BITVAL", "NVLED_V", "TIME_START", "TIME_END",
@@ -195,7 +196,8 @@ def test_voltage_sweep_writes_the_expected_files():
 def test_every_acquisition_mode_runs():
     modes = [dict(source_mode="current", current_sweep_n=4),
              dict(fine_sweep_mode="current"),
-             dict(perpoint_range=True),
+             dict(perpoint_range=True, highc_b=False),   # the two are incompatible by design
+             dict(leak_reference=False),                 # runs from before the leakage fix
              dict(save_raw_samples=False),
              dict(sweep_select="spatial", min_sweep_pixels=2, max_sweep_pixels=2),
              dict(sweep_select="stride", max_sweep_pixels=2),
@@ -206,6 +208,50 @@ def test_every_acquisition_mode_runs():
             result = _run(tmp, **over)
             assert result.n_points > 0, over
             assert result.run_dir.is_dir()
+
+
+def test_leakage_reference_is_measured_and_written():
+    """The bitval-0 reference is the low-J correction, not an optional extra."""
+    with tempfile.TemporaryDirectory() as tmp:
+        result = _run(tmp)
+        agg = next((result.run_dir / "NVLEDSweep" / "Sweep").glob("aggregated_*.csv"))
+        rows = list(csv.DictReader(agg.open()))
+        assert rows, "no sweep rows"
+        for col in ("NVLED_CURR_REF", "NVLED_CURR_REF_STD", "VLED_CURR_REF",
+                    "PM400_POWER_REF", "PM400_POWER_REF_STD", "LEAK_REF_BITVAL"):
+            assert col in rows[0], f"{col} missing from the aggregated CSV"
+        for r in rows:
+            assert int(float(r["LEAK_REF_BITVAL"])) == 0
+            # the reference is a real, separate reading: smaller than the lit current,
+            # and not a copy of it
+            lit, ref = abs(float(r["NVLED_CURR_MEAN"])), abs(float(r["NVLED_CURR_REF"]))
+            assert 0 < ref < lit, f"reference {ref} not between 0 and the lit current {lit}"
+        assert len({r["NVLED_CURR_REF"] for r in rows}) > 1, "reference never varies"
+
+        # and it must be possible to turn off, for comparison with the older runs
+        off = _run(tmp, leak_reference=False)
+        agg = next((off.run_dir / "NVLEDSweep" / "Sweep").glob("aggregated_*.csv"))
+        assert "NVLED_CURR_REF" not in agg.read_text().splitlines()[0]
+
+
+def test_segment_limits_are_applied_not_just_configured():
+    """-2.6 V needs ~175 uA and the rising side needs 10 uA: no single limit spans it."""
+    seen = []
+    cfg = IQEConfig(**FAST)
+    real = acquire.configure_voltage_source_b
+
+    def spy(smu, c, log=None):
+        seen.append(c.nvled_compliance)
+        return real(smu, c, log)
+
+    acquire.configure_voltage_source_b = spy
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
+    finally:
+        acquire.configure_voltage_source_b = real
+    assert cfg.vramp_lowv_limit_a in seen, f"rising-side limit never applied: {set(seen)}"
+    assert cfg.vramp_highv_limit_a in seen, f"droop limit never applied: {set(seen)}"
 
 
 def test_warmup_diag_writes_its_own_csv():

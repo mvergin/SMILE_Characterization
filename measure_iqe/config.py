@@ -131,7 +131,10 @@ class IQEConfig:
     # ~1 µA keeps every point on a fast-settling range and puts the points where the peak is.
     low_current_target_a: float = 1e-6  # lowest LED current the sweep targets (~J 1, the rise foot)
     high_current_frac: float = 0.97
-    n_fine: int = 45  # fine voltage-sweep points (was 45; more, single bitval)
+    n_fine: int = 30  # fine voltage-sweep points. Lowered from 45 once the settle time was
+                      # measured: the dwell dominates the budget, so fewer points with a
+                      # real settle beat more points that never settled. 30 points x 2
+                      # drive states x ~8 s is ~10 min/pixel.
     lowj_weight: float = 1.5  # >1 concentrates fine points toward LOW current (the SRH
                                      # rising side J≈1–5 that pins peak IQE). 1.0 = uniform log.
     # Voltage-ramp densification (FINE_SWEEP_MODE="voltage"). The rising side + peak that pin
@@ -208,7 +211,11 @@ class IQEConfig:
     vled_range_i: float = 10e-3
 
     # ── NVLED (ch B) — voltage-mode current range ───────────────────────
-    nvled_compliance: float = 0.5  # current compliance (voltage mode)
+    nvled_compliance: float = 1e-5  # current compliance (voltage mode). In High-C this ALSO
+                                     # selects the measure range, so it sets the noise floor:
+                                     # 10 uA gives ~9 nA/sample at NPLC 0.01, ~1 nA at NPLC 1.
+                                     # Measured 261013. The sweep overrides it per segment
+                                     # (VRAMP_*_LIMIT_A) because -2.6 V needs ~175 uA.
     nvled_range_i: float = 10e-3  # default fixed measure current range (coarse pre-sweep,
                                      # fast scan, and any point with no current target).
     # Current readout is the dominant error: ~5 µA on the 10 mA range is 0.05% of full
@@ -236,7 +243,10 @@ class IQEConfig:
     # TSP. High-C adds settling delays (slower) but damps a capacitive load that can make the
     # low current ranges ring/never settle — the reason 10 mA was the safe range. Off by
     # default; sweep_variants.py toggles it to test whether it makes low ranges usable.
-    highc_b: bool = False
+    highc_b: bool = True  # MANDATORY, measured 261013. Without High-C every reading below
+                          # ~10 uA is a range artifact: it lands at 42-58% of whatever range
+                          # is selected, independent of bias, wrong by up to 517x. With it,
+                          # three different start voltages agree to 0.6%.
 
     # SMU autozero for the voltage sweep. The 2600's ADC has a small zero/offset that depends on the
     # integration time (NPLC); the per-segment effort switches NPLC 2↔0.5 at the knee, and if the zero
@@ -300,15 +310,59 @@ class IQEConfig:
     # the LIGHT noise (NPLC is SMU-only; light noise is set by N_PM). Same IQE result, more cost.
     # So keep NPLC modest; the low-J limiter is the light SIGNAL near the dark floor (→ optics/dark),
     # not SMU integration. If you must spend, spend on N_PM or optical collection, not NPLC.
+    #
+    # SETTLE TIMES ARE SECONDS, NOT MILLISECONDS. Measured on the bench 261013: after a
+    # voltage step the current approaches its final value as a POWER LAW, |I-Iinf| ~ t^-1.3,
+    # not an exponential. 1% takes 5-55 s and 0.1% takes 60-80 s, at EVERY step size from
+    # 20 mV to 200 mV. The old 20 ms was wrong by a factor of 250-2750 and is the reason
+    # every rising-side EQE this project produced is too high.
+    #
+    # Small steps do NOT settle faster -- that was the natural guess and the bench refused
+    # it. Stepping 20 mV onto -0.80 V left the reading 4.5% high and still drifting at 80 s,
+    # while stepping 200 mV onto the same point was flat from 60 s. Each point inherits the
+    # unrelaxed tail of every earlier point, and a small step does not escape that, it just
+    # makes the per-step excursion small compared with the memory.
+    #
+    # So the budget is the DWELL, not the step size, and the only free gains are:
+    #   * sweep high current -> low current (already the default), which was the flattest
+    #   * measure the bitval-0 reference back to back with the lit point, so both carry the
+    #     same history and the subtraction cancels most of it
+    # Spend the time budget on fewer points with a longer dwell, not more points.
+    settle_scale: float = 1.0  # multiplies every sweep settle. 1 = the measured times.
+                               # --simulate sets it to 0 so a dry run is seconds, not
+                               # 15 minutes. Lower it on real hardware only to measure what
+                               # the shortcut costs -- it costs the rising side.
     vramp_perseg_effort: bool = True
-    vramp_lowv_nplc: float = 2.0
+    vramp_lowv_nplc: float = 2.0  # integer NPLC, so the mains line is nulled by integration
     vramp_lowv_n_pm: int = 32
     vramp_lowv_n_smu: int = 12
-    vramp_lowv_settle_ms: float = 20.0
-    vramp_highv_nplc: float = 0.5
+    vramp_lowv_settle_s: float = 8.0  # rising side: 1% needs 5-55 s. 8 s is the compromise
+                                      # that keeps a 30-point sweep under ~10 min/pixel.
+    vramp_lowv_limit_a: float = 1e-5  # the rising side never exceeds ~5 uA
+    vramp_highv_nplc: float = 1.0  # was 0.5 -- not an integer, so it nulled no mains at all
     vramp_highv_n_pm: int = 8
     vramp_highv_n_smu: int = 8
-    vramp_highv_settle_ms: float = 15.0
+    vramp_highv_settle_s: float = 2.0  # droop side: large currents, the relaxation is a much
+                                       # smaller fraction of the reading
+    vramp_highv_limit_a: float = 1e-3  # -2.6 V draws ~175 uA, far above the rising-side limit
+
+    # ── Leakage reference (the low-J correction) ────────────────────────
+    # Both source modes read the TOTAL cathode current, so at low bias most of what the SMU
+    # reports is not LED injection. Measured 261013 over 12 pixels in 4 quadrants:
+    #   -0.95 V:  8% leakage      -0.85 V: 29%
+    #   -0.90 V: 14%              -0.80 V: 58%
+    # Without this correction the EQE appears to collapse 20x below J ~ 0.4; corrected, the
+    # curve is smooth and monotone. This invalidates every rising-side EQE measured before.
+    #
+    # The reference is the SAME pixel at bitval 0: identical frame structure, identical
+    # select state, zero drive. A BLANKED frame is NOT a valid reference -- it draws ~4x
+    # MORE (943-956 nA against 236-254 nA), so lit-minus-blanked gives a negative LED
+    # current. Measured both ways, twice.
+    leak_reference: bool = True  # measure each sweep point lit and at LEAK_REF_BITVAL
+    leak_ref_bitval: int = 0  # the reference drive level: addressed, but off
+    leak_ref_settle_s: float = 2.0  # after switching drive level. Shorter than the sweep
+                                    # settle: the bias does not move, only the drive, and
+                                    # the point of measuring back to back is a shared history.
 
     # ── Dead-pixel threshold (fast scan) ────────────────────────────────
     nvled_v_fastscan: float = -1.35  # single fast-scan bias — does DOUBLE duty. At −1.35 V the pixels
@@ -372,6 +426,22 @@ class IQEConfig:
             raise ValueError(f"pm_wavelength={self.pm_wavelength} nm out of range")
         if self.n_fine < 2 or self.n_coarse < 2:
             raise ValueError("n_fine and n_coarse must be >= 2")
+        for name in ("vramp_lowv_settle_s", "vramp_highv_settle_s", "leak_ref_settle_s",
+                     "settle_scale"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be >= 0")
+        if self.highc_b:
+            # In High-C the LIMIT selects the measure range, so a limit too coarse for the
+            # segment silently costs resolution rather than failing.
+            for name in ("vramp_lowv_limit_a", "vramp_highv_limit_a"):
+                if getattr(self, name) > 1e-3:
+                    raise ValueError(
+                        f"{name}={getattr(self, name)} A with highc_b=True: in High-C the limit "
+                        "selects the measure range, so this resolves no better than ~milliamps.")
+        if self.leak_reference and self.leak_ref_bitval in self.bitvals:
+            raise ValueError(
+                f"leak_ref_bitval={self.leak_ref_bitval} is also a swept bitval: the reference "
+                "must be a drive level the sweep does not measure as signal.")
         if not 0.0 <= self.vramp_low_frac <= 1.0:
             raise ValueError(f"vramp_low_frac={self.vramp_low_frac} must be in [0, 1]")
         # Measured 261013: in High-C the LIMIT selects the current measure range, so a

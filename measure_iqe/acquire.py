@@ -39,6 +39,7 @@ a built-in ABC-model rig, with no hardware attached.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import json
 import math
@@ -343,7 +344,9 @@ def build_fine_voltages(pm, smu, cfg: IQEConfig, log: Logger,
             dens = f"uniform {cfg.n_fine} pts {cfg.nvled_v_coarse_start}→{cfg.nvled_v_coarse_stop} V"
         ramp = [(float(v), None) for v in V]
         out = sorted(ramp, reverse=(cfg.sweep_direction == "low_to_high"))
-        log(f"    {tag}voltage ramp ({dens}), fixed {cfg.nvled_range_i:g} A range, {cfg.sweep_direction}")
+        log(f"    {tag}voltage ramp ({dens}), "
+            f"{'range from the limit (High-C)' if cfg.highc_b else f'fixed {cfg.nvled_range_i:g} A range'}, "
+            f"{cfg.sweep_direction}")
         return out
     set_nplc(smu, cfg.coarse_nplc)
     # Sweep the coarse map in the SAME direction as the fine sweep. The device is
@@ -413,6 +416,18 @@ _AGG_COLS_FULL = _AGG_COLS + [
     "NVLED_CURR_MEDIAN", "NVLED_CURR_SAMPSTD", "NVLED_CURR_N",
     "VLED_CURR_MEDIAN", "VLED_CURR_SAMPSTD",
     "PM400_POWER_MEDIAN", "PM400_POWER_SAMPSTD"]
+# The leakage reference: the same pixel at LEAK_REF_BITVAL, measured back to back with the
+# lit point. I_LED = NVLED_CURR_MEAN - NVLED_CURR_REF, and that subtraction is what makes
+# the rising side meaningful at all -- at -0.80 V the reference is 58% of the reading.
+# Appended, never inserted, so a reader that does not know these columns still works.
+_AGG_COLS_REF = ["NVLED_CURR_REF", "NVLED_CURR_REF_STD", "VLED_CURR_REF",
+                 "PM400_POWER_REF", "PM400_POWER_REF_STD", "LEAK_REF_BITVAL"]
+
+
+def agg_cols(cfg: IQEConfig) -> list[str]:
+    """The aggregated-CSV columns this configuration writes."""
+    cols = list(_AGG_COLS_FULL if cfg.save_raw_samples else _AGG_COLS)
+    return cols + _AGG_COLS_REF if cfg.leak_reference else cols
 
 
 def write_aggregated_one(path: str | Path, rows: list[Row]) -> None:
@@ -495,7 +510,7 @@ class BackgroundWriter:
         self._raw_f = open(raw_path, "w")
         self._raw_f.write(RAW_HEADER)
         self._raw_f.flush()
-        self._cols = _AGG_COLS_FULL if cfg.save_raw_samples else _AGG_COLS
+        self._cols = agg_cols(cfg)
         # Per-individual-sample file (every burst reading), when enabled.
         self._samp_f = None
         if cfg.save_raw_samples:
@@ -951,12 +966,28 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
     longer integration on the low-current rising side (per-point NPLC)."""
     log("=" * 56)
     if cfg.fine_sweep_mode == "voltage":
-        eff = (f"low-V NPLC {cfg.vramp_lowv_nplc}/{cfg.vramp_lowv_n_pm} PM, high-V NPLC {cfg.vramp_highv_nplc}/"
-               f"{cfg.vramp_highv_n_pm} PM" if cfg.vramp_perseg_effort else
+        eff = (f"low-V NPLC {cfg.vramp_lowv_nplc}/{cfg.vramp_lowv_n_pm} PM/"
+               f"{cfg.vramp_lowv_settle_s:g}s/{cfg.vramp_lowv_limit_a:g}A, "
+               f"high-V NPLC {cfg.vramp_highv_nplc}/{cfg.vramp_highv_n_pm} PM/"
+               f"{cfg.vramp_highv_settle_s:g}s/{cfg.vramp_highv_limit_a:g}A"
+               if cfg.vramp_perseg_effort else
                f"uniform NPLC {cfg.sweep_nplc}/{cfg.n_pm_samples} PM")
+        # Under High-C the limit, not nvled_range_i, selects the measure range -- saying
+        # "fixed 10 mA range" there would be a lie, and it was.
+        rng = ("range from the limit (High-C)" if cfg.highc_b
+               else f"fixed {cfg.nvled_range_i:g} A range")
         log(f"VOLTAGE SWEEP — {len(selected)} pixels, {cfg.sweep_direction}, V ramp "
             f"{cfg.nvled_v_coarse_start}→{cfg.nvled_v_coarse_stop} V ({cfg.n_fine} pts, low-J-dense @ knee "
-            f"{cfg.vramp_knee_v} V), fixed {cfg.nvled_range_i:g} A range, {eff}")
+            f"{cfg.vramp_knee_v} V), {rng}, {eff}")
+        if cfg.leak_reference:
+            log(f"  leakage reference: every point re-measured at bitval {cfg.leak_ref_bitval} "
+                f"(+{cfg.leak_ref_settle_s:g}s each) → NVLED_CURR_REF. I_LED = MEAN - REF.")
+        est = len(selected) * cfg.n_fine * (
+            (cfg.vramp_lowv_settle_s + cfg.vramp_highv_settle_s) / 2
+            + (2 * cfg.leak_ref_settle_s if cfg.leak_reference else 0)) * cfg.settle_scale
+        log(f"  settle time alone: ~{est/60:.0f} min for {len(selected)} pixels "
+            f"({est/max(1, len(selected)):.0f} s/pixel). Measured, not guessed: the current "
+            f"approaches its final value as t^-1.3.")
     else:
         log(f"VOLTAGE SWEEP — {len(selected)} pixels × bitvals {list(cfg.bitvals)}, {cfg.sweep_direction}, "
             f"current-targeted (w={cfg.lowj_weight}); adaptive low-J NPLC {cfg.lowj_nplc}, high-J {cfg.highj_nplc}; "
@@ -1005,25 +1036,43 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                 time.sleep(cfg.thermal_settle_ms / 1000.0)
             cur_nplc = None
             cur_range = None
+            cur_limit = cfg.nvled_compliance
             for jpt, (v, i_target) in enumerate(fine):
                 if cfg.fine_sweep_mode == "voltage":
                     if cfg.vramp_perseg_effort and v > cfg.vramp_knee_v:
                         # low-V / rising side (faint light) → heavy PM averaging + NPLC
-                        nplc, n_pm, n_smu, settle_ms = (cfg.vramp_lowv_nplc, cfg.vramp_lowv_n_pm,
-                                                        cfg.vramp_lowv_n_smu, cfg.vramp_lowv_settle_ms)
+                        nplc, n_pm, n_smu, settle_s, limit = (
+                            cfg.vramp_lowv_nplc, cfg.vramp_lowv_n_pm,
+                            cfg.vramp_lowv_n_smu, cfg.vramp_lowv_settle_s,
+                            cfg.vramp_lowv_limit_a)
                     elif cfg.vramp_perseg_effort:
                         # high-V droop (bright) → fast
-                        nplc, n_pm, n_smu, settle_ms = (cfg.vramp_highv_nplc, cfg.vramp_highv_n_pm,
-                                                        cfg.vramp_highv_n_smu, cfg.vramp_highv_settle_ms)
+                        nplc, n_pm, n_smu, settle_s, limit = (
+                            cfg.vramp_highv_nplc, cfg.vramp_highv_n_pm,
+                            cfg.vramp_highv_n_smu, cfg.vramp_highv_settle_s,
+                            cfg.vramp_highv_limit_a)
                     else:
-                        nplc, n_pm, n_smu, settle_ms = cfg.sweep_nplc, cfg.n_pm_samples, cfg.n_smu_samples, cfg.settle_ms
+                        nplc, n_pm, n_smu, settle_s, limit = (
+                            cfg.sweep_nplc, cfg.n_pm_samples, cfg.n_smu_samples,
+                            cfg.settle_ms / 1000.0, cfg.nvled_compliance)
                 else:
                     # heavy current averaging + longer settle at low current; fast at high
                     nplc, n_pm, n_smu, settle_ms = adaptive_params(i_target, cfg)
+                    settle_s, limit = settle_ms / 1000.0, cfg.nvled_compliance
+                if limit != cur_limit:
+                    # No single limit spans the sweep: -2.6 V draws ~175 uA while the rising
+                    # side needs a 10 uA limit to resolve at all. Under High-C the limit also
+                    # selects the measure range, so this is a range change mid-sweep -- which
+                    # was verified against single-limit ground truth and agreed to 1.1%
+                    # (runs 261013-2140 / -2155). Re-entering configure is safe: it leaves
+                    # High-C first, so the range write is never refused.
+                    configure_voltage_source_b(
+                        smu, dataclasses.replace(cfg, nvled_compliance=limit), log)
+                    cur_limit, cur_nplc = limit, None
                 if nplc != cur_nplc:
                     set_nplc(smu, nplc); cur_nplc = nplc
                 smu.set_voltage("b", float(v))
-                time.sleep(settle_ms / 1000.0)
+                time.sleep(settle_s * cfg.settle_scale)
                 raw_s = None
                 if cfg.perpoint_range:
                     # range from the ACTUAL current (probe-then-measure), not the coarse map
@@ -1038,12 +1087,27 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                             pm, smu, n_smu, n_pm, return_raw=True)
                     else:
                         p, ps, iv, ivs, inv, invs, _, _ = acquire_point(pm, smu, n_smu, n_pm)
+                # Leakage reference: the SAME pixel at bitval 0. Measured back to back with
+                # the lit point so both carry the same relaxation history and the
+                # subtraction cancels most of it. At -0.80 V this is 58% of the reading.
+                ref = None
+                if cfg.leak_reference:
+                    smile.set_pixel(x, y, cfg.leak_ref_bitval)
+                    time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
+                    ref = acquire_point(pm, smu, n_smu, max(3, n_pm // 4))
+                    smile.set_pixel(x, y, bitval)
+                    time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
                 vr = round(float(v), 4)
                 row = dict(X=x, Y=y, BITVAL=bitval, NVLED_V=vr,
                            TIME_START=time.perf_counter() - t0, TIME_END=time.perf_counter() - t0,
                            NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
                            VLED_CURR_MEAN=iv, VLED_CURR_STD=ivs,
                            PM400_POWER_MEAN=p, PM400_POWER_STD=ps)
+                if ref is not None:
+                    rp, rps, riv, _, rinv, rinvs, _, _ = ref
+                    row.update(NVLED_CURR_REF=rinv, NVLED_CURR_REF_STD=rinvs,
+                               VLED_CURR_REF=riv, PM400_POWER_REF=rp,
+                               PM400_POWER_REF_STD=rps, LEAK_REF_BITVAL=cfg.leak_ref_bitval)
                 if raw_s is not None:
                     # honest per-burst stats. _MEAN = true mean, _MEDIAN = median, _SAMPSTD =
                     # population std, _STD = SEM (σ/√N) — kept as _STD because that is the column
@@ -1254,6 +1318,12 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"Output: {out_dir}   (source_mode={cfg.source_mode})")
 
+    if simulate and cfg.settle_scale == 1.0:
+        # The sweep settles for seconds per point now, which is real physics on the bench
+        # and dead time in a simulation. Scale it away unless the caller asked for it, so
+        # --simulate stays a few seconds instead of a quarter of an hour.
+        cfg = dataclasses.replace(cfg, settle_scale=0.0)
+        log("  simulate: settle_scale=0 (pass --set settle_scale=1 to keep the real waits)")
     pm, smu, smile = connect(cfg, log, simulate=simulate)
     n_points = 0
     selected: list[dict[str, Any]] = []

@@ -214,19 +214,19 @@ runs that pinned each value.
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `sample_name` | `str` | `'Array38_IQE'` | base_dir is relative to the working directory unless you pass an absolute path. Nothing outside it is ever written. |
+| `sample_name` | `str` | `'Array38_IQE'` |  |
 | `base_dir` | `str` | `'results'` | output root; a timestamped run dir is created inside |
 
 #### ROI & pixel selection
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `roi` | `tuple[int, int, int, int] \| str` | `(32, 32, 63, 63)` | (x1,y1,x2,y2) or "FULL"/"TL"/"TR"/"BL"/"BR" |
+| `roi` | `tuple[int, int, int, int] \| str` | `(32, 32, 63, 63)` | (x1,y1,x2,y2) or "FULL"/"TL"/"TR"/"BL"/"BR" Which alive pixels get the (expensive) full IQE sweep: "blocks"  — STRATIFIED: tile the ROI into BLOCK_SIZE×BLOCK_SIZE-pixel blocks and take PIXELS_PER_BLOCK from EACH block → equal per-block sampling for spatial (block / row-band / column-band) statistics. Within a block the pixels are spread by FPS, but each block's FPS STARTS from a RANDOM alive pixel (seeded by BLOCK_SEED), so the sampled rows/columns are diversified across blocks instead of landing on the same sub-lattice every time. Change BLOCK_SEED between runs to sample DIFFERENT pixels (cumulatively cover the array). "spatial" — fraction of alive pixels by global farthest-point sampling (uniform map). "stride"  — old every-Nth (aliases columns; kept for compatibility). |
 | `sweep_select` | `str` | `'blocks'` | "blocks" \| "spatial" \| "stride" |
 | `block_size` | `int` | `8` | blocks mode: block edge in pixels (ROI → ~ROI/BLOCK_SIZE blocks/axis) |
 | `pixels_per_block` | `int` | `4` | blocks mode: alive pixels sampled per block |
-| `block_seed` | `int` | `0` | blocks mode: RNG seed (vary across runs to sample new pixels) |
-| `min_pixel_separation` | `int` | `2` | blocks mode: no two measured pixels may sit closer than this (Chebyshev, so 2 = never sharing an edge or a corner). Without it, each block's farthest-point walk ran to the block's own border and the block next door … |
+| `block_seed` | `int` | `0` | blocks mode: RNG seed (vary across runs to sample new pixels) blocks mode: no two measured pixels may sit closer than this (Chebyshev, so 2 = never sharing an edge or a corner). Without it, each block's farthest-point walk ran to the block's own border and the block next door did the same, so pairs of measured LEDs landed side by side across the shared edge — the sample looked stratified but was really clustered, and neighbouring blocks' statistics blurred into each other. Raise it to spread the sample further (thermal/optical crosstalk between nearby pixels is a physical question, so it is a knob); 1 disables the guard. A block too dead or too small to honour it falls back and says so in the log. |
+| `min_pixel_separation` | `int` | `2` |  |
 | `sweep_fraction` | `float` | `0.1` | spatial mode: fraction of ALIVE pixels to sweep |
 | `min_sweep_pixels` | `int` | `6` | spatial mode: floor on the count (so tiny ROIs still map) |
 | `nth_pixel_sweep` | `int` | `5` | stride mode: sweep every Nth alive pixel |
@@ -237,7 +237,7 @@ runs that pinned each value.
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `source_mode` | `str` | `'voltage'` | "voltage": ch B sources voltage, adaptive current-targeted sweep. PROVEN on Array38 — the 10 mA voltage sweep captured the IQE peak (J≈6, ~59%). USE THIS. "current": ch B sources (sinks) current, measures voltage. … |
+| `source_mode` | `str` | `'voltage'` |  |
 
 #### Current-source sweep (source_mode = "current")
 
@@ -255,19 +255,19 @@ runs that pinned each value.
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `bitvals` | `tuple[int, ...]` | `(15,)` | single bitval — densify low-J via spacing instead |
-| `fine_sweep_mode` | `str` | `'voltage'` | Fine-sweep mode: "voltage" — plain UNIFORM voltage ramp NVLED_V_COARSE_START → STOP (no coarse map). Hits every voltage including the steep turn-on, so the rising side is densely sampled. Simple, robust — this is … |
+| `bitvals` | `tuple[int, ...]` | `(15,)` | single bitval — densify low-J via spacing instead Fine-sweep mode: "voltage" — plain UNIFORM voltage ramp NVLED_V_COARSE_START → STOP (no coarse map). Hits every voltage including the steep turn-on, so the rising side is densely sampled. Simple, robust — this is what the old clean runs effectively did. RECOMMENDED. "current" — coarse pre-sweep maps V→I, then place points at log-spaced CURRENTS. Even log-J spacing, BUT it skips voltages where dI/dV is steep (the ~−0.9..−1.1 V gap) and depends on the coarse map (which drove the ranging bugs). |
+| `fine_sweep_mode` | `str` | `'voltage'` |  |
 | `nvled_v_coarse_start` | `float` | `-0.8` | least-negative sweep voltage (just below turn-on) |
 | `nvled_v_coarse_stop` | `float` | `-2.6` | most-negative sweep voltage (below saturation knee) |
 | `n_coarse` | `int` | `26` | coarse pre-sweep points |
 | `coarse_settle_ms` | `float` | `6.0` |  |
-| `coarse_n_smu` | `int` | `4` |  |
+| `coarse_n_smu` | `int` | `4` | Where the fit actually needs data: across 140 per-pixel fits the device's IQE peak sits at J ≈ 5 A/cm² (≈5 µA) and the trustworthy fits only reach down to J ≈ 1 (≈1 µA) on the rising side. So target J ≈ 1–10, NOT sub-µA: below ~1 µA the data is unneeded AND that is exactly where the fine measure range takes ~seconds to settle. Starting at ~1 µA keeps every point on a fast-settling range and puts the points where the peak is. |
 | `low_current_target_a` | `float` | `1e-06` | lowest LED current the sweep targets (~J 1, the rise foot) |
 | `high_current_frac` | `float` | `0.97` |  |
-| `n_fine` | `int` | `45` | fine voltage-sweep points (was 45; more, single bitval) |
-| `lowj_weight` | `float` | `1.5` | >1 concentrates fine points toward LOW current (the SRH rising side J≈1–5 that pins peak IQE). 1.0 = uniform log. |
+| `n_fine` | `int` | `30` | fine voltage-sweep points. Lowered from 45 once the settle time was measured: the dwell dominates the budget, so fewer points with a real settle beat more points that never settled. 30 points x 2 drive states x ~8 s is ~10 min/pixel. |
+| `lowj_weight` | `float` | `1.5` | >1 concentrates fine points toward LOW current (the SRH rising side J≈1–5 that pins peak IQE). 1.0 = uniform log. Voltage-ramp densification (FINE_SWEEP_MODE="voltage"). The rising side + peak that pin the fit live in a narrow voltage window around turn-on (~−0.85 to −1.3 V), while the droop spans the rest. So split the ramp: put VRAMP_LOW_FRAC of the points in the less-negative segment [START, KNEE] (rising side + peak, dense) and the rest in [KNEE, STOP] (droop). |
 | `vramp_knee_v` | `float \| None` | `-1.3` | split voltage between the dense (rising) and sparse (droop) halves |
-| `vramp_low_frac` | `float` | `0.6` | fraction of points placed in the rising-side segment |
+| `vramp_low_frac` | `float` | `0.6` | fraction of points placed in the rising-side segment Sweep direction (thermal A/B test). "low_to_high" measures the rising side first (coolest, recommended); "high_to_low" starts hot. Run both on the same pixels and compare the low-J EQE to gauge self-heating: if high_to_low reads lower IQE at low J, self-heating is biasing you and low_to_high is the better number. |
 | `sweep_direction` | `str` | `'high_to_low'` | "low_to_high" \| "high_to_low" |
 
 #### Pixel warm-up / conditioning
@@ -275,7 +275,7 @@ runs that pinned each value.
 | parameter | type | default | meaning |
 |---|---|---|---|
 | `warmup_ms` | `float` | `1500.0` | 0 = off. Dwell at WARMUP_NVLED_V before each sweep. |
-| `warmup_nvled_v` | `float` | `-2.6` | warm-up bias (high current, clears the parasitic) |
+| `warmup_nvled_v` | `float` | `-2.6` | warm-up bias (high current, clears the parasitic) `--warmup-diag` only: watch P, I and EQE vs time at a fixed operating point on several pixels. Pick the point in the J≈1 region where the A/B split was largest — low enough to stress the current readout, but where the LIGHT is still a few× above the dark floor. (−0.6 V was too low: runs 0759/0847 sat AT the dark floor with the current in the hypersensitive turn-on toe, so neither channel was informative.) |
 | `warmup_diag_v` | `float` | `-0.85` | ≈J 1: stresses current readout, light still > dark |
 | `warmup_diag_n_pixels` | `int` | `3` | how many of the selected pixels to characterise |
 | `warmup_diag_seconds` | `float` | `30.0` | log duration per phase (fresh turn-on / conditioned) |
@@ -324,21 +324,21 @@ runs that pinned each value.
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `nvled_compliance` | `float` | `0.5` | current compliance (voltage mode) |
-| `nvled_range_i` | `float` | `0.01` | default fixed measure current range (coarse pre-sweep, fast scan, and any point with no current target). |
-| `perpoint_range` | `bool` | `False` | False = fixed NVLED_RANGE_I (10 mA): consistent (offsets and all) so the curve SHAPE comes through — what the old clean runs used. True = per-point software ranging (accurate value, but range offsets/settling … |
+| `nvled_compliance` | `float` | `1e-05` | current compliance (voltage mode). In High-C this ALSO selects the measure range, so it sets the noise floor: 10 uA gives ~9 nA/sample at NPLC 0.01, ~1 nA at NPLC 1. Measured 261013. The sweep overrides it per segment (VRAMP_*_LIMIT_A) because -2.6 V needs ~175 uA. |
+| `nvled_range_i` | `float` | `0.01` | default fixed measure current range (coarse pre-sweep, fast scan, and any point with no current target). Current readout is the dominant error: ~5 µA on the 10 mA range is 0.05% of full scale (and the low-J rise, <1 µA, is ~0.01%) → 20–50% scatter. AUTORANGE was tried (260629-0913/1000) and BROKE the measurement: with the fast zero-delay BURST read (delay=0, autozero off) autorange can't range up in time, so ch B read 100–800× too LOW (157 µA real → 0.2 µA reported; leakage gate then killed every point). So instead of autorange we set the range DETERMINISTICALLY per point from its known target current (the coarse map gives it) — optimal resolution, correct value, no hunting. (There is no autorange knob: hardware autorange is broken with the burst read and the code never turns it on — the range is always set explicitly by set_measure_range_b.) |
+| `perpoint_range` | `bool` | `False` | False = fixed NVLED_RANGE_I (10 mA): consistent (offsets and all) so the curve SHAPE comes through — what the old clean runs used. True = per-point software ranging (accurate value, but range offsets/settling corrupted the rising side; see 260630). Picking the range from the COARSE pre-sweep map failed both directions (260630): the coarse map (10 mA range, pre-conditioning) mis-predicts the fine-sweep current, so the range was too low at high bias (→ overflow, 104 pts) and too coarse on the rise (→ stuck 0.8 µA offset). Fix: PROBE the actual current on a safe wide range first, then narrow. |
 | `probe_range_i` | `float` | `0.001` | wide probe range: covers the device max (~175 µA), never overflows, gives the magnitude to pick the real range from |
 | `probe_n_smu` | `int` | `4` | quick samples for the magnitude probe |
-| `range_settle_ms` | `float` | `50.0` | settle after a measure-range change before reading |
-| `highc_b` | `bool` | `False` | 2602B High-C mode on ch B. The driver guards High-C on B (raises), so we enable it via TSP. High-C adds settling delays (slower) but damps a capacitive load that can make the low current ranges ring/never settle — … |
+| `range_settle_ms` | `float` | `50.0` | settle after a measure-range change before reading 2602B High-C mode on ch B. The driver guards High-C on B (raises), so we enable it via TSP. High-C adds settling delays (slower) but damps a capacitive load that can make the low current ranges ring/never settle — the reason 10 mA was the safe range. Off by default; sweep_variants.py toggles it to test whether it makes low ranges usable. |
+| `highc_b` | `bool` | `True` | MANDATORY, measured 261013. Without High-C every reading below ~10 uA is a range artifact: it lands at 42-58% of whatever range is selected, independent of bias, wrong by up to 517x. With it, three different start voltages agree to 0.6%. |
 | `sweep_autozero` | `str` | `'AUTO'` | AUTO \| ONCE \| OFF |
-| `save_raw_samples` | `bool` | `True` | Save every individual burst sample (not just the per-point summary) to a raw-samples CSV, and write mean/median/std/SEM (not just one summary) into the aggregated file. Off → old behaviour. |
+| `save_raw_samples` | `bool` | `True` |  |
 
 #### Integration time (NPLC) per phase
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `fastscan_nplc` | `float` | `0.05` | Now the fast-scan CURRENT matters: at −1.35 V the fast scan is a full-coverage peak-IQE proxy (EQE=P/I on the EQE plateau), so its current noise sets the proxy quality. Sweep test (260704-1456/1618/ 1659): NPLC … |
+| `fastscan_nplc` | `float` | `0.05` | Now the fast-scan CURRENT matters: at −1.35 V the fast scan is a full-coverage peak-IQE proxy (EQE=P/I on the EQE plateau), so its current noise sets the proxy quality. Sweep test (260704-1456/1618/ 1659): NPLC 0.01→0.05 cut the current relSEM 18%→3% and the proxy's per-pixel error 14%→5% (down to the device's ~4% uniformity floor) for only +3 s. NPLC 0.1 + N_SMU 8 barely helped (→4.7%) but ~60% slower — so 0.05 / N_SMU 4 is the sweet spot. |
 | `fastscan_n_smu` | `int` | `4` | SMU samples/pixel in the fast scan |
 | `coarse_nplc` | `float` | `0.1` | voltage-mode coarse I(V) map: rough, quick |
 | `sweep_nplc` | `float` | `1.0` | the accurate IQE data (raise toward 2–5 for very low J) |
@@ -351,13 +351,13 @@ runs that pinned each value.
 | `fastscan_settle_ms` | `float` | `10.0` | fast scan settle after lighting a pixel. Back to 10 ms (was 5) — the 5 ms save wasn't worth risking a not-fully-settled optical read on the liveness classifier. |
 | `fastscan_random_order` | `bool` | `True` | visit fast-scan pixels in a shuffled order (not a raster). A raster correlates any residual/crosstalk with spatial position; randomizing turns it into position-independent noise. |
 | `fastscan_order_seed` | `int` | `0` | seed for the shuffle (reproducible) |
-| `fastscan_blank_between` | `bool` | `True` | send a black (all-off) frame before lighting each pixel, so exactly ONE pixel is ever emitting when the PM reads — guards against a lingering previous pixel / accumulated frame inflating the optical power (the ~71 nW … |
+| `fastscan_blank_between` | `bool` | `True` | send a black (all-off) frame before lighting each pixel, so exactly ONE pixel is ever emitting when the PM reads — guards against a lingering previous pixel / accumulated frame inflating the optical power (the ~71 nW edge-pixel false-alive, run 1405). |
 
 #### Dead-pixel early abort (voltage sweep)
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `dead_abort` | `bool` | `True` | Liveness is gated by the fast scan, which has an optical background floor that can mark a dead edge pixel "alive" (run 1405: 3/4 corner pixels read ~71 nW in the fast scan but 0.05 nW in the sweep). The sweep runs … |
+| `dead_abort` | `bool` | `True` |  |
 | `dead_abort_nw` | `float` | `2.0` | absolute floor (nW): first-point power below this ⇒ dead |
 | `dead_abort_frac` | `float` | `0.1` | or below this fraction of the running median of live pixels |
 | `thermal_settle_ms` | `float` | `100.0` | before the fine sweep, sit at the FIRST point this long so the pixel reaches its starting-current thermal steady state (clears heat left by the coarse pre-sweep) |
@@ -368,23 +368,40 @@ runs that pinned each value.
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `vramp_perseg_effort` | `bool` | `True` | The knee (VRAMP_KNEE_V) splits not just point DENSITY but measurement EFFORT. The low-V / rising-side segment (\|V\| < \|knee\|) has faint light near the dark floor, so take more PM reads there (σ_light ∝ 1/√N_PM); the … |
-| `vramp_lowv_nplc` | `float` | `2.0` |  |
+| `settle_scale` | `float` | `1.0` | multiplies every sweep settle. `--simulate` forces 0, so a dry run is seconds rather than 15 minutes. Lower it on hardware only to measure what the shortcut costs. |
+| `vramp_perseg_effort` | `bool` | `True` | the knee splits point density, measurement effort **and the limit** |
+| `vramp_lowv_nplc` | `float` | `2.0` | integer NPLC, so the mains line is nulled by integration |
 | `vramp_lowv_n_pm` | `int` | `32` |  |
 | `vramp_lowv_n_smu` | `int` | `12` |  |
-| `vramp_lowv_settle_ms` | `float` | `20.0` |  |
-| `vramp_highv_nplc` | `float` | `0.5` |  |
+| `vramp_lowv_settle_s` | `float` | `8.0` | **seconds.** Rising side: 1% takes 5-55 s. Measured 261013; the old 20 ms was wrong by 250-2750x and is why every rising-side EQE before then is too high. |
+| `vramp_lowv_limit_a` | `float` | `1e-05` | the rising side never exceeds ~5 uA |
+| `vramp_highv_nplc` | `float` | `1.0` | was 0.5 -- not an integer, so it nulled no mains at all |
 | `vramp_highv_n_pm` | `int` | `8` |  |
 | `vramp_highv_n_smu` | `int` | `8` |  |
-| `vramp_highv_settle_ms` | `float` | `15.0` |  |
+| `vramp_highv_settle_s` | `float` | `2.0` | **seconds.** Droop side: big currents, the relaxation is a smaller fraction |
+| `vramp_highv_limit_a` | `float` | `0.001` | -2.6 V draws ~175 uA, far above the rising-side limit |
+
+#### Leakage reference (the low-J correction)
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `leak_reference` | `bool` | `True` | measure every sweep point a second time at `leak_ref_bitval` |
+| `leak_ref_bitval` | `int` | `0` | the reference drive level: addressed, but off |
+| `leak_ref_settle_s` | `float` | `2.0` | after switching drive level; the bias does not move |
+
+Channel B reads the **total** cathode current. Measured over 12 pixels in 4
+quadrants on 261013, the reference is 8% of the reading at −0.95 V and **58% at
+−0.80 V**. Without subtracting it the EQE appears to collapse ~20× below J ≈ 0.4.
+A *blanked* frame is not a valid reference — it draws ~4× **more** than the
+addressed pixel at bitval 0, so lit-minus-blanked is negative.
 
 #### Dead-pixel threshold (fast scan)
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `nvled_v_fastscan` | `float` | `-1.35` | single fast-scan bias — does DOUBLE duty. At −1.35 V the pixels sit at J≈25 A/cm², which is dead on the (broad, flat) EQE peak plateau: EQE is within ~1% of its peak across J≈8–30, so the fast-scan EQE=P/I here ≈ … |
+| `nvled_v_fastscan` | `float` | `-1.35` | single fast-scan bias — does DOUBLE duty. At −1.35 V the pixels sit at J≈25 A/cm², which is dead on the (broad, flat) EQE peak plateau: EQE is within ~1% of its peak across J≈8–30, so the fast-scan EQE=P/I here ≈ each pixel's PEAK EQE. That turns the fast scan into a full-coverage peak-IQE proxy for all 65 536 pixels (calibrated to the sweep in analysis), while still emitting ~22 nW for the alive/dead classification — ~1000× the MEASURED optical floor (3σ = 23 pW at n_pm 32; see the optfloor run of 261013, σ ∝ N^-0.499 from n_pm 4 to 512). J≈25 keeps ~5 A/cm² of margin before the droop starts (~J30). The current there (~25 µA) is high enough for a fast (NPLC 0.01) read. (Was −2.6 V / J≈95 — the droop side at only ~78% of peak.) |
 | `dead_threshold_frac` | `float` | `0.2` | a pixel is alive if P ≥ this × the "typical lit" level |
-| `fastscan_alive_pctl` | `int` | `90` | "typical lit" level = this percentile of the fast-scan power. NOT the median: the median collapses to the noise floor on a majority-DEAD ROI (then ~everything is mislabelled alive — e.g. quadrant 260703-1307 was 57% … |
+| `fastscan_alive_pctl` | `int` | `90` | "typical lit" level = this percentile of the fast-scan power. NOT the median: the median collapses to the noise floor on a majority-DEAD ROI (then ~everything is mislabelled alive — e.g. quadrant 260703-1307 was 57% dark, median 0.08 nW → 84% "alive"). A high percentile tracks the lit population as long as the lit fraction exceeds (100−pctl)% = 10%. |
 | `pixel_area_um2` | `float` | `100.0` |  |
 | `smu_display_off` | `bool` | `False` |  |
 
@@ -767,6 +784,34 @@ fixes it, by averaging rather than by rejection:
 7.8× less noise, consistent with √100 for white noise, and the same answer. Use an
 integer NPLC on the measurement points. It costs nothing, because the relaxation
 below forces a wait anyway.
+
+### What the sweep now does, and why (261013)
+
+The investigation rewrote the sweep's settings. The short version:
+
+| setting | was | is | because |
+|---|---|---|---|
+| `highc_b` | False | **True** | below ~10 uA the readings were range artifacts, off by up to 517x |
+| `nvled_compliance` | 0.5 A | **10 uA** | in High-C the limit picks the range, so it sets the noise floor |
+| `vramp_lowv_settle_ms` | 20 ms | **8 s** (`_settle_s`) | measured: 1% takes 5-55 s |
+| `vramp_highv_nplc` | 0.5 | **1.0** | 0.5 is not an integer, so it nulled no mains |
+| `n_fine` | 45 | **30** | the dwell dominates; fewer points with a real settle win |
+| leakage reference | none | **every point** | at -0.80 V, 58% of the reading is not the LED |
+
+Plus a per-segment compliance, because no single limit spans the sweep: -2.6 V
+draws ~175 uA while the rising side needs a 10 uA limit to resolve at all.
+
+**Small steps do not settle faster.** That was the natural guess and the bench
+refused it (run 261013-2337). Stepping 20 mV onto -0.80 V left the reading 4.5%
+high and still drifting at 80 s; stepping 200 mV onto the same point was flat
+from 60 s. Each point inherits the unrelaxed tail of every earlier point, and a
+small step does not escape that -- it only makes the per-step excursion small
+compared with the memory. So the budget is the **dwell**, not the step size, and
+the two things that do help are sweeping high current to low current (already the
+default) and measuring the bitval-0 reference back to back with the lit point so
+both carry the same history.
+
+Cost: ~30 points x 2 drive states x ~8 s, about 4-5 min of settling per pixel.
 
 ### Two-phase settling
 

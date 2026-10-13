@@ -48,7 +48,8 @@ coarse_settle_ms: 6.0
 coarse_n_smu: 4
 low_current_target_a: 1.0e-06   # lowest LED current the sweep targets (~J 1, the rise foot)
 high_current_frac: 0.97
-n_fine: 45   # fine voltage-sweep points (was 45; more, single bitval)
+n_fine: 30   # fine voltage-sweep points. Lowered from 45 once the settle time was measured: the dwell
+             # dominates the budget, so fewer points with a real settle beat more that never settled.
 lowj_weight: 1.5   # >1 concentrates fine points toward LOW current (the SRH rising side J≈1–5 that pins ...
 vramp_knee_v: -1.3   # split voltage between the dense (rising) and sparse (droop) halves
 vramp_low_frac: 0.6   # fraction of points placed in the rising-side segment
@@ -90,13 +91,15 @@ vled_compliance: 1.0
 vled_range_i: 0.01
 
 # ---- NVLED (ch B) — voltage-mode current range ----
-nvled_compliance: 0.5   # current compliance (voltage mode)
+nvled_compliance: 1.0e-05   # current compliance. In High-C this ALSO selects the measure range, so it
+                            # sets the noise floor. The sweep overrides it per segment below.
 nvled_range_i: 0.01   # default fixed measure current range (coarse pre-sweep, fast scan, and any point with ...
 perpoint_range: false   # False = fixed NVLED_RANGE_I (10 mA): consistent (offsets and all) so the curve SHAPE ...
 probe_range_i: 0.001   # wide probe range: covers the device max (~175 µA), never overflows, gives the ...
 probe_n_smu: 4   # quick samples for the magnitude probe
 range_settle_ms: 50.0   # settle after a measure-range change before reading
-highc_b: false   # 2602B High-C mode on ch B. The driver guards High-C on B (raises), so we enable it via ...
+highc_b: true   # MANDATORY (measured 261013). Without High-C every reading below ~10 uA is a range
+                # artifact: 42-58% of whatever range is selected, independent of bias, wrong by up to 517x.
 sweep_autozero: "AUTO"   # AUTO | ONCE | OFF
 save_raw_samples: true   # Save every individual burst sample (not just the per-point summary) to a raw-samples ...
 
@@ -122,15 +125,31 @@ n_smu_samples: 8   # SMU samples averaged per point
 n_pm_samples: 12   # PM400 readings averaged per point
 
 # ---- Per-segment effort (fine_sweep_mode="voltage") ----
-vramp_perseg_effort: true   # The knee (VRAMP_KNEE_V) splits not just point DENSITY but measurement EFFORT. The ...
-vramp_lowv_nplc: 2.0
+# SETTLE TIMES ARE SECONDS. After a voltage step the current approaches its final value as a POWER LAW,
+# |I-Iinf| ~ t^-1.3, so 1% takes 5-55 s and 0.1% takes 60-80 s -- at EVERY step size from 20 mV to 200 mV.
+# Small steps do NOT settle faster: 20 mV onto -0.80 V was still 4.5% high and drifting at 80 s, while
+# 200 mV onto the same point was flat from 60 s. The budget is the DWELL, not the step size.
+settle_scale: 1.0   # multiplies every sweep settle. --simulate forces 0. Lower it on hardware only to
+                    # measure what the shortcut costs; it costs the rising side.
+vramp_perseg_effort: true   # The knee (VRAMP_KNEE_V) splits point DENSITY, measurement EFFORT and the LIMIT.
+vramp_lowv_nplc: 2.0        # integer NPLC, so mains is nulled by the integration window
 vramp_lowv_n_pm: 32
 vramp_lowv_n_smu: 12
-vramp_lowv_settle_ms: 20.0
-vramp_highv_nplc: 0.5
+vramp_lowv_settle_s: 8.0      # rising side: 1% needs 5-55 s
+vramp_lowv_limit_a: 1.0e-05   # the rising side never exceeds ~5 uA
+vramp_highv_nplc: 1.0       # was 0.5 -- not an integer, so it nulled no mains at all
 vramp_highv_n_pm: 8
 vramp_highv_n_smu: 8
-vramp_highv_settle_ms: 15.0
+vramp_highv_settle_s: 2.0     # droop side: big currents, the relaxation is a smaller fraction
+vramp_highv_limit_a: 0.001    # -2.6 V draws ~175 uA, far above the rising-side limit
+
+# ---- Leakage reference (the low-J correction) ----
+# ch B reads the TOTAL cathode current. Measured over 12 pixels in 4 quadrants: the reference is 8% of the
+# reading at -0.95 V and 58% at -0.80 V. Without the subtraction the EQE appears to collapse 20x on the
+# rising side. The reference is the SAME pixel at bitval 0 -- a BLANKED frame draws ~4x MORE and is invalid.
+leak_reference: true
+leak_ref_bitval: 0        # addressed, but not driven
+leak_ref_settle_s: 2.0    # only the drive changes, not the bias
 
 # ---- Dead-pixel threshold (fast scan) ----
 nvled_v_fastscan: -1.35   # single fast-scan bias — does DOUBLE duty. At −1.35 V the pixels sit at J≈25 A/cm², ...
