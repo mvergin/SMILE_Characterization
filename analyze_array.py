@@ -749,7 +749,7 @@ def plot_fastscan_overview(fs, cls, out, plt):
     )
     ax[1].legend()
     fig.tight_layout()
-    fig.savefig(out, dpi=180)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
 
 
@@ -776,7 +776,7 @@ def plot_fastscan_vs_sweep(fs, sweep, out, plt):
     ax[1].set_ylabel("pixels")
     ax[1].set_title(f"median ratio = {ratio.median():.3f}")
     fig.tight_layout()
-    fig.savefig(out, dpi=180)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
     return float(ratio.median())
 
@@ -806,7 +806,7 @@ def plot_ivl(df, out, plt):
     for a in ax:
         a.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out, dpi=180)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
 
 
@@ -831,7 +831,7 @@ def plot_leakage(df, out, plt):
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out, dpi=180)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
 
 
@@ -901,7 +901,7 @@ def plot_eqe_all_and_median(df, fit, med, fit_ok, out, plt, src="LED"):
         color="gray",
     )
     fig.tight_layout()
-    fig.savefig(out, dpi=180)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
 
 
@@ -996,7 +996,7 @@ def plot_iqe(df, pixel_fits, pooled_fit, out, plt, src="LED"):
     ax.set_title(ttl)
     ax.grid(True, which="both", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out, dpi=180)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
     return peaks
 
@@ -1042,7 +1042,7 @@ def plot_eqe_by_bitval(df, out, plt, src="LED"):
     ax.legend()
     ax.grid(True, which="both", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out, dpi=180)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
 
 
@@ -1143,7 +1143,7 @@ def plot_burst_scatter(sweep_dir, out, plt, n_pixels=20):
         "Per-pixel burst scatter — how noisy is each measured point? (dotted line = NPLC knee)"
     )
     fig.tight_layout()
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
     return True
 
@@ -1215,7 +1215,7 @@ def plot_first_pixels(df, out, plt, n=FIRST_N_PIXELS, src="LED"):
     for c in range(3):
         axes[-1][c].set_xlabel(["NVLED voltage (V)", "J (A/cm²)", "J (A/cm²)"][c])
     fig.tight_layout()
-    fig.savefig(out, dpi=160)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
 
 
@@ -1262,7 +1262,7 @@ def plot_split_branch(med, split, joint_peak_iqe, out, plt):
     ax.legend()
     ax.grid(True, which="both", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out, dpi=180)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
 
 
@@ -1513,7 +1513,7 @@ def blocked_maps(X, Y, V, out, plt, vlabel, title, fmt="{:.0f}"):
     fig.suptitle(
         f"{title} — coarsening left→right; empty=white, hatched=single-pixel (n=1)"
     )
-    fig.savefig(out, dpi=150, bbox_inches="tight")
+    fig.savefig(out, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -1559,7 +1559,7 @@ def row_col_profiles(X, Y, V, out, plt, ylabel, title, band=8):
         ax.grid(True, alpha=0.3)
     fig.suptitle(title)
     fig.tight_layout()
-    fig.savefig(out, dpi=140)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
 
 
@@ -2262,7 +2262,7 @@ def plot_fastscan_efficiency(fs, out, plt):
         f"at J≈{J_med:.0f} A/cm² (high injection / droop side; coarse current)"
     )
     fig.tight_layout()
-    fig.savefig(out, dpi=180)
+    fig.savefig(out, dpi=300)
     plt.close(fig)
     v = eqe[np.isfinite(eqe)]
     return dict(
@@ -2567,7 +2567,7 @@ def anomaly_report(
         "rows/cols split per quadrant"
     )
     fig.tight_layout()
-    fig.savefig(out, dpi=150, bbox_inches="tight")
+    fig.savefig(out, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return dict(
         noise=noise, blobs=blobs, bad_cols=bad_cols, bad_rows=bad_rows, grads=grads

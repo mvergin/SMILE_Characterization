@@ -98,7 +98,25 @@ so a characterisation run at NPLC 0.01 has no mains rejection at all while its
 spectrum behind those numbers, and prints them as a table first.
 
 `traces.npz` holds one `(3, N)` array per capture — time, channel A, channel B —
-thinned uniformly so the frequency content is preserved.
+thinned uniformly so the frequency content is preserved. The key encodes the
+settings:
+
+```
+000_step_hc1_rNone_f-1.000_v-0.950_5
+ |    |    |     |      |       |  |  decimation stride (every 5th sample kept)
+ |    |    |     |      |       stepped TO this voltage
+ |    |    |     |      stepped FROM this voltage
+ |    |    |     measure range, None = not forced (in High-C the limit picks it)
+ |    |    High-C: 1 on, 0 off
+ |    experiment: step, or leak (which carries lit/off/blank instead)
+ capture index, in run order
+```
+
+**The plots show channel B only** — `NVLED`, the cathode, which is the LED
+current. Channel A is stored but not plotted: it carries ~466 µA of array
+background, so the LED current is 0.1–0.8% of it and its per-sample noise is
+~29 µA against channel B's 9 nA. Treat channel A as a supply-rail monitor, not
+as a second measurement of the LED.
 
 ### Smaller tools
 

@@ -181,7 +181,7 @@ def main():
                  "map recon RMS = how wrong the reconstructed map is with N pixels (vs full coverage)")
     fig.tight_layout()
     out = run_dir / "REPORT_assets"; out.mkdir(exist_ok=True)
-    fig.savefig(out / "subsample_convergence.png", dpi=160); plt.close(fig)
+    fig.savefig(out / "subsample_convergence.png", dpi=300); plt.close(fig)
     print(f"\nwrote {out/'subsample_convergence.png'}")
 
 

@@ -109,7 +109,7 @@ def main():
         ax[1].set_xscale("log"); ax[1].set_xlabel("J (A/cm²)"); ax[1].set_ylabel("EQE")
         ax[1].set_title("example jumpers (steep) vs clean pixels"); ax[1].legend(fontsize=7)
         out = Path(args.run_dir) / "REPORT_assets"; out.mkdir(exist_ok=True)
-        fig.tight_layout(); fig.savefig(out / "knee_jump.png", dpi=150)
+        fig.tight_layout(); fig.savefig(out / "knee_jump.png", dpi=300)
         print(f"\nwrote {out/'knee_jump.png'}")
     except Exception as e:
         print(f"(plot skipped: {e})")

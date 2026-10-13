@@ -159,7 +159,7 @@ def _plot(base, var, slope, intercept, b_cur, b_light, out_png) -> None:
     a2.legend(fontsize=8)
     a2.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out_png, dpi=140)
+    fig.savefig(out_png, dpi=300)
     plt.close(fig)
 
 

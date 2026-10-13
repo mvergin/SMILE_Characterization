@@ -88,7 +88,7 @@ def fig_ab_direction():
     a2.set_title(f"directions disagree {rmax:.2f}× at low J, agree at high J")
     a2.legend(); a2.grid(True, which="both", alpha=0.3)
     fig.suptitle("Run-to-run irreproducibility: the sweep-direction A/B test (runs 1329 vs 1341)")
-    fig.tight_layout(); fig.savefig(OUT / "fig1_ab_direction.png", dpi=130); plt.close(fig)
+    fig.tight_layout(); fig.savefig(OUT / "fig1_ab_direction.png", dpi=300); plt.close(fig)
     return dict(low_J_ratio_max=rmax)
 
 
@@ -110,7 +110,7 @@ def fig_channel_noise():
     ax.set_title(f"Which channel is noisy? (run 0733, fixed bias)\n"
                  f"light flat, current scatters {relI:.0f}% — corr(P,|I|)={corr:+.2f} → noise is in the CURRENT")
     ax.legend(); ax.grid(True, alpha=0.3); ax.set_ylim(0, 2.2)
-    fig.tight_layout(); fig.savefig(OUT / "fig2_channel_noise.png", dpi=130); plt.close(fig)
+    fig.tight_layout(); fig.savefig(OUT / "fig2_channel_noise.png", dpi=300); plt.close(fig)
     return dict(light_scatter_pct=relP, current_scatter_pct=relI, corr=corr)
 
 
@@ -140,7 +140,7 @@ def fig_parasitic():
     for i, v in enumerate([fr_I, co_I]):
         ax2.text(i, v, f"{v:.0f} nA", ha="center", va="bottom")
     fig.suptitle("Non-radiative parasitic current on fresh turn-on — light unchanged, current 27×")
-    fig.tight_layout(); fig.savefig(OUT / "fig3_parasitic.png", dpi=130); plt.close(fig)
+    fig.tight_layout(); fig.savefig(OUT / "fig3_parasitic.png", dpi=300); plt.close(fig)
     return dict(fresh_nA=fr_I, conditioned_nA=co_I, ratio=fr_I / co_I)
 
 
@@ -161,7 +161,7 @@ def fig_autorange():
     ax.set_title("Autorange broke NVLED (run 0913)\n"
                  "NVLED stuck ≤0.2 µA while light & VLED span ~3 decades → NVLED misread")
     ax.legend(); ax.grid(True, which="both", alpha=0.3)
-    fig.tight_layout(); fig.savefig(OUT / "fig4_autorange_break.png", dpi=130); plt.close(fig)
+    fig.tight_layout(); fig.savefig(OUT / "fig4_autorange_break.png", dpi=300); plt.close(fig)
     return dict(nvled_max_uA=Inv.max() * 1e6, vled_max_uA=Iv.max() * 1e6)
 
 
@@ -184,7 +184,7 @@ def fig_settling():
         ax.set_ylim(*lim)
     fig.suptitle("Settling probe (run 1130): only the range matched to the current reads the TRUE value\n"
                  "at low J, coarse ranges are not just noisy — they read the wrong number")
-    fig.tight_layout(); fig.savefig(OUT / "fig5_settling_ranges.png", dpi=130); plt.close(fig)
+    fig.tight_layout(); fig.savefig(OUT / "fig5_settling_ranges.png", dpi=300); plt.close(fig)
     return {}
 
 
@@ -204,7 +204,7 @@ def fig_aperture():
     ax.set_title("Why short reads fail (run 1119, NPLC 0.05, low J)\n"
                  "aperture noise ∝ range — the 38 nA signal is buried on every coarse range")
     ax.legend(); ax.grid(True, which="both", alpha=0.3)
-    fig.tight_layout(); fig.savefig(OUT / "fig6_aperture_noise.png", dpi=130); plt.close(fig)
+    fig.tight_layout(); fig.savefig(OUT / "fig6_aperture_noise.png", dpi=300); plt.close(fig)
     return {}
 
 
@@ -238,7 +238,7 @@ def fig_final():
     a2.set_title("Optical floor is the wall:\nlight clears dark only at J ≳ 3, not at the peak")
     a2.legend(); a2.grid(True, which="both", alpha=0.3)
     fig.suptitle("Final run 1144: electrical chain fixed, optical SNR at low J is the remaining limit")
-    fig.tight_layout(); fig.savefig(OUT / "fig7_final_optical_wall.png", dpi=130); plt.close(fig)
+    fig.tight_layout(); fig.savefig(OUT / "fig7_final_optical_wall.png", dpi=300); plt.close(fig)
     return dict(nvled_min_nA=Inv.min() * 1e9, nvled_max_uA=Inv.max() * 1e6, vled_max_uA=Iv.max() * 1e6)
 
 
@@ -288,7 +288,7 @@ def fig_closer():
     a2.set_title("New limit: current unstable below ~500 nA\n(2% → 85% → 900% as J falls)")
     a2.legend(); a2.grid(True, which="both", alpha=0.3)
     fig.suptitle("Run 1300: closer PM solved the optics; low-J current stability is the next wall")
-    fig.tight_layout(); fig.savefig(OUT / "fig8_closer_optics.png", dpi=130); plt.close(fig)
+    fig.tight_layout(); fig.savefig(OUT / "fig8_closer_optics.png", dpi=300); plt.close(fig)
     return dict(low_J_Pdark_far=float(np.nanmedian(yf[xf < 0.5])),
                 low_J_Pdark_close=float(np.nanmedian(yc[xc < 0.5])))
 
@@ -324,7 +324,7 @@ def fig_peak_location():
                  f"real peak J≈5 (≈5 µA), trustworthy peak IQE = {100*good.peak_IQE.median():.0f}% — "
                  f"sub-1 µA is below the data we need")
     ax.legend(fontsize=8); ax.grid(True, which="both", alpha=0.3)
-    fig.tight_layout(); fig.savefig(OUT / "fig9_peak_location.png", dpi=130); plt.close(fig)
+    fig.tight_layout(); fig.savefig(OUT / "fig9_peak_location.png", dpi=300); plt.close(fig)
     return dict(real_peak_J=float(good.J_at_peak.median()),
                 trustworthy_peak_IQE=float(good.peak_IQE.median()),
                 n_good=len(good), n_degenerate=len(deg))
@@ -353,7 +353,7 @@ def fig_ranging_saga():
     ax.set_title("Rising-side current: the ranging machinery vs the simple fixed range\n"
                  "per-point ranging got stuck on range offsets/settling; fixed 10 mA rises smoothly")
     ax.legend(); ax.grid(True, which="both", alpha=0.3)
-    fig.tight_layout(); fig.savefig(OUT / "fig10_ranging_saga.png", dpi=130); plt.close(fig)
+    fig.tight_layout(); fig.savefig(OUT / "fig10_ranging_saga.png", dpi=300); plt.close(fig)
     return {}
 
 
@@ -391,7 +391,7 @@ def fig_direction_resolution():
         ax.set_xlabel("number of clean pixels in the run"); ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
     fig.suptitle("Re-examination: J_peak & IQE track SAMPLE SIZE, not direction — "
                  "full-population (both dirs) → J≈11, ~40%")
-    fig.tight_layout(); fig.savefig(OUT / "fig11_direction_resolution.png", dpi=130); plt.close(fig)
+    fig.tight_layout(); fig.savefig(OUT / "fig11_direction_resolution.png", dpi=300); plt.close(fig)
     return {}
 
 
@@ -441,7 +441,7 @@ def fig_snr_reveals():
     a2.set_title("Well-measured EQE (1224, 20/20): real rise to J≈8\n→ peak IQE ≈40% at J≈11 (NOT 80%)")
     a2.legend(fontsize=8); a2.grid(True, which="both", alpha=0.3)
     fig.suptitle("Corrected: reproducible peak IQE ≈ 40% at J ≈ 11 (sidewall-limited 10 µm µLED)")
-    fig.tight_layout(); fig.savefig(OUT / "fig12_snr_reveals.png", dpi=130); plt.close(fig)
+    fig.tight_layout(); fig.savefig(OUT / "fig12_snr_reveals.png", dpi=300); plt.close(fig)
     return {}
 
 

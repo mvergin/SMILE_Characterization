@@ -56,10 +56,13 @@ def parse_key(key: str) -> dict:
     """
     parts = key.split("_")
     out = {"idx": parts[0], "what": parts[1] if len(parts) > 1 else "?",
-           "stride": parts[-1], "v": None, "highc": None, "range": None, "rest": []}
+           "stride": parts[-1], "v": None, "v_from": None, "highc": None,
+           "range": None, "rest": []}
     for p in parts[2:-1]:
         if p.startswith("v-") or p.startswith("v+"):
             out["v"] = float(p[1:])
+        elif p.startswith("f-") or p.startswith("f+"):
+            out["v_from"] = float(p[1:])
         elif p.startswith("hc") and p[2:].isdigit():
             out["highc"] = bool(int(p[2:]))
         elif p.startswith("r"):
@@ -73,6 +76,8 @@ def label_of(key: str) -> str:
     """Trace key -> a title a human can read, e.g. "-0.950 V, High-C, range auto"."""
     k = parse_key(key)
     bits = [f"{k['v']:+.3f} V" if k["v"] is not None else k["what"]]
+    if k["v_from"] is not None:
+        bits[0] += f" (from {k['v_from']:+.3f})"      # the step size sets the settle time
     bits += k["rest"]
     if k["highc"] is not None:
         bits.append("High-C" if k["highc"] else "no High-C")
@@ -238,7 +243,7 @@ def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
     for f_, name in ((fig, "transients.png"), (fig2, "spectra.png"),
                      (fig3, "settling.png")):
         out = run_dir / name
-        f_.savefig(out, dpi=140, bbox_inches="tight")
+        f_.savefig(out, dpi=300, bbox_inches="tight")
         print(f"wrote {out}")
         plt.close(f_)
 

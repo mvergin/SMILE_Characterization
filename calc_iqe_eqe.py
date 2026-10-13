@@ -280,7 +280,7 @@ def plot_eqe_scatter(df, J_col, eqe_col, title, out_path, plt):
     ax.set_xscale("log")
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=200)
+    fig.savefig(str(out_path), dpi=300)
     plt.close(fig)
 
 
@@ -298,7 +298,7 @@ def plot_eqe_median_with_fit(J_median, eqe_median, fit_result, title, out_path, 
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=200)
+    fig.savefig(str(out_path), dpi=300)
     plt.close(fig)
 
 
@@ -319,7 +319,7 @@ def plot_iqe_vs_J(fit_result, title, out_path, plt):
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=200)
+    fig.savefig(str(out_path), dpi=300)
     plt.close(fig)
 
 
@@ -339,7 +339,7 @@ def plot_eqe_comparison(vled_eqe, nvled_eqe, J_vled, J_nvled, title, out_path, p
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=200)
+    fig.savefig(str(out_path), dpi=300)
     plt.close(fig)
 
 
@@ -354,7 +354,7 @@ def plot_LI(current_A, power_W, title, out_path, plt):
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=200)
+    fig.savefig(str(out_path), dpi=300)
     plt.close(fig)
 
 
@@ -588,7 +588,7 @@ def _plot_iqe_scatter(df_fits, label, out_dir, plt):
         ax.set_title(f"Peak IQE map ({src}) — {label}")
         ax.set_aspect("equal")
     fig.tight_layout()
-    fig.savefig(str(out_dir / "iqe_spatial_map.png"), dpi=200)
+    fig.savefig(str(out_dir / "iqe_spatial_map.png"), dpi=300)
     plt.close(fig)
 
 

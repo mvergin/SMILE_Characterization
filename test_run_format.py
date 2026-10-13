@@ -84,6 +84,27 @@ def test_missing_optional_columns_still_load():
     assert "EQE_LED" in enriched.columns and len(enriched) == len(trimmed)
 
 
+def test_trace_keys_decode():
+    """traces.npz keys are part of the contract: the plotter must decode them."""
+    import plot_transients as pt
+
+    k = pt.parse_key("000_step_hc1_rNone_f-1.000_v-0.950_5")
+    assert (k["what"], k["v"], k["v_from"], k["highc"], k["range"], k["stride"]) ==            ("step", -0.95, -1.0, True, None, "5"), k
+    assert pt.label_of("000_step_hc1_rNone_f-1.000_v-0.950_5") ==            "-0.950 V (from -1.000), High-C, range auto"
+
+    k = pt.parse_key("003_step_hc0_r0.001_f-1.000_v-0.800_1")
+    assert (k["highc"], k["range"]) == (False, "0.001"), k
+
+    # keys written before the from-voltage was recorded must still decode
+    assert pt.parse_key("000_step_hc1_rNone_v-0.950_5")["v_from"] is None
+
+    # leak keys carry a frame state where step carries hc/range
+    assert pt.label_of("007_leak_lit_f-0.900_v-0.850_5") == "-0.850 V (from -0.900), lit"
+
+    # an unknown tag must not crash a plot
+    assert "wat" in pt.label_of("000_step_wat_v-0.800_1")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
