@@ -346,6 +346,13 @@ class IQEConfig:
                                        # smaller fraction of the reading
     vramp_highv_limit_a: float = 1e-3  # -2.6 V draws ~175 uA, far above the rising-side limit
 
+    fastscan_limit_a: float = 1e-3  # compliance for the FAST SCAN, which is a separate
+                                    # operating point from the sweep. At nvled_v_fastscan
+                                    # (-1.35 V) a pixel draws ~30 uA, so the sweep's 10 uA
+                                    # rising-side limit clamps EVERY pixel -- measured in
+                                    # run 261014-0048, where all 1024 pixels read exactly
+                                    # 10.00 uA and the light came out 2.8x low.
+
     # ── Leakage reference (the low-J correction) ────────────────────────
     # Both source modes read the TOTAL cathode current, so at low bias most of what the SMU
     # reports is not LED injection. Measured 261013 over 12 pixels in 4 quadrants:

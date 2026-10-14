@@ -234,6 +234,27 @@ def test_leakage_reference_is_measured_and_written():
         assert "NVLED_CURR_REF" not in agg.read_text().splitlines()[0]
 
 
+def test_fast_scan_does_not_run_at_the_sweep_limit():
+    """-1.35 V draws ~30 uA; the sweep's rising-side limit clamps every pixel there."""
+    seen = []
+    cfg = IQEConfig(**FAST)
+    real = acquire.configure_voltage_source_b
+
+    def spy(smu, c, log=None):
+        seen.append(c.nvled_compliance)
+        return real(smu, c, log)
+
+    acquire.configure_voltage_source_b = spy
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
+    finally:
+        acquire.configure_voltage_source_b = real
+    assert seen[0] == cfg.fastscan_limit_a, (
+        f"the fast scan ran at {seen[0]} A, not its own {cfg.fastscan_limit_a} A limit")
+    assert cfg.fastscan_limit_a > cfg.vramp_lowv_limit_a
+
+
 def test_pick_limit_never_clamps_the_real_iv_curve():
     """Run 261014-0007: a limit tied to the density knee clamped 8 points at 10 uA."""
     from measure_iqe.acquire import pick_limit

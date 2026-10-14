@@ -901,6 +901,10 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
                   run_dir: Path, cfg: IQEConfig, log: Logger) -> list[Row]:
     log("=" * 56)
     log(f"FAST SCAN @ NVLED={cfg.nvled_v_fastscan} V over {(x2-x1+1)*(y2-y1+1)} pixels")
+    # The fast scan is a DIFFERENT operating point from the sweep and needs its own
+    # compliance. The sweep's rising-side limit clamped every pixel in run 261014-0048.
+    configure_voltage_source_b(
+        smu, dataclasses.replace(cfg, nvled_compliance=cfg.fastscan_limit_a), log)
     set_nplc(smu, cfg.fastscan_nplc)
     smu.set_voltage("b", cfg.nvled_v_fastscan)     # fast scan always voltage-drives ch B
     fs_rows = []
