@@ -57,7 +57,13 @@ def build_config(args: argparse.Namespace) -> IQEConfig:
     if cal:
         data.update(load_calibration(cal))
     data.pop("_calibration_source", None)
-    data.update(dict(args.set or []))
+    overrides = dict(args.set or [])
+    data.update(overrides)
+    if args.simulate and "settle_scale" not in overrides:
+        # A simulated run should take seconds, not the real multi-second dwells -- but
+        # only when the user has not asked for them. This is the one place that can tell
+        # "the default 1.0" from "the user typed 1.0".
+        data["settle_scale"] = 0.0
     if args.out:
         data["base_dir"] = args.out
     return IQEConfig.from_dict(data)

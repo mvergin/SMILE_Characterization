@@ -1039,6 +1039,39 @@ def completed_pixels(run_dir: str | Path) -> set[tuple[int, int]]:
     return {k for k, v in counts.items() if v >= full}
 
 
+def trace_dwell(pm, smu, cfg: IQEConfig, seconds: float):
+    """Poll |I| and P for `seconds`, instead of sleeping. Returns (t, I, P).
+
+    Same total wait as the sleep it replaces, so the sweep is not slowed and the value
+    it reports is still the burst taken afterwards. The point is only to keep the
+    transient that was being thrown away -- 99% of the dwell at a 65 s settle.
+
+    Stops early if the hardware has been parked, and never runs past `seconds`: a poll
+    that would overrun the dwell is not started.
+    """
+    t0 = time.perf_counter()
+    ts: list[float] = []
+    iv: list[float] = []
+    pv: list[float] = []
+    while True:
+        dt = time.perf_counter() - t0
+        if dt >= seconds or parked():
+            break
+        p, _, _, _, inv, _, _, _ = acquire_point(
+            pm, smu, cfg.trace_settling_n_smu, cfg.trace_settling_n_pm)
+        ts.append(dt)
+        iv.append(abs(inv))
+        pv.append(p)
+        rest = cfg.trace_settling_period_s - (time.perf_counter() - t0 - dt)
+        if rest > 0:
+            time.sleep(min(rest, max(0.0, seconds - (time.perf_counter() - t0))))
+    left = seconds - (time.perf_counter() - t0)
+    if left > 0:
+        time.sleep(left)                       # keep the dwell exactly as long as asked
+    return (np.asarray(ts, np.float32), np.asarray(iv, np.float32),
+            np.asarray(pv, np.float32))
+
+
 def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                       cfg: IQEConfig, log: Logger) -> int:
     """Voltage-source adaptive sweep. Single bitval, low-J-weighted spacing, and
@@ -1091,6 +1124,7 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
     # measurement thread, so slow (Nextcloud/network) flushes don't block the sweep, and the
     # aggregate is written per pixel → an interrupted run is directly analysable. try/finally
     # ensures close() drains the queue and joins on a clean stop or caught interrupt.
+    settle_traces: list = []          # (tag, t, I, P) per point, kept for offline work
     skip = completed_pixels(run_dir) if cfg.resume else set()
     if skip:
         log(f"  resuming: {len(skip)} pixel(s) already complete, "
@@ -1179,7 +1213,17 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                 if nplc != cur_nplc:
                     set_nplc(smu, nplc); cur_nplc = nplc
                 smu.set_voltage("b", float(v))
-                time.sleep(settle_s * cfg.settle_scale)
+                dwell = settle_s * cfg.settle_scale
+                if cfg.trace_settling and dwell >= cfg.trace_settling_min_s:
+                    # Poll THROUGH the dwell rather than sleeping it. Same total wait,
+                    # same final burst, same reported value -- the transient is simply
+                    # kept instead of discarded.
+                    tr = trace_dwell(pm, smu, cfg, dwell)
+                    if tr[0].size:
+                        settle_traces.append(
+                            (f"{x}_{y}_b{bitval}_v{v:+.4f}", *tr))
+                else:
+                    time.sleep(dwell)
                 raw_s = None
                 if cfg.perpoint_range:
                     # range from the ACTUAL current (probe-then-measure), not the coarse map
@@ -1268,6 +1312,13 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
         writer.submit(prows, dark, psamps)  # raw + samples + aggregate → background thread
     finally:
         writer.close()                  # drain queue + join → files complete on clean stop
+        if settle_traces:
+            npz = sweep_dir / "settling_traces.npz"
+            np.savez_compressed(npz, **{
+                tag: np.vstack([t, i, p]) for tag, t, i, p in settle_traces})
+            log(f"  wrote {npz} ({len(settle_traces)} dwell traces, "
+                f"{npz.stat().st_size/1e6:.1f} MB) - the transient at every point, "
+                f"for the extrapolation and EQE-settling questions")
     if n_dead:
         log(f"  dead-skipped {n_dead}/{len(selected)} selected pixels (fast-scan false-alive)")
     return len(sw_rows)
@@ -1369,6 +1420,12 @@ def make_run_dir(cfg: IQEConfig, base_dir: str | Path | None = None,
     root = Path(base_dir) if base_dir is not None else Path(cfg.base_dir)
     tail = f"_{suffix}" if suffix else ""
     run_dir = root / f"{stamp}_{cfg.sample_name}_ROI_({x1}, {y1}, {x2}, {y2}){tail}"
+    # The stamp has minute resolution, so two runs started in the same minute with the
+    # same sample and ROI would write into one directory and silently merge. Only the
+    # resume path may reuse an existing directory, and it passes run_dir explicitly.
+    if run_dir.exists() and any(run_dir.iterdir()):
+        stamp2 = datetime.datetime.now().strftime("%y%m%d-%H%M%S")
+        run_dir = root / f"{stamp2}_{cfg.sample_name}_ROI_({x1}, {y1}, {x2}, {y2}){tail}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
@@ -1485,12 +1542,13 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"Output: {out_dir}   (source_mode={cfg.source_mode})")
 
-    if simulate and cfg.settle_scale == 1.0:
-        # The sweep settles for seconds per point now, which is real physics on the bench
-        # and dead time in a simulation. Scale it away unless the caller asked for it, so
-        # --simulate stays a few seconds instead of a quarter of an hour.
-        cfg = dataclasses.replace(cfg, settle_scale=0.0)
-        log("  simulate: settle_scale=0 (pass --set settle_scale=1 to keep the real waits)")
+    if simulate and cfg.settle_scale:
+        # The CLI zeroes settle_scale under --simulate unless the user set it explicitly;
+        # it is the only place that knows the difference between "the default" and "the
+        # user asked for 1.0". A library caller that wants the fast path passes
+        # settle_scale=0 itself, as the tests do.
+        log(f"  simulate: settle_scale={cfg.settle_scale:g}, so the real waits apply "
+            f"(~{cfg.vramp_lowv_settle_s:g}s per rising point)")
     pm, smu, smile = connect(cfg, log, simulate=simulate)
     n_points = 0
     # try/finally does not cover the case that actually bit us: Windows Update

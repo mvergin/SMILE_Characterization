@@ -172,6 +172,21 @@ fastscan_limit_a: 0.001   # compliance for the FAST SCAN, a different operating 
                           # At -1.35 V a pixel draws ~30 uA, so the sweep's 10 uA rising-side limit
                           # clamps EVERY pixel (measured 261014-0048: all 1024 read exactly 10.00 uA).
 
+# ---- Settling traces ----
+# The sweep waits the dwell and then integrates for ~0.5 s: at a 65 s settle that is
+# 99.3% dead time, and the transient was being discarded. Polling through a wait that is
+# already being paid for costs NO bench time and changes no reported value -- the value
+# is still the burst taken at the end. What it buys is the data to answer offline:
+#   * can the settled value be extrapolated from the first seconds, so the dwell can be
+#     cut? (the decay is a power law t^-1.3, so fit I_inf on the basis {1, t^-n})
+#   * does EQE = P/I settle faster than either, because both relax with the same carrier
+#     population? If so the dwell only has to fix the J axis, not the efficiency.
+trace_settling: true
+trace_settling_period_s: 0.25
+trace_settling_n_pm: 2
+trace_settling_n_smu: 2
+trace_settling_min_s: 2.0   # skip for short dwells: nothing to see
+
 # ---- Per-array calibration (--calibrate) ----
 # The settle time is a property of the ARRAY, so measure it per array.
 # array may need far more or far less, and it does NOT follow from C, because the

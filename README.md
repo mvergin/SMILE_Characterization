@@ -400,6 +400,14 @@ addressed pixel at bitval 0, so lit-minus-blanked is negative.
 
 | parameter | type | default | meaning |
 |---|---|---|---|
+| `trace_settling` | `bool` | `True` |  |
+| `trace_settling_period_s` | `float` | `0.25` | poll interval during the dwell |
+| `trace_settling_n_pm` | `int` | `2` | PM reads per poll; enough for P(t) once fitted |
+| `trace_settling_n_smu` | `int` | `2` | SMU samples per poll |
+| `trace_settling_min_s` | `float` | `2.0` | skip for dwells shorter than this: nothing to see |
+| `calibrate_target` | `float` | `0.01` | how close to the final value counts as settled. The settling is a power law, so the dwell scales as target^(-1/1.3): 0.03 is ~2.3x faster than 0.01. A looser target is a real, statable trade -- the residual is common-mode across pixels either way. |
+| `calibrate_approach_steps` | `int` | `3` | sweep-sized steps taken before each measured one, so the capture sees the step the sweep takes and the range the sweep uses, not a 0.5 V jump |
+| `calibrate_approach_s` | `float` | `5.0` | dwell on each of those approach steps |
 | `calibrate_pixels` | `int` | `3` | pixels to characterise; the worst case sets the dwell |
 | `calibrate_seconds` | `float` | `40.0` | poll each bias this long. Must exceed the real settle time or the answer is a lower bound, which the calibration says so explicitly. |
 | `calibrate_n_smu` | `int` | `4` | SMU samples per poll; small, this is a time series |

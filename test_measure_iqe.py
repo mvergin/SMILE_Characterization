@@ -318,6 +318,50 @@ def test_nothing_touches_the_instruments_after_parking():
     assert not after, f"{len(after)} instrument call(s) after parking"
 
 
+def test_dwell_traces_are_free_and_do_not_shorten_the_dwell():
+    """Polling through the dwell must cost no bench time and change no reported value.
+
+    The sweep waits settle_s and then integrates for ~0.5 s: 99% of the dwell was being
+    discarded. Keeping it is only worth doing if the wait stays exactly as long.
+    """
+    import time as _time
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # settle_scale=1 makes the dwells real, so keep every one of them small --
+        # the leakage reference settles twice per point and dominates otherwise.
+        over = dict(FAST, settle_scale=1.0, vramp_lowv_settle_s=0.6,
+                    vramp_highv_settle_s=0.6, leak_ref_settle_s=0.02,
+                    trace_settling_min_s=0.3, trace_settling_period_s=0.05,
+                    n_fine=4, max_sweep_pixels=2, block_size=8, pixels_per_block=1)
+
+        t0 = _time.perf_counter()
+        off = run_iqe_measurement(IQEConfig(**over, trace_settling=False),
+                                  simulate=True, base_dir=tmp, log=QUIET)
+        t_off = _time.perf_counter() - t0
+
+        t0 = _time.perf_counter()
+        on = run_iqe_measurement(IQEConfig(**over, trace_settling=True),
+                                 simulate=True, base_dir=tmp, log=QUIET)
+        t_on = _time.perf_counter() - t0
+
+        npz = on.run_dir / "NVLEDSweep" / "Sweep" / "settling_traces.npz"
+        assert npz.exists(), "no traces written"
+        import numpy as _np
+        with _np.load(npz) as d:
+            assert len(d.files) == on.n_points, (len(d.files), on.n_points)
+            for k in d.files:
+                t, i, p = d[k]
+                assert t.size >= 2, f"{k} has {t.size} samples"
+                assert t[-1] <= 0.6 + 1e-6, f"{k} polled past the dwell: {t[-1]}"
+                assert _np.isfinite(i).all() and _np.isfinite(p).all()
+
+        # the dwell must not have been shortened OR meaningfully lengthened
+        assert off.run_dir != on.run_dir, "two runs collided into one directory"
+        assert not (off.run_dir / "NVLEDSweep" / "Sweep" / "settling_traces.npz").exists()
+        assert t_on >= t_off * 0.9, f"tracing shortened the run: {t_on:.1f}s vs {t_off:.1f}s"
+        assert t_on <= t_off * 1.6, f"tracing added too much overhead: {t_on:.1f}s vs {t_off:.1f}s"
+
+
 def test_calibration_approaches_a_bias_the_way_the_sweep_does():
     """It must take sweep-sized steps from the HIGHER current, not jump 0.5 V.
 

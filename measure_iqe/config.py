@@ -328,6 +328,23 @@ class IQEConfig:
     #   * measure the bitval-0 reference back to back with the lit point, so both carry the
     #     same history and the subtraction cancels most of it
     # Spend the time budget on fewer points with a longer dwell, not more points.
+    # -- Settling traces -------------------------------------------------
+    # The sweep waits `vramp_*_settle_s` and then integrates for ~0.5 s: at a 65 s dwell
+    # that is 99.3% dead time, and the whole transient is currently discarded. Polling
+    # through a wait we are already paying for costs NO bench time and no accuracy -- the
+    # reported value is still the burst taken at the end -- and it yields, for every
+    # point of every pixel, the data needed to answer two open questions offline:
+    #   * can the settled value be EXTRAPOLATED from the first few seconds, so the dwell
+    #     can be cut? (fit I_inf on the basis {1, t^-n}, n from the calibration)
+    #   * does EQE = P/I settle FASTER than either, because both relax with the same
+    #     carrier population? If so the dwell only has to fix the J axis.
+    # Neither can be answered from existing data: the current is traced, the power is not.
+    trace_settling: bool = True
+    trace_settling_period_s: float = 0.25  # poll interval during the dwell
+    trace_settling_n_pm: int = 2  # PM reads per poll; enough for P(t) once fitted
+    trace_settling_n_smu: int = 2  # SMU samples per poll
+    trace_settling_min_s: float = 2.0  # skip for dwells shorter than this: nothing to see
+
     # -- Per-array calibration (--calibrate) ------------------------------
     # The settle time is a property of the ARRAY, not of the method: 8 s came from
     # Array38 (42.8 uF) and another array may need far more or far less. It does not
