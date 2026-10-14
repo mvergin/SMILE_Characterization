@@ -220,8 +220,13 @@ def select_pixels(pm, smu, smile, cfg, args, log):
 def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
                  chunk=2000, log=None, limit_a=None, capacitance=45.7e-6,
                  max_presettle_s=60.0, cfg=None, charge_limit=None,
-                 switch_settle_s=0.5):
+                 switch_settle_s=0.5, trigger=None):
     """Step ch B from v_from to v_to, then burst-capture I(t) with timestamps.
+
+    `trigger` replaces the voltage step with any other perturbation -- `exp_switch`
+    passes a frame change, to time a pixel switch at a FIXED bias. Everything before
+    it (the two-phase charge, the pre-settle) and after it (the chunked burst, the
+    instrument timestamps) is the same measurement, so it is the same function.
 
     Returns (t, i_a, i_b), t in seconds from the first sample. Instrument
     timestamps are used, not host time, so the spacing is the SMU's own.
@@ -270,7 +275,10 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
         log(f"      pre-settle {pre:.1f}s (charge-limited at {limit_a:g} A)")
     time.sleep(pre)                            # start from a known, settled state
     smu.clear_buffers_only()
-    smu.set_voltage("b", float(v_to))          # the step
+    if trigger is not None:
+        trigger()                              # e.g. blank the frame and light a pixel
+    else:
+        smu.set_voltage("b", float(v_to))      # the step
     if not hasattr(smu, "inst"):               # sim rig: no TSP, no instrument clock
         t0 = time.perf_counter()
         smu.measure_burst_fire(int(n_samples))
@@ -838,6 +846,85 @@ def exp_stepdir(pm, smu, smile, pixel, cfg, args, log):
     return rows
 
 
+def exp_switch(pm, smu, smile, pixel, cfg, args, log):
+    """Does a PIXEL switch at a fixed bias cost anything?
+
+    The sweep pays its 54 s dwell once per bias per pixel, because it runs
+    pixel-major: for each pixel, walk the biases. If a pixel switch at a fixed bias
+    settles in milliseconds, the loops can be swapped -- walk the pixels inside each
+    bias -- and the dwell is paid once per bias for the whole set. For 100 pixels that
+    is 18 h against 45 min.
+
+    The fast scan already suggests it: 30 ms per pixel, blanking the frame between
+    each, and it reproduces the 54 s-dwell sweep to 11 % at -1.35 V. But that is
+    35 uA. This test asks the same question at the faint end, where 450 nA flows and
+    a blanked frame's own leakage (section 6: ~4x the bitval-0 level) is no longer
+    negligible.
+
+    Procedure, per bias:
+
+      1. light the `--switch-from` pixel and hold the bias until the node is settled
+      2. blank the frame and light the target pixel -- the burst starts here
+      3. capture I(t) and ask how long until it is within 1 % of its own final value
+
+    `t_1pct` of a few hundred ms means the restructure is free. Seconds means it is
+    not, and the dwell belongs to the pixel after all.
+    """
+    rows = []
+    x, y = pixel
+    fx, fy = args.switch_from if args.switch_from else (x, y)
+    m.configure_voltage_source_b(smu, cfg, log)
+    if not cfg.highc_b:
+        m.set_measure_range_b(smu, args.ranges[0])
+        time.sleep(0.05)
+    rec_s = args.samples * max(2 * args.nplc / 50.0, 200e-6)
+    if args.switch_hold_s < 10 * rec_s:
+        log(f"    !! hold {args.switch_hold_s:.0f}s is short against a {rec_s:.0f}s "
+            f"record: residual BIAS drift will show up as switch settling. "
+            f"Use --switch-hold-s >= {10 * rec_s:.0f} or fewer --samples.")
+    for v in args.voltages:
+        # Hold the bias with the OTHER pixel lit, so the capture measures a frame
+        # change and not a turn-on from a blank array.
+        smile.blank_frame()
+        smile.set_pixel(fx, fy, cfg.bitvals[0])
+
+        def _switch(_x=x, _y=y):
+            smile.blank_frame()
+            smile.set_pixel(_x, _y, cfg.bitvals[0])
+
+        # v_from == v_to: the bias never moves, so the pre-settle is the only wait and
+        # the trigger is the frame change.
+        t, ia, ib = capture_step(smu, v, v, args.samples, args.nplc,
+                                 settle_first_s=args.switch_hold_s,
+                                 chunk=args.chunk, log=log,
+                                 limit_a=cfg.nvled_compliance,
+                                 capacitance=args.capacitance,
+                                 max_presettle_s=max(args.max_presettle_s,
+                                                     args.switch_hold_s),
+                                 cfg=cfg, charge_limit=args.charge_limit,
+                                 switch_settle_s=args.switch_settle_s,
+                                 trigger=_switch)
+        met = settling_metrics(t, np.abs(ib))
+        spec = keep_trace(f"switch_hc{int(cfg.highc_b)}_v{v:+.3f}"
+                          f"_{fx}-{fy}to{x}-{y}", t, ia, ib, args.trace_points)
+        nan = float("nan")
+        p_lit, p_std = read_power(pm, args.step_n_pm) if args.step_n_pm else (nan, nan)
+        rows.append(dict(v=v, from_x=fx, from_y=fy, to_x=x, to_y=y,
+                         hold_s=args.switch_hold_s, **met, power_W=p_lit,
+                         power_std=p_std,
+                         **{f"spec_{k}": val for k, val in spec.items()}))
+        verdict = ("SWITCH IS FREE" if met["t_1pct"] == met["t_1pct"]
+                   and met["t_1pct"] < 1.0 else
+                   "costs real time" if met["t_1pct"] == met["t_1pct"] else
+                   "NOT SETTLED in the record")
+        log(f"    {v:+.3f} V  ({fx},{fy}) -> ({x},{y})  "
+            f"I={met['settled']*1e9:+9.1f} nA  t1%={met['t_1pct']:.3f}s "
+            f"t0.1%={met['t_01pct']:.3f}s  rec={t[-1] if t.size else 0:.1f}s  "
+            f"<< {verdict}")
+    smile.blank_frame()
+    return rows
+
+
 def exp_decay(pm, smu, smile, pixel, cfg, args, log):
     """Charge-decay: let the capacitor discharge through the LED and watch V(t).
 
@@ -920,7 +1007,7 @@ def exp_optfloor(pm, smu, smile, cfg, args, log):
 
 
 PER_PIXEL = {"step": exp_step, "cap": exp_cap, "leak": exp_leak, "isrc": exp_isrc,
-             "stepdir": exp_stepdir, "decay": exp_decay}
+             "stepdir": exp_stepdir, "switch": exp_switch, "decay": exp_decay}
 ARRAY_WIDE = {"optfloor": exp_optfloor}
 ALL = [*PER_PIXEL, *ARRAY_WIDE]
 
@@ -964,6 +1051,9 @@ def estimate_seconds(what, cfg, args, n_pixels):
         total += n_pixels * len(args.voltages) * 3 * (per_capture + pm_s)
     if "stepdir" in what:
         total += n_pixels * len(args.stepdir_from) * per_capture
+    if "switch" in what:
+        # the hold replaces the charge-limited pre-settle: it is the whole point
+        total += n_pixels * len(args.voltages) * (args.switch_hold_s + rec + pm_s)
     if "cap" in what:
         total += n_pixels * 2 * len(args.cap_currents) * (4.0 + args.cap_seconds)
     if "isrc" in what:
@@ -1030,6 +1120,17 @@ def build_parser():
     ap.add_argument("--isrc-seconds", type=float, default=120.0,
                     help="hold time per setpoint - needs to be minutes, not ms")
     ap.add_argument("--isrc-period", type=float, default=0.5, help="log period (s)")
+    ap.add_argument("--switch-from", nargs=2, type=int, default=None,
+                    metavar=("X", "Y"),
+                    help="switch: the pixel lit while the bias settles, before the "
+                         "frame changes to the target (default: the target itself, "
+                         "which tests re-addressing only)")
+    ap.add_argument("--switch-hold-s", type=float, default=300.0,
+                    help="switch: how long to hold the bias before the frame change. "
+                         "Default 300 s because the bias itself needs ~240 s to reach "
+                         "1%% at -0.80 V: hold less and the capture times the BIAS "
+                         "settling, which is the thing being controlled for. At 300 s "
+                         "the residual bias drift is ~0.1%% over a 20 s record.")
     ap.add_argument("--stepdir-target", type=float, default=-0.85)
     ap.add_argument("--stepdir-from", nargs="+", type=float, default=[-0.8, -1.0, -1.3, -2.6])
     ap.add_argument("--decay-from", type=float, default=-1.3,
