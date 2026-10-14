@@ -804,9 +804,20 @@ does **not** follow from the capacitance, because the settling is a charge relax
 rather than an RC charge.
 
 ```powershell
-python -m measure_iqe --calibrate --out D:\cal          # once per array, ~6 min
-python -m measure_iqe --calibration "D:\cal\...\Array42_IQE_calibration.yaml"
+python -m measure_iqe --calibrate --array Array42_IQE --out D:\cal   # once, ~6 min
+python -m measure_iqe --array Array42_IQE                            # every run after
 ```
+
+`--array NAME` sets `sample_name` **and** picks up `calibrations/NAME.yaml`, which
+`--calibrate --array NAME` wrote. One flag per array, no file paths to remember. A run
+on an array that has not been characterised says so in the log and uses the defaults
+rather than silently inheriting another array's numbers.
+
+`calibrations/` is **gitignored on purpose**: those files are measured facts about one
+physical array, and re-copying the repo (the share export runs `git archive`) must
+never overwrite them. Anything you edit inside a checkout of the repo *will* be
+overwritten by the next copy — keep per-array settings in `calibrations/`, not in
+`configs/standard.yaml`.
 
 `--calibrate` steps a few pixels at three biases spanning the sweep, polls the current
 until it stops changing (`settle_time`, the criterion documented in the investigation
@@ -822,9 +833,9 @@ Precedence: defaults, then `--config`, then `--calibration`, then `--set`. An ex
 
 | file | what it is |
 |---|---|
-| `configs/standard.yaml` | **the standard config.** These values are the defaults, annotated. Running with no `--config` behaves identically. |
+| `configs/standard.yaml` | an annotated, readable **copy** of the defaults. **Editing it changes nothing** — measure_iqe reads `measure_iqe/config.py`, and only loads this file if you pass `--config`. A test asserts the two stay identical. |
 | `configs/legacy_pre261014.yaml` | the old, wrong method, kept so it can be run head to head. Not for measurements. |
-| `<array>_calibration.yaml` | written by `--calibrate`, per array. Applied with `--calibration`. |
+| `calibrations/<array>.yaml` | written by `--calibrate --array NAME`, applied by `--array NAME`. Gitignored, so a repo re-copy never clobbers it. |
 
 Full key-by-key reference: **Configuration reference** below.
 

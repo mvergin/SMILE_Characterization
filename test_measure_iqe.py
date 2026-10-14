@@ -84,7 +84,11 @@ def test_example_config_matches_the_defaults():
         loaded = IQEConfig.from_file(example)
     except ImportError:
         return                                             # PyYAML not installed
-    assert loaded == IQEConfig(), "configs/standard.yaml drifted from IQEConfig defaults"
+    assert loaded == IQEConfig(), (
+        "configs/standard.yaml drifted from IQEConfig defaults. That file is a readable "
+        "COPY of the defaults, not the source of them: editing it changes nothing at "
+        "runtime. To change a default, edit measure_iqe/config.py; for one array use "
+        "--array NAME; for one run use --set.")
 
 
 def test_config_coerces_and_rejects_value_types():
@@ -281,6 +285,42 @@ def test_every_swept_pixel_starts_from_a_blank_frame():
         prev = calls[i - 1]
         assert prev[0] == "blank" or (prev[0] == "set" and prev[1:3] == calls[i][1:3]), (
             f"pixel {calls[i][1:3]} was lit while {prev} was still in the frame")
+
+
+def test_array_flag_names_the_run_and_picks_up_its_calibration():
+    """--array NAME must set sample_name AND apply that array's measured settings."""
+    import os
+    from measure_iqe.calibrate import calibration_path
+    from measure_iqe.cli import build_config, build_parser
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cwd = os.getcwd()
+        os.chdir(tmp)                       # calibration_path is relative to cwd
+        try:
+            args = build_parser().parse_args(["--array", "Array42_IQE"])
+            cfg = build_config(args)
+            assert cfg.sample_name == "Array42_IQE"
+            # no calibration yet: the defaults stand, and nothing pretends otherwise
+            assert cfg.vramp_lowv_settle_s == IQEConfig().vramp_lowv_settle_s
+
+            path = calibration_path("Array42_IQE")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "calibration_version": 1, "sample_name": "Array42_IQE",
+                "recommended": {"vramp_lowv_settle_s": 1.25}}), encoding="utf-8")
+            path.rename(path.with_suffix(".yaml")) if False else None
+
+            args = build_parser().parse_args(["--array", "Array42_IQE"])
+            cfg = build_config(args)
+            assert cfg.sample_name == "Array42_IQE"
+            assert cfg.vramp_lowv_settle_s == 1.25, "the calibration was not applied"
+
+            # an explicit --set still wins over the calibration
+            args = build_parser().parse_args(
+                ["--array", "Array42_IQE", "--set", "vramp_lowv_settle_s=9.0"])
+            assert build_config(args).vramp_lowv_settle_s == 9.0
+        finally:
+            os.chdir(cwd)
 
 
 def test_calibration_round_trips_and_is_validated():

@@ -17,7 +17,7 @@ import sys
 from typing import Any, Sequence
 
 from .acquire import make_logger, run_calibration, run_iqe_measurement
-from .calibrate import load_calibration
+from .calibrate import calibration_path, load_calibration
 from .config import IQEConfig
 
 
@@ -44,8 +44,19 @@ def build_config(args: argparse.Namespace) -> IQEConfig:
     # Precedence, lowest first: defaults, --config, --calibration, --set, --out.
     # The calibration is measured fact about this array; an explicit --set still wins,
     # so a deliberate override is never silently replaced by the calibration.
-    if getattr(args, "calibration", None):
-        data.update(load_calibration(args.calibration))
+    if getattr(args, "array", None):
+        data["sample_name"] = args.array
+    cal = getattr(args, "calibration", None)
+    if cal is None and getattr(args, "array", None) and not args.calibrate:
+        # The whole point of --array: one flag, and this array's measured settings
+        # follow. Absent is fine and silent-but-reported, not an error -- a run before
+        # the array is characterised is legitimate, it just uses the defaults.
+        auto = calibration_path(args.array)
+        cal = str(auto) if auto.exists() else None
+        data["_calibration_source"] = cal or ""
+    if cal:
+        data.update(load_calibration(cal))
+    data.pop("_calibration_source", None)
     data.update(dict(args.set or []))
     if args.out:
         data["base_dir"] = args.out
@@ -63,6 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="override one config field; repeatable")
     ap.add_argument("--out", metavar="DIR",
                     help="output root, overriding base_dir from the config")
+    ap.add_argument("--array", metavar="NAME",
+                    help="which physical array this is. Sets sample_name, and picks up "
+                         "calibrations/NAME.yaml if --calibrate has been run for it")
     ap.add_argument("--calibrate", action="store_true",
                     help="measure THIS array's settling and write a calibration file, "
                          "instead of sweeping. Run once per array (~6 min)")
@@ -107,6 +121,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     log = make_logger()
+    if args.array and not args.calibrate and not args.calibration:
+        auto = calibration_path(args.array)
+        log(f"array {args.array}: " + (f"using {auto}" if auto.exists() else
+            f"no calibration at {auto} - run --calibrate --array {args.array} "
+            f"to measure this array's settle times instead of inheriting Array38's"))
     if args.calibrate:
         try:
             run_calibration(cfg, simulate=args.simulate, log=log)

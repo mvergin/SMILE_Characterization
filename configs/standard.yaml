@@ -1,6 +1,15 @@
-# THE STANDARD CONFIG for measure_iqe. These values ARE the defaults, so running
-# measure_iqe with no --config at all behaves exactly like this file. It exists to be
-# read and copied, and every key is annotated.
+# THE STANDARD CONFIG for measure_iqe: a readable, annotated copy of the defaults.
+#
+# !! EDITING THIS FILE CHANGES NOTHING ON ITS OWN. !!
+# measure_iqe reads its defaults from measure_iqe/config.py, not from here, and only
+# loads this file if you pass --config. A test asserts the two stay identical, so an
+# edit here will make the test suite fail rather than take effect.
+#
+# To change something for a run, in increasing order of permanence:
+#   --set key=value                      one run
+#   --array NAME                         that array's measured calibration (see below)
+#   --config my.yaml                     a copy of this file with your edits
+#   edit measure_iqe/config.py           the default for everyone
 #
 #   python -m measure_iqe                                  # identical to this file
 #   python -m measure_iqe --config configs/standard.yaml   # same, explicitly
@@ -10,8 +19,14 @@
 #   legacy_pre261014.yaml  the old, wrong method, kept so it can be run head to head
 #
 # Per-array numbers (the settle times, the current limits) should come from
-# `python -m measure_iqe --calibrate` rather than from edits here -- they are
-# properties of the array, not of the method.
+# `--calibrate` rather than from edits here -- they are properties of the array, not
+# of the method:
+#
+#   python -m measure_iqe --calibrate --array Array42_IQE --out D:\cal   # once
+#   python -m measure_iqe --array Array42_IQE                            # every run after
+#
+# The second form sets sample_name AND applies calibrations/Array42_IQE.yaml. That
+# directory is gitignored, so re-copying the repo never overwrites your calibrations.
 #
 # EVERY key is optional: leave one out and the default in measure_iqe/config.py
 # applies. An unknown key or a wrong type is a hard error, so a typo can never be

@@ -218,3 +218,8 @@ data/*.csv
 pm400.html
 gui_config_v9.json
 charatests/
+
+# Per-array calibrations written by `measure_iqe --calibrate --array NAME`.
+# Deliberately untracked: they are measured facts about one physical array, and the
+# share export (git archive) must never overwrite them.
+calibrations/

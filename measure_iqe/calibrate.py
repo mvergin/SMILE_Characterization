@@ -192,19 +192,37 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
     return out
 
 
-def write_calibration(out_dir: str | Path, data: dict[str, Any]) -> Path:
-    """Write <sample_name>_calibration.yaml (JSON if PyYAML is absent)."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    name = f"{data.get('sample_name', 'array')}_calibration"
+CALIB_DIR = "calibrations"      # gitignored, so a share re-export never clobbers it
+
+
+def calibration_path(sample_name: str, root: str | Path = ".") -> Path:
+    """Where `--array NAME` looks for, and `--calibrate` saves, a calibration."""
+    return Path(root) / CALIB_DIR / f"{sample_name}.yaml"
+
+
+def _dump(path: Path, data: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
         import yaml
-        path = out_dir / f"{name}.yaml"
         path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     except ImportError:
-        path = out_dir / f"{name}.json"
+        path = path.with_suffix(".json")
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return path
+
+
+def write_calibration(out_dir: str | Path, data: dict[str, Any],
+                      root: str | Path = ".") -> tuple[Path, Path]:
+    """Write the calibration twice: with the run, and in the per-array location.
+
+    The copy in the run directory is the record of what was measured, timestamped
+    alongside its own fast scan. The copy in ``calibrations/<sample>.yaml`` is the one
+    ``--array`` picks up, so a characterised array needs one flag and no file paths.
+    """
+    name = str(data.get("sample_name") or "array")
+    record = _dump(Path(out_dir) / f"{name}_calibration.yaml", data)
+    stable = _dump(calibration_path(name, root), data)
+    return record, stable
 
 
 def load_calibration(path: str | Path) -> dict[str, Any]:

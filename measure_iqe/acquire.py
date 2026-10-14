@@ -1428,11 +1428,13 @@ def run_calibration(config: IQEConfig | None = None, *, simulate: bool = False,
         data = calibrate(pm, smu, smile, pixels, cfg, log)
     finally:
         parked.__exit__(None, None, None)
-    path = write_calibration(out_dir, data)
+    record, stable = write_calibration(out_dir, data)
     log("=" * 56)
-    log(f"CALIBRATION written: {path}")
-    log(f"Use it with:  python -m measure_iqe --calibration \"{path}\"")
-    return path
+    log(f"CALIBRATION for {cfg.sample_name}")
+    log(f"  record  : {record}")
+    log(f"  per-array: {stable}")
+    log(f"Use it with:  python -m measure_iqe --array {cfg.sample_name}")
+    return stable
 
 
 def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = False,
