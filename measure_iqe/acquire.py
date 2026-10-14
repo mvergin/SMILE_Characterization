@@ -54,6 +54,7 @@ from typing import Any, Callable, Iterable, Iterator, NamedTuple
 import numpy as np
 
 from .config import Q_E, SMU_I_RANGES, IQEConfig
+from .calibrate import calibrate, write_calibration
 from .safeexit import safe_exit
 
 Logger = Callable[[str], None]
@@ -1348,12 +1349,14 @@ class IQEResult(NamedTuple):
     config: IQEConfig       # the configuration actually used
 
 
-def make_run_dir(cfg: IQEConfig, base_dir: str | Path | None = None) -> Path:
+def make_run_dir(cfg: IQEConfig, base_dir: str | Path | None = None,
+                 suffix: str | None = None) -> Path:
     """Create and return ``<base_dir>/<stamp>_<sample>_ROI_(x1, y1, x2, y2)``."""
     x1, y1, x2, y2 = cfg.resolve_roi()
     stamp = datetime.datetime.now().strftime("%y%m%d-%H%M")
     root = Path(base_dir) if base_dir is not None else Path(cfg.base_dir)
-    run_dir = root / f"{stamp}_{cfg.sample_name}_ROI_({x1}, {y1}, {x2}, {y2})"
+    tail = f"_{suffix}" if suffix else ""
+    run_dir = root / f"{stamp}_{cfg.sample_name}_ROI_({x1}, {y1}, {x2}, {y2}){tail}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
@@ -1393,6 +1396,43 @@ def shutdown(pm, smu, smile, cfg: IQEConfig) -> None:
             dev.close()
         except Exception:
             pass
+
+
+def run_calibration(config: IQEConfig | None = None, *, simulate: bool = False,
+                    base_dir: str | Path | None = None,
+                    log: Logger | None = None) -> Path:
+    """Characterise ONE array's settling and write a reusable calibration file.
+
+    Run once per array. The sweep then takes `--calibration <file>` instead of a
+    handful of hand-typed settle overrides, and the numbers are measured on that
+    array rather than inherited from Array38.
+    """
+    cfg = (config or IQEConfig()).validate()
+    log = log or make_logger()
+    out_dir = make_run_dir(cfg, base_dir, suffix="CALIBRATION")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log(f"Output: {out_dir}")
+    pm, smu, smile = connect(cfg, log, simulate=simulate)
+    parked = safe_exit(lambda: shutdown(pm, smu, smile, cfg), log)
+    parked.__enter__()
+    try:
+        configure_common(pm, smu, cfg, log)
+        smu.set_voltage("a", cfg.vled_voltage)
+        smu.enable_output("a", True)
+        smu.enable_output("b", True)
+        x1, y1, x2, y2 = cfg.resolve_roi()
+        selected = run_fast_scan(pm, smu, smile, x1, y1, x2, y2, out_dir, cfg, log)
+        pixels = [(int(r["X"]), int(r["Y"])) for r in selected[:cfg.calibrate_pixels]]
+        if not pixels:
+            raise RuntimeError("no alive pixels found to calibrate on")
+        data = calibrate(pm, smu, smile, pixels, cfg, log)
+    finally:
+        parked.__exit__(None, None, None)
+    path = write_calibration(out_dir, data)
+    log("=" * 56)
+    log(f"CALIBRATION written: {path}")
+    log(f"Use it with:  python -m measure_iqe --calibration \"{path}\"")
+    return path
 
 
 def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = False,

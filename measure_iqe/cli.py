@@ -16,7 +16,8 @@ import json
 import sys
 from typing import Any, Sequence
 
-from .acquire import make_logger, run_iqe_measurement
+from .acquire import make_logger, run_calibration, run_iqe_measurement
+from .calibrate import load_calibration
 from .config import IQEConfig
 
 
@@ -40,6 +41,11 @@ def build_config(args: argparse.Namespace) -> IQEConfig:
     """Config file (or defaults) with ``--set`` overrides applied on top."""
     base = IQEConfig.from_file(args.config) if args.config else IQEConfig()
     data = base.to_dict()
+    # Precedence, lowest first: defaults, --config, --calibration, --set, --out.
+    # The calibration is measured fact about this array; an explicit --set still wins,
+    # so a deliberate override is never silently replaced by the calibration.
+    if getattr(args, "calibration", None):
+        data.update(load_calibration(args.calibration))
     data.update(dict(args.set or []))
     if args.out:
         data["base_dir"] = args.out
@@ -52,11 +58,16 @@ def build_parser() -> argparse.ArgumentParser:
         description="IQE-focused acquisition for the SMILE micro-LED array.",
         epilog="Every IQEConfig field can be overridden with --set; see --list-params.")
     ap.add_argument("--config", metavar="PATH",
-                    help="JSON or YAML config file (see config.example.yaml)")
+                    help="JSON or YAML config file (see configs/standard.yaml)")
     ap.add_argument("--set", metavar="KEY=VALUE", type=parse_override, action="append",
                     help="override one config field; repeatable")
     ap.add_argument("--out", metavar="DIR",
                     help="output root, overriding base_dir from the config")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="measure THIS array's settling and write a calibration file, "
+                         "instead of sweeping. Run once per array (~6 min)")
+    ap.add_argument("--calibration", metavar="FILE",
+                    help="apply a calibration file written by --calibrate")
     ap.add_argument("--resume", metavar="RUN_DIR",
                     help="continue an interrupted run: skip the pixels this directory "
                          "already finished and append to its files")
@@ -96,6 +107,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     log = make_logger()
+    if args.calibrate:
+        try:
+            run_calibration(cfg, simulate=args.simulate, log=log)
+        except KeyboardInterrupt:
+            log("interrupted - hardware parked")
+            return 130
+        return 0
     try:
         result = run_iqe_measurement(cfg, simulate=args.simulate,
                                      warmup_diag=args.warmup_diag, log=log,

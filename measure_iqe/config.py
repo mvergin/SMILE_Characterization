@@ -328,6 +328,21 @@ class IQEConfig:
     #   * measure the bitval-0 reference back to back with the lit point, so both carry the
     #     same history and the subtraction cancels most of it
     # Spend the time budget on fewer points with a longer dwell, not more points.
+    # -- Per-array calibration (--calibrate) ------------------------------
+    # The settle time is a property of the ARRAY, not of the method: 8 s came from
+    # Array38 (42.8 uF) and another array may need far more or far less. It does not
+    # follow from C, because the settling is a charge relaxation and not an RC charge,
+    # so it is measured directly rather than inferred.
+    calibrate_pixels: int = 3  # pixels to characterise; the worst case sets the dwell
+    calibrate_seconds: float = 40.0  # poll each bias this long. Must exceed the real
+                                     # settle time or the answer is a lower bound, which
+                                     # the calibration says so explicitly.
+    calibrate_n_smu: int = 4  # SMU samples per poll; small, this is a time series
+    calibrate_period_s: float = 0.05  # poll interval, and the floor on what the
+                                      # calibration can resolve
+    calibrate_margin: float = 1.5  # safety factor on the measured worst case, because
+                                   # the calibration sees 3 biases and the sweep visits 30
+
     resume: bool = False  # with --out pointing at an existing run directory, skip the
                           # pixels it already finished and append. The aggregated CSV is
                           # flushed per pixel, so a run killed mid-sweep (Windows Update,

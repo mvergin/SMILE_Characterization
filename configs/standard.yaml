@@ -1,7 +1,17 @@
-# Annotated example config for measure_iqe.
+# THE STANDARD CONFIG for measure_iqe. These values ARE the defaults, so running
+# measure_iqe with no --config at all behaves exactly like this file. It exists to be
+# read and copied, and every key is annotated.
 #
-#   python -m measure_iqe --config config.example.yaml
-#   IQEConfig.from_file("config.example.yaml")
+#   python -m measure_iqe                                  # identical to this file
+#   python -m measure_iqe --config configs/standard.yaml   # same, explicitly
+#   IQEConfig.from_file("configs/standard.yaml")
+#
+# The other files in configs/ are NOT the standard:
+#   legacy_pre261014.yaml  the old, wrong method, kept so it can be run head to head
+#
+# Per-array numbers (the settle times, the current limits) should come from
+# `python -m measure_iqe --calibrate` rather than from edits here -- they are
+# properties of the array, not of the method.
 #
 # EVERY key is optional: leave one out and the default in measure_iqe/config.py
 # applies. An unknown key or a wrong type is a hard error, so a typo can never be
@@ -146,6 +156,22 @@ vramp_highv_limit_a: 0.001    # -2.6 V draws ~175 uA, far above the rising-side 
 fastscan_limit_a: 0.001   # compliance for the FAST SCAN, a different operating point from the sweep.
                           # At -1.35 V a pixel draws ~30 uA, so the sweep's 10 uA rising-side limit
                           # clamps EVERY pixel (measured 261014-0048: all 1024 read exactly 10.00 uA).
+
+# ---- Per-array calibration (--calibrate) ----
+# The settle time is a property of the ARRAY. 8 s came from Array38 (42.8 uF); another
+# array may need far more or far less, and it does NOT follow from C, because the
+# settling is a charge relaxation and not an RC charge. Measure it, do not inherit it:
+#   python -m measure_iqe --calibrate --out D:\cal
+#   python -m measure_iqe --calibration "D:\cal\...\<array>_calibration.yaml"
+calibrate_pixels: 3        # pixels to characterise; the worst case sets the dwell
+calibrate_seconds: 40.0    # poll each bias this long. Shorter than the real settle time
+                           # makes the answer a lower bound, and the file says so.
+calibrate_n_smu: 4
+calibrate_period_s: 0.05   # poll interval, and the floor on what can be resolved
+calibrate_margin: 1.5      # safety factor: 3 biases are measured, 30 are swept
+
+resume: false              # --resume RUN_DIR sets this; skip the pixels a killed run
+                           # already finished and append to its files
 
 # ---- Leakage reference (the low-J correction) ----
 # ch B reads the TOTAL cathode current. Measured over 12 pixels in 4 quadrants: the reference is 8% of the

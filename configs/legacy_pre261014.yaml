@@ -1,4 +1,6 @@
-# The PRE-261014 sweep settings, for an A/B against the rebuilt one.
+# NOT THE STANDARD CONFIG. See configs/standard.yaml for that.
+#
+# The PRE-261014 sweep settings, kept so the old method can be run head to head.
 #
 #   python -m measure_iqe --config legacy_settings.yaml --out D:\ab_old
 #   python -m measure_iqe                                --out D:\ab_new

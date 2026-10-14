@@ -17,6 +17,7 @@ SMILE_IQE_Analysis repo; RUN_FORMAT.md specifies the handoff.
 """
 
 from .acquire import (
+    run_calibration,
     IQEResult,
     acquire_point,
     build_fine_voltages,
@@ -60,6 +61,9 @@ __all__ = [
     "make_run_dir",
     "read_voltage_b",
     "run_fast_scan",
+    "load_calibration",
+    "settle_time",
+    "run_calibration",
     "run_iqe_measurement",
     "run_sweep_current",
     "run_sweep_voltage",

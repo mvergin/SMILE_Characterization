@@ -70,7 +70,7 @@ Load the configuration from a file instead:
 ```python
 from measure_iqe import IQEConfig, run_iqe_measurement
 
-cfg = IQEConfig.from_file("config.example.yaml")     # .yaml, .yml or .json
+cfg = IQEConfig.from_file("configs/standard.yaml")     # .yaml, .yml or .json
 run_iqe_measurement(cfg, simulate=True)
 ```
 
@@ -203,7 +203,7 @@ voltage sweep, so an interrupted run leaves directly analysable files.
 
 Every field below is a constructor argument of `IQEConfig`, a key in a
 JSON/YAML config file, and a `--set` target. All are optional. Unknown keys and
-wrong types are rejected with an error naming the key. `config.example.yaml` is
+wrong types are rejected with an error naming the key. `configs/standard.yaml` is
 an annotated copy of these defaults.
 
 Comments in `measure_iqe/config.py` keep the historical UPPERCASE names of some
@@ -368,27 +368,27 @@ runs that pinned each value.
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `settle_scale` | `float` | `1.0` | multiplies every sweep settle. `--simulate` forces 0, so a dry run is seconds rather than 15 minutes. Lower it on hardware only to measure what the shortcut costs. |
-| `vramp_perseg_effort` | `bool` | `True` | the knee splits point density, measurement effort **and the limit** |
+| `settle_scale` | `float` | `1.0` | multiplies every sweep settle. 1 = the measured times. |
+| `vramp_perseg_effort` | `bool` | `True` |  |
 | `vramp_lowv_nplc` | `float` | `2.0` | integer NPLC, so the mains line is nulled by integration |
 | `vramp_lowv_n_pm` | `int` | `32` |  |
 | `vramp_lowv_n_smu` | `int` | `12` |  |
-| `vramp_lowv_settle_s` | `float` | `8.0` | **seconds.** Rising side: 1% takes 5-55 s. Measured 261013; the old 20 ms was wrong by 250-2750x and is why every rising-side EQE before then is too high. |
-| `vramp_lowv_limit_a` | `float` | `1e-05` | **floor** of the compliance ladder: the finest limit the sweep will use, which under High-C is also the finest measure range |
+| `vramp_lowv_settle_s` | `float` | `8.0` | rising side: 1% needs 5-55 s. 8 s is the compromise that keeps a 30-point sweep under ~10 min/pixel. |
+| `vramp_lowv_limit_a` | `float` | `1e-05` | the rising side never exceeds ~5 uA |
 | `vramp_highv_nplc` | `float` | `1.0` | was 0.5 -- not an integer, so it nulled no mains at all |
 | `vramp_highv_n_pm` | `int` | `8` |  |
 | `vramp_highv_n_smu` | `int` | `8` |  |
-| `vramp_highv_settle_s` | `float` | `2.0` | **seconds.** Droop side: big currents, the relaxation is a smaller fraction |
-| `vramp_highv_limit_a` | `float` | `0.001` | **ceiling** of the compliance ladder, and the limit used for the very first point, where nothing is known yet |
+| `vramp_highv_settle_s` | `float` | `2.0` | droop side: large currents, the relaxation is a much smaller fraction of the reading |
+| `vramp_highv_limit_a` | `float` | `0.001` | -2.6 V draws ~175 uA, far above the rising-side limit |
 
 #### Leakage reference (the low-J correction)
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `fastscan_limit_a` | `float` | `0.001` | compliance for the fast scan, a different operating point from the sweep: -1.35 V draws ~30 uA, so the sweep's 10 uA rising-side limit clamps every pixel |
-| `leak_reference` | `bool` | `True` | measure every sweep point a second time at `leak_ref_bitval` |
+| `fastscan_limit_a` | `float` | `0.001` | compliance for the FAST SCAN, which is a separate operating point from the sweep. At nvled_v_fastscan (-1.35 V) a pixel draws ~30 uA, so the sweep's 10 uA rising-side limit clamps EVERY pixel -- measured in run 261014-0048, where all 1024 pixels read exactly 10.00 uA and the light came out 2.8x low. |
+| `leak_reference` | `bool` | `True` | measure each sweep point lit and at LEAK_REF_BITVAL |
 | `leak_ref_bitval` | `int` | `0` | the reference drive level: addressed, but off |
-| `leak_ref_settle_s` | `float` | `2.0` | after switching drive level; the bias does not move |
+| `leak_ref_settle_s` | `float` | `2.0` | after switching drive level. Shorter than the sweep settle: the bias does not move, only the drive, and the point of measuring back to back is a shared history. |
 
 Channel B reads the **total** cathode current. Measured over 12 pixels in 4
 quadrants on 261013, the reference is 8% of the reading at −0.95 V and **58% at
@@ -396,6 +396,16 @@ quadrants on 261013, the reference is 8% of the reading at −0.95 V and **58% a
 A *blanked* frame is not a valid reference — it draws ~4× **more** than the
 addressed pixel at bitval 0, so lit-minus-blanked is negative.
 
+#### Calibration, resume and safety
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `calibrate_pixels` | `int` | `3` | pixels to characterise; the worst case sets the dwell |
+| `calibrate_seconds` | `float` | `40.0` | poll each bias this long. Must exceed the real settle time or the answer is a lower bound, which the calibration says so explicitly. |
+| `calibrate_n_smu` | `int` | `4` | SMU samples per poll; small, this is a time series |
+| `calibrate_period_s` | `float` | `0.05` | poll interval, and the floor on what the calibration can resolve |
+| `calibrate_margin` | `float` | `1.5` | safety factor on the measured worst case, because the calibration sees 3 biases and the sweep visits 30 |
+| `resume` | `bool` | `False` | with --out pointing at an existing run directory, skip the pixels it already finished and append. The aggregated CSV is flushed per pixel, so a run killed mid-sweep (Windows Update, a power cut) keeps every completed pixel and resumes from the next one. A pixel interrupted part way through its own sweep is re-measured whole, not stitched. |
 #### Dead-pixel threshold (fast scan)
 
 | parameter | type | default | meaning |
@@ -785,6 +795,38 @@ fixes it, by averaging rather than by rejection:
 7.8× less noise, consistent with √100 for white noise, and the same answer. Use an
 integer NPLC on the measurement points. It costs nothing, because the relaxation
 below forces a wait anyway.
+
+### Per-array calibration (do this once per array)
+
+The settle time belongs to the **array**, not to the method. The 8 s default was
+measured on Array38 (42.8 uF); another array can need far more or far less, and it
+does **not** follow from the capacitance, because the settling is a charge relaxation
+rather than an RC charge.
+
+```powershell
+python -m measure_iqe --calibrate --out D:\cal          # once per array, ~6 min
+python -m measure_iqe --calibration "D:\cal\...\Array42_IQE_calibration.yaml"
+```
+
+`--calibrate` steps a few pixels at three biases spanning the sweep, polls the current
+until it stops changing (`settle_time`, the criterion documented in the investigation
+report), takes the worst case, applies `calibrate_margin` and writes a small YAML. It
+records the raw measurements beside the recommendation, and says so explicitly if a
+capture never settled within `calibrate_seconds` -- in which case the recommendation
+is a lower bound and the run should be repeated with a longer window.
+
+Precedence: defaults, then `--config`, then `--calibration`, then `--set`. An explicit
+`--set` always wins, so a deliberate override is never silently replaced.
+
+### Configuration files
+
+| file | what it is |
+|---|---|
+| `configs/standard.yaml` | **the standard config.** These values are the defaults, annotated. Running with no `--config` behaves identically. |
+| `configs/legacy_pre261014.yaml` | the old, wrong method, kept so it can be run head to head. Not for measurements. |
+| `<array>_calibration.yaml` | written by `--calibrate`, per array. Applied with `--calibration`. |
+
+Full key-by-key reference: **Configuration reference** below.
 
 ### What the sweep now does, and why (261013)
 

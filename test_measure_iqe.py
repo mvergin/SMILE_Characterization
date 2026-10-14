@@ -18,6 +18,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import numpy as np
+
 from measure_iqe import IQEConfig, run_iqe_measurement, select_sweep_pixels
 from measure_iqe import acquire
 from measure_iqe.cli import main as cli_main
@@ -74,15 +76,15 @@ def test_config_roundtrips_through_a_file():
 
 
 def test_example_config_matches_the_defaults():
-    """config.example.yaml is documentation — it must stay loadable and in sync."""
-    example = Path(__file__).with_name("config.example.yaml")
+    """configs/standard.yaml is documentation — it must stay loadable and in sync."""
+    example = Path(__file__).parent / "configs" / "standard.yaml"
     if not example.exists():
         return
     try:
         loaded = IQEConfig.from_file(example)
     except ImportError:
         return                                             # PyYAML not installed
-    assert loaded == IQEConfig(), "config.example.yaml drifted from IQEConfig defaults"
+    assert loaded == IQEConfig(), "configs/standard.yaml drifted from IQEConfig defaults"
 
 
 def test_config_coerces_and_rejects_value_types():
@@ -279,6 +281,62 @@ def test_every_swept_pixel_starts_from_a_blank_frame():
         prev = calls[i - 1]
         assert prev[0] == "blank" or (prev[0] == "set" and prev[1:3] == calls[i][1:3]), (
             f"pixel {calls[i][1:3]} was lit while {prev} was still in the frame")
+
+
+def test_calibration_round_trips_and_is_validated():
+    """--calibrate measures this array; --calibration applies it. Nothing in between."""
+    from measure_iqe import run_calibration
+    from measure_iqe.calibrate import load_calibration
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = IQEConfig(**FAST, calibrate_seconds=1.5, calibrate_pixels=1)
+        path = run_calibration(cfg, simulate=True, base_dir=tmp, log=QUIET)
+        assert path.exists()
+        rec = load_calibration(path)
+        assert rec, "calibration recommended nothing"
+        fields = {f.name for f in dataclasses.fields(IQEConfig)}
+        assert set(rec) <= fields, f"unknown keys: {set(rec) - fields}"
+        # the floor: a measured 0 means "faster than we sample", not "no wait"
+        for k in ("vramp_lowv_settle_s", "vramp_highv_settle_s"):
+            if k in rec:
+                assert rec[k] >= 2 * cfg.calibrate_period_s, (k, rec[k])
+        # it must actually reach the config, and --set must still win over it
+        applied = IQEConfig.from_dict({**IQEConfig().to_dict(), **rec})
+        for k, v in rec.items():
+            assert getattr(applied, k) == v
+
+        # a file that is not a calibration must raise, not apply nothing silently
+        bad = Path(tmp) / "nope.json"
+        bad.write_text('{"hello": 1}', encoding="utf-8")
+        try:
+            load_calibration(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a non-calibration file was accepted")
+
+        # and so must one from a different calibration version
+        import json as _json
+        stale = Path(tmp) / "stale.json"
+        stale.write_text(_json.dumps(
+            {"calibration_version": 0, "recommended": {}}), encoding="utf-8")
+        try:
+            load_calibration(stale)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a stale calibration version was accepted")
+
+
+def test_settle_time_criterion():
+    """The documented criterion, on traces whose answer is known by construction."""
+    from measure_iqe.calibrate import settle_time
+    import math
+
+    t = np.linspace(0, 20, 2000)
+    assert 3 < settle_time(t, 1e-7 * (1 - np.exp(-t / 1.0)), 0.01) < 7
+    assert math.isnan(settle_time(t, 1e-7 * (1 + 0.5 * (1 + t) ** -0.4), 0.01))
+    assert settle_time(t, np.full_like(t, 1e-7), 0.01) == 0.0
 
 
 def test_resume_skips_finished_pixels_and_keeps_their_data():
