@@ -287,6 +287,37 @@ def test_every_swept_pixel_starts_from_a_blank_frame():
             f"pixel {calls[i][1:3]} was lit while {prev} was still in the frame")
 
 
+def test_nothing_touches_the_instruments_after_parking():
+    """Ctrl-C parked the hardware, then the poll loop issued one more read:
+
+        !! Ctrl-C: parking the hardware (outputs off, frame blanked)
+        read_buffers error: VI_ERROR_INV_OBJECT ... session ... is invalid
+    """
+    import threading
+    import time as _time
+    from measure_iqe import safeexit
+
+    calls = []
+
+    def loop():
+        for i in range(200):
+            if safeexit.parked():
+                return
+            calls.append(i)
+            _time.sleep(0.005)
+
+    with safeexit.safe_exit(lambda: calls.append("PARK")):
+        t = threading.Thread(target=loop)
+        t.start()
+        _time.sleep(0.05)
+        safeexit.PARKED.set()               # what a signal handler does first
+        t.join(timeout=5)
+        assert not t.is_alive(), "the loop ignored the park flag"
+    assert calls, "the loop never ran"
+    after = calls[calls.index("PARK") + 1:] if "PARK" in calls else []
+    assert not after, f"{len(after)} instrument call(s) after parking"
+
+
 def test_unsettled_captures_raise_the_recommendation_not_vanish():
     """A capture that never settled is the SLOWEST one; dropping it biases low."""
     import os

@@ -55,7 +55,7 @@ import numpy as np
 
 from .config import Q_E, SMU_I_RANGES, IQEConfig
 from .calibrate import calibrate, write_calibration
-from .safeexit import safe_exit
+from .safeexit import parked, safe_exit
 
 Logger = Callable[[str], None]
 Row = dict[str, Any]          # one CSV row: column name -> value
@@ -1133,6 +1133,8 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
             cur_limit = None
             i_last = None          # drives the compliance ladder; see pick_limit
             for jpt, (v, i_target) in enumerate(fine):
+                if parked():      # Ctrl-C / shutdown: stop before touching a dead session
+                    break
                 if cfg.fine_sweep_mode == "voltage":
                     if cfg.vramp_perseg_effort and v > cfg.vramp_knee_v:
                         # low-V / rising side (faint light) → heavy PM averaging + NPLC

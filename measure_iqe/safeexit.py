@@ -38,6 +38,22 @@ import threading
 from contextlib import contextmanager
 from typing import Callable
 
+# Set the moment the hardware is parked. Measurement loops poll it and stop, instead of
+# issuing one more instrument call against a session that `shutdown()` has just closed:
+#
+#     !! Ctrl-C: parking the hardware (outputs off, frame blanked)
+#     read_buffers error: VI_ERROR_INV_OBJECT ... the given session ... is invalid
+#
+# The park itself was correct there -- outputs went off before the handles closed -- but
+# the poll loop resumed for one iteration and talked to a dead session. Harmless, and
+# alarming to read, which is reason enough.
+PARKED = threading.Event()
+
+
+def parked() -> bool:
+    """True once the hardware has been parked; a loop that sees this should stop."""
+    return PARKED.is_set()
+
 # Console control events. Python maps only CTRL_C_EVENT/CTRL_BREAK_EVENT to signals;
 # the three that a shutdown or a closed window sends are invisible without this handler.
 _CTRL_C, _CTRL_BREAK, _CTRL_CLOSE, _CTRL_LOGOFF, _CTRL_SHUTDOWN = 0, 1, 2, 5, 6
@@ -58,6 +74,7 @@ def safe_exit(park: Callable[[], None], log: Callable[[str], None] | None = None
             state["parked"] = True
         if log:
             log(f"!! {why}: parking the hardware (outputs off, frame blanked)")
+        PARKED.set()                       # before park(), so no loop races the close
         try:
             park()
         except Exception as exc:                      # never raise out of a handler
@@ -109,6 +126,7 @@ def safe_exit(park: Callable[[], None], log: Callable[[str], None] | None = None
     # 3. atexit
     atexit.register(once, "process exit")
 
+    PARKED.clear()
     try:
         yield
     finally:

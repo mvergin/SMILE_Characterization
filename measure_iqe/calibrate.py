@@ -89,12 +89,15 @@ def settle_curve(pm, smu, cfg: IQEConfig, v_to: float, seconds: float,
                  period: float = 0.05) -> tuple[np.ndarray, np.ndarray]:
     """Step ch B to `v_to` and poll |I| for `seconds`. Returns (t, |I|)."""
     from .acquire import acquire_point
+    from .safeexit import parked
 
     smu.set_voltage("b", float(v_to))
     t0 = time.perf_counter()
     ts: list[float] = []
     iv: list[float] = []
     while (dt := time.perf_counter() - t0) < seconds:
+        if parked():                 # Ctrl-C or a shutdown: the session is gone
+            break
         _, _, _, _, inv, _, _, _ = acquire_point(pm, smu, cfg.calibrate_n_smu, 0)
         ts.append(dt)
         iv.append(abs(inv))
