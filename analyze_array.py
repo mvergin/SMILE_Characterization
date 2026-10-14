@@ -824,8 +824,24 @@ def plot_fastscan_overview(fs, cls, out, plt):
 
 
 def plot_fastscan_vs_sweep(fs, sweep, out, plt):
-    """Cross-check: fast-scan (-3.2 V) vs sweep endpoint (-3.2 V) per pixel."""
-    s32 = sweep[np.isclose(sweep["NVLED_V"], sweep["NVLED_V"].min())]
+    """Cross-check: fast-scan against the sweep point at the SAME bias, per pixel.
+
+    This used to take `NVLED_V.min()`, the sweep's most negative point, on the stale
+    assumption that the sweep ends where the fast scan sits. It no longer does: the
+    fast scan runs at -1.35 V and the sweep ends at -2.60 V, so the ratio was
+    P(-2.60 V) / P(-1.35 V) = 2.8 -- the diode's own I-V, reported to the reader as
+    "the fast scan and the sweep do NOT agree". They agree to 11 %.
+
+    Returns (ratio, bias_used, bias_gap) so the caller can say which bias it used, or
+    None when the sweep has no point near the fast scan's bias.
+    """
+    if "NVLED_V" not in fs or fs["NVLED_V"].isna().all():
+        return None
+    v_fs = float(fs["NVLED_V"].median())
+    biases = np.asarray(sorted(sweep["NVLED_V"].unique()), float)
+    v_sw = float(biases[int(np.argmin(np.abs(biases - v_fs)))])
+    gap = abs(v_sw - v_fs)
+    s32 = sweep[np.isclose(sweep["NVLED_V"], v_sw)]
     m = fs.merge(s32, on=["X", "Y"], suffixes=("_fs", "_sw"))
     if m.empty:
         return None
@@ -835,20 +851,24 @@ def plot_fastscan_vs_sweep(fs, sweep, out, plt):
     ax[0].scatter(pf, ps, s=14, alpha=0.7)
     lim = [0, max(pf.max(), ps.max()) * 1.05]
     ax[0].plot(lim, lim, "k--", lw=1, label="1:1")
-    ax[0].set_xlabel("Fast-scan P (nW)")
-    ax[0].set_ylabel("Sweep@-3.2V P (nW)")
+    ax[0].set_xlabel(f"Fast-scan P at {v_fs:+.3f} V (nW)")
+    ax[0].set_ylabel(f"Sweep P at {v_sw:+.3f} V (nW)")
     ax[0].set_title("Optical power consistency")
     ax[0].legend()
     ratio = (ps / pf).replace([np.inf, -np.inf], np.nan).dropna()
+    if ratio.empty:
+        plt.close(fig)
+        return None
     ax[1].hist(ratio, bins=30, color="tab:purple", alpha=0.8)
     ax[1].axvline(1.0, color="k", ls="--")
     ax[1].set_xlabel("Sweep / Fast-scan power ratio")
     ax[1].set_ylabel("pixels")
-    ax[1].set_title(f"median ratio = {ratio.median():.3f}")
+    ax[1].set_title(f"median ratio = {ratio.median():.3f} "
+                    f"({v_sw:+.3f} V vs {v_fs:+.3f} V, gap {1000 * gap:.0f} mV)")
     fig.tight_layout()
     fig.savefig(out, dpi=300)
     plt.close(fig)
-    return float(ratio.median())
+    return float(ratio.median()), v_fs, v_sw, gap
 
 
 def plot_ivl(df, out, plt):
@@ -2053,14 +2073,23 @@ def write_report(
     else:
         A("")
     if fs_vs_sweep_ratio is not None:
+        r, v_fs, v_sw, gap = fs_vs_sweep_ratio
+        # The two are only comparable if the sweep actually has a point near the fast
+        # scan's bias. The diode's I-V is steep here, so a 100 mV gap is already worth
+        # tens of percent and must not be read as a disagreement.
         A(
-            f"- **Fast-scan vs sweep cross-check** (at the shared NVLED bias): median power "
-            f"ratio **{fs_vs_sweep_ratio:.3f}** (1.00 = perfect) → "
-            + ("the two acquisitions agree, so the data is reproducible."
-               if 0.8 <= fs_vs_sweep_ratio <= 1.25 else
-               "**they do NOT agree.** The fast scan and the sweep are not measuring the "
-               "same thing at the same bias, so treat the fast-scan efficiency map as "
-               "relative only.")
+            f"- **Fast-scan vs sweep cross-check** (fast scan {v_fs:+.3f} V vs the "
+            f"nearest sweep point {v_sw:+.3f} V, gap **{1000 * gap:.0f} mV**): median "
+            f"power ratio **{r:.3f}** (1.00 = perfect) → "
+            + (f"the two acquisitions agree, so the data is reproducible."
+               if 0.8 <= r <= 1.25 else
+               (f"**inconclusive** — a {1000 * gap:.0f} mV gap on this I-V explains a "
+                f"ratio of this size on its own, so this says nothing about either "
+                f"acquisition. Sweep a point at {v_fs:+.3f} V to make it a real check."
+                if gap > 0.06 else
+                "**they do NOT agree.** The fast scan and the sweep are not measuring "
+                "the same thing at the same bias, so treat the fast-scan efficiency "
+                "map as relative only."))
         )
     if fs_eff is not None:
         A(
