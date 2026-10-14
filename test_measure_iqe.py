@@ -463,6 +463,114 @@ def test_unsettled_captures_raise_the_recommendation_not_vanish():
             os.chdir(cwd)
 
 
+def _sweep_grid(run_dir):
+    """(X, Y, NVLED_V) of every aggregated row, plus the column set."""
+    import csv as _csv
+    grid, cols = set(), None
+    for agg in (Path(run_dir) / "NVLEDSweep" / "Sweep").glob("aggregated_bitval=*.csv"):
+        with agg.open() as f:
+            rdr = _csv.DictReader(f)
+            cols = tuple(rdr.fieldnames or ())
+            for row in rdr:
+                grid.add((int(float(row["X"])), int(float(row["Y"])),
+                          round(float(row["NVLED_V"]), 4)))
+    return grid, cols
+
+
+def test_bias_major_measures_the_same_grid_as_pixel_major():
+    """Swapping the loops must change WHEN a point is measured, not WHICH points."""
+    from measure_iqe import run_iqe_measurement
+
+    common = dict(FAST, n_fine=5, roi=(0, 0, 7, 7), block_size=4, pixels_per_block=1,
+                  block_seed=0, dead_abort=False)
+    out = {}
+    for order in ("pixel_major", "bias_major"):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = IQEConfig(**common, sweep_order=order)
+            res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
+            out[order] = _sweep_grid(res.run_dir)
+    (g_px, c_px), (g_bm, c_bm) = out["pixel_major"], out["bias_major"]
+    assert g_px, "pixel_major measured nothing"
+    assert g_bm == g_px, (
+        f"different grids: bias_major-only {sorted(g_bm - g_px)[:4]}, "
+        f"pixel_major-only {sorted(g_px - g_bm)[:4]}")
+    assert c_bm == c_px, f"different columns:\n  {c_px}\n  {c_bm}"
+
+
+def test_bias_major_pays_each_dwell_once_for_all_pixels():
+    """The point of the order: n_pixels x the dwell becomes 1 x the dwell."""
+    import time as _time
+    from measure_iqe import run_iqe_measurement
+
+    # Distinctive settles, so each sleep is identifiable in the recorded list.
+    common = dict(FAST, n_fine=4, roi=(0, 0, 7, 7), block_size=4, pixels_per_block=1,
+                  block_seed=0, dead_abort=False, settle_scale=1.0,
+                  vramp_lowv_settle_s=0.011, vramp_highv_settle_s=0.013,
+                  leak_ref_settle_s=0.017, pixel_switch_settle_s=0.019,
+                  leak_reference=True, trace_settling=False, warmup_ms=0.0)
+    seen = {}
+    real_sleep = _time.sleep
+    for order in ("pixel_major", "bias_major"):
+        rec: list[float] = []
+        _time.sleep = lambda s, _r=rec: (_r.append(round(float(s), 6)), real_sleep(0))[1]
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = IQEConfig(**common, sweep_order=order)
+                res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
+                npx = len({(x, y) for x, y, _ in _sweep_grid(res.run_dir)[0]})
+        finally:
+            _time.sleep = real_sleep
+        seen[order] = (rec, npx)
+
+    for order, (rec, npx) in seen.items():
+        assert npx >= 2, f"{order}: need >1 pixel for this test to mean anything"
+    n_dwell = {o: sum(1 for v in rec if v in (0.011, 0.013))
+               for o, (rec, _) in seen.items()}
+    npx = seen["bias_major"][1]
+    # pixel_major pays the dwell on every (pixel, bias); bias_major on every bias.
+    assert n_dwell["pixel_major"] == npx * n_dwell["bias_major"], (
+        f"dwells: pixel_major {n_dwell['pixel_major']}, bias_major "
+        f"{n_dwell['bias_major']}, {npx} pixels - expected a factor of {npx}")
+    # and the frame switch replaces it, once per point
+    n_switch = sum(1 for v in seen["bias_major"][0] if v == 0.019)
+    assert n_switch == npx * n_dwell["bias_major"], (
+        f"{n_switch} switch settles for {npx} pixels x {n_dwell['bias_major']} biases")
+    assert 0.019 not in seen["pixel_major"][0], "pixel_major must not switch-settle"
+    # the reference is restored in pixel_major and not in bias_major: 2 waits vs 1
+    n_ref = {o: sum(1 for v in rec if v == 0.017) for o, (rec, _) in seen.items()}
+    assert n_ref["pixel_major"] == 2 * n_ref["bias_major"], (
+        f"reference settles: {n_ref} - bias_major blanks next, so it must not "
+        f"restore the pixel and wait again")
+
+
+def test_completed_biases_finds_whole_biases_not_whole_pixels():
+    """--resume in bias_major order skips biases; completed_pixels cannot see them."""
+    from measure_iqe.acquire import completed_biases, completed_pixels
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sweep = Path(tmp) / "NVLEDSweep" / "Sweep"
+        sweep.mkdir(parents=True)
+        px = [(1, 1), (2, 2), (3, 3)]
+        lines = ["X,Y,NVLED_V,NVLED_CURR_MEAN"]
+        for v in (-2.6, -1.3):                       # two complete biases
+            lines += [f"{x},{y},{v},1e-6" for x, y in px]
+        lines += [f"{px[0][0]},{px[0][1]},-0.8,1e-6"]   # one bias, one pixel: partial
+        (sweep / "aggregated_bitval=15_mean_std.csv").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8")
+
+        done = completed_biases(tmp)
+        assert done == {-2.6, -1.3}, done
+        assert -0.8 not in done, "a bias missing two pixels is not complete"
+        # And the hazard this exists to avoid. On a bias_major file, completed_pixels
+        # takes the MODE of the per-pixel row counts -- 2 here -- and calls every pixel
+        # that reached it finished. So it reports all three pixels complete when not one
+        # has a full curve, and a --resume driven by it would skip the entire run and
+        # measure nothing. bias_major must never ask it.
+        assert completed_pixels(tmp) == set(px), (
+            "completed_pixels no longer over-reports on a bias_major file; re-check "
+            "whether _sweep_bias_major still needs completed_biases")
+        assert completed_biases(tmp) != set(px), "the two must not be interchangeable"
+
 def test_array_flag_names_the_run_and_picks_up_its_calibration():
     """--array NAME must set sample_name AND apply that array's measured settings."""
     import os
@@ -765,29 +873,52 @@ def _repo_calibrations() -> dict[str, float]:
     import hashlib
     from measure_iqe.calibrate import CALIB_DIR
     d = Path(__file__).resolve().parent / CALIB_DIR
+    if not d.is_dir():
+        return {}
     return {f.name: hashlib.sha256(f.read_bytes()).hexdigest()
-            for f in sorted(d.glob("*.yaml"))} if d.is_dir() else {}
+            for f in sorted(d.glob("*.yaml"))}
 
 
 if __name__ == "__main__":
     # write_calibration() writes to every calibration root, the install tree included.
     # That is wanted for a real --calibrate and poison for a test: the suite once
     # replaced the bench's measured Array42_IQE calibration with simulator output and
-    # said "all checks passed". The run is not green unless the arrays it found on disk
-    # are still there, byte for byte.
+    # said "all checks passed". The run is not green unless every calibration that was
+    # on disk when it started is still there, byte for byte.
+    #
+    # The guard deliberately knows nothing about TEST_ARRAY. Excluding that name from
+    # the snapshot would switch the guard off for whatever the tests happen to be
+    # called, which is the mistake being guarded against; deleting the file before the
+    # snapshot would destroy a real calibration of that name outright. Both were tried.
+    # Instead the suite's own file is removed in the `finally`, on success and on
+    # failure alike, so it never survives to appear in the next run's snapshot.
+    _cal_dir = Path(__file__).resolve().parent / "calibrations"
     before = _repo_calibrations()
-
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print(f"ok  {name}")
-
-    after = _repo_calibrations()
-    clobbered = [k for k, v in before.items() if after.get(k) != v]
-    assert not clobbered, (
-        f"the suite modified real calibration(s): {clobbered}. A test must use "
-        f"sample_name=TEST_ARRAY, never a name a bench has measured.")
-    for stray in set(after) - set(before):
-        (Path(__file__).resolve().parent / "calibrations" / stray).unlink()
-        print(f"ok  removed the test calibration the suite wrote: {stray}")
+    if f"{TEST_ARRAY}.yaml" in before:
+        # Either TEST_ARRAY names a real array -- the mistake this guards against -- or
+        # an earlier run died before its cleanup. Cannot tell the two apart from here,
+        # and guessing wrong either destroys a measured calibration or hides the bug.
+        # So: remove it, say which it might be, and fail. The next run starts clean.
+        (_cal_dir / f"{TEST_ARRAY}.yaml").unlink(missing_ok=True)
+        raise SystemExit(
+            f"calibrations/{TEST_ARRAY}.yaml was already on disk. Either TEST_ARRAY "
+            f"names an array a bench has measured (change it -- the suite overwrites "
+            f"whatever it names), or an earlier failed run left it behind. It has been "
+            f"removed; re-run. If it was a real calibration, restore it from its run "
+            f"directory's <array>_calibration.yaml.")
+    try:
+        for name, fn in sorted(globals().items()):
+            if name.startswith("test_") and callable(fn):
+                fn()
+                print(f"ok  {name}")
+    finally:
+        after = _repo_calibrations()
+        for stray in sorted(set(after) - set(before)):
+            (_cal_dir / stray).unlink(missing_ok=True)
+            print(f"ok  removed the test calibration the suite wrote: {stray}")
+        clobbered = [k for k, v in before.items() if after.get(k) != v]
+        assert not clobbered, (
+            f"the suite modified or deleted real calibration(s): {clobbered}. A test "
+            f"must set sample_name=TEST_ARRAY, and TEST_ARRAY must name no array any "
+            f"bench has measured.")
     print("all checks passed")

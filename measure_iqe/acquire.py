@@ -1008,6 +1008,91 @@ def run_sweep_current(pm, smu, smile, selected: list[Row], run_dir: Path,
     return len(sw_rows)
 
 
+def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
+                  cfg: IQEConfig, t0: float, log: Logger,
+                  restore: bool = True) -> tuple[dict, dict | None]:
+    """Acquire one (pixel, bias) point and build its row.
+
+    The caller has already driven the bias, chosen the limit/range and the NPLC, and
+    waited whatever dwell that point needs. This is only the part that is identical
+    whichever order the grid is walked -- the acquisition, the leakage reference, the
+    row and the compliance flag -- so `pixel_major` and `bias_major` cannot drift apart
+    in what a "point" means.
+
+    `restore=False` says the caller is about to blank the frame anyway, so the pixel
+    does not need putting back to `bitval` and settling after the reference.
+
+    Returns (row, raw_samples_or_None); the caller stashes raw_samples if it wants them.
+    """
+    raw_s = None
+    if cfg.perpoint_range:
+        # range from the ACTUAL current (probe-then-measure), not the coarse map
+        p, ps, iv, ivs, inv, invs, _, _ = acquire_autoranged(pm, smu, n_smu, n_pm, cfg)
+    elif cfg.save_raw_samples:
+        (p, ps, iv, ivs, inv, invs, _, _), raw_s = acquire_point(
+            pm, smu, n_smu, n_pm, return_raw=True)
+    else:
+        p, ps, iv, ivs, inv, invs, _, _ = acquire_point(pm, smu, n_smu, n_pm)
+
+    # Leakage reference: the SAME pixel at bitval 0. Measured back to back with the lit
+    # point so both carry the same relaxation history and the subtraction cancels most of
+    # it. At -0.80 V this is 58% of the reading.
+    #
+    # It stays per point even in bias_major, where one reference per bias looks tempting.
+    # The backplane leak varies ~10% between pixels (run 261014-1616 at -1.30 V: 159-192
+    # nA across four), and at -0.80 V the reference IS 58% of the reading, so 10% of it
+    # is a 6% error on I_LED. bias_major amortises the DWELL; the reference is not a dwell.
+    ref = None
+    if cfg.leak_reference:
+        smile.set_pixel(x, y, cfg.leak_ref_bitval)
+        time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
+        # FULL n_pm, not a quarter of it. The reference current is stable to ~0.2 nA and
+        # needs almost no averaging, but the reference POWER is the dark level being
+        # subtracted from a ~250 pW signal, so at the dim end it is the dominant error.
+        # Run 261014-0035 with n_pm//4: the reference SEM was 30 pW against the lit
+        # reading's 14 pW -- the term that mattered most was averaged the least.
+        ref = acquire_point(pm, smu, n_smu, n_pm)
+        if restore:
+            smile.set_pixel(x, y, bitval)
+            time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
+        # else: the caller blanks the frame next, so lighting this pixel again and
+        # waiting for it to settle would be two seconds spent on a state nothing reads.
+        # In bias_major that is half the per-point cost, on every point.
+
+    vr = round(float(v), 4)
+    row = dict(X=x, Y=y, BITVAL=bitval, NVLED_V=vr,
+               TIME_START=time.perf_counter() - t0, TIME_END=time.perf_counter() - t0,
+               NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
+               VLED_CURR_MEAN=iv, VLED_CURR_STD=ivs,
+               PM400_POWER_MEAN=p, PM400_POWER_STD=ps)
+    if ref is not None:
+        rp, rps, riv, _, rinv, rinvs, _, _ = ref
+        row.update(NVLED_CURR_REF=rinv, NVLED_CURR_REF_STD=rinvs,
+                   VLED_CURR_REF=riv, PM400_POWER_REF=rp,
+                   PM400_POWER_REF_STD=rps, LEAK_REF_BITVAL=cfg.leak_ref_bitval)
+    if raw_s is not None:
+        # honest per-burst stats. _MEAN = true mean, _MEDIAN = median, _SAMPSTD =
+        # population std, _STD = SEM (sigma/sqrt(N)) -- kept as _STD because that is the
+        # column analyze_array reads for its reliability gate; analyze prefers _MEDIAN.
+        sn = burst_stats(raw_s["nvled"]); sv = burst_stats(raw_s["vled"]); sp = burst_stats(raw_s["pm"])
+        row.update(NVLED_CURR_MEAN=sn["mean"], NVLED_CURR_STD=sn["sem"],
+                   NVLED_CURR_MEDIAN=sn["median"], NVLED_CURR_SAMPSTD=sn["std"], NVLED_CURR_N=sn["n"],
+                   VLED_CURR_MEAN=sv["mean"], VLED_CURR_STD=sv["sem"],
+                   VLED_CURR_MEDIAN=sv["median"], VLED_CURR_SAMPSTD=sv["std"],
+                   PM400_POWER_MEAN=sp["mean"], PM400_POWER_STD=sp["sem"],
+                   PM400_POWER_MEDIAN=sp["median"], PM400_POWER_SAMPSTD=sp["std"])
+    # A point sitting on the limit is not a measurement. Flag it in the file and in the
+    # log rather than letting it reach the fit as a real current.
+    inv_m = row["NVLED_CURR_MEAN"]
+    row["NVLED_LIMIT_A"] = limit
+    at_limit = bool(limit) and abs(inv_m) >= 0.995 * limit
+    row["NVLED_AT_COMPLIANCE"] = at_limit
+    if at_limit:
+        log(f"      AT COMPLIANCE at {v:+.3f} V: |I|={abs(inv_m):.6g} A is the "
+            f"{limit:g} A limit, not the device. Point is flagged, not usable.")
+    return row, raw_s
+
+
 def completed_pixels(run_dir: str | Path) -> set[tuple[int, int]]:
     """Pixels already written to a run's aggregated sweep CSV.
 
@@ -1072,6 +1157,156 @@ def trace_dwell(pm, smu, cfg: IQEConfig, seconds: float):
             np.asarray(pv, np.float32))
 
 
+def completed_biases(run_dir: str | Path) -> set[float]:
+    """Biases already measured on EVERY pixel, for --resume in bias_major order.
+
+    `completed_pixels` is the wrong question in this order: a run killed mid-sweep has
+    every pixel partially swept and no pixel complete, so it would re-measure the lot.
+    What IS complete is each bias the writer flushed, and the writer flushes per bias.
+    """
+    rows: dict[float, set[tuple[int, int]]] = {}
+    sweep = Path(run_dir) / "NVLEDSweep" / "Sweep"
+    for agg in sweep.glob("aggregated_bitval=*_mean_std.csv"):
+        try:
+            with agg.open() as f:
+                for row in csv.DictReader(f):
+                    try:
+                        v = round(float(row["NVLED_V"]), 4)
+                        key = (int(float(row["X"])), int(float(row["Y"])))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    rows.setdefault(v, set()).add(key)
+        except OSError:
+            continue
+    if not rows:
+        return set()
+    # A complete bias covers as many pixels as the fullest one does. Using the max
+    # rather than a configured count keeps this correct when pixels were dead-skipped.
+    full = max(len(px) for px in rows.values())
+    return {v for v, px in rows.items() if len(px) == full}
+
+
+def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWriter",
+                      settle_traces: list, cfg: IQEConfig, log: Logger,
+                      t0: float) -> int:
+    """Walk the biases on the outside and the pixels on the inside.
+
+    The dwell belongs to the bias, not to the pixel (see `IQEConfig.sweep_order`), so
+    paying it once per bias and then stepping the frame measures every pixel for the
+    price of one. The per-point cost becomes `pixel_switch_settle_s` plus acquisition.
+
+    The pixel loop deliberately mirrors the fast scan: blank the frame, then light one
+    pixel. That is the sequence measured in run 261014-2151, and the blank is also what
+    stops a previous pixel emitting at bitval 0 -- the stuck-on-neighbour of the
+    pixel-major loop, for the same reason.
+    """
+    n_rows = 0
+    # One fine grid for all pixels. The biases are a property of the ramp, not of the
+    # pixel, so building it per pixel would only add 16 coarse pre-sweeps -- and they
+    # cannot differ anyway, or there would be no shared bias to hold.
+    first = selected[0]
+    smile.blank_frame()
+    smile.set_pixel(first["X"], first["Y"], cfg.bitvals[0])
+    fine = build_fine_voltages(pm, smu, cfg, log,
+                               tag=f"grid from ({first['X']},{first['Y']}): ")
+    if not fine:
+        log("  no fine voltages built - nothing to sweep")
+        return 0
+
+    done_v = completed_biases(writer._agg_folder.parent.parent.parent) if cfg.resume else set()
+    if done_v:
+        log(f"  resuming: {len(done_v)} bias(es) already complete on every pixel")
+
+    live = [(int(r["X"]), int(r["Y"])) for r in selected]
+    n_dead = 0
+    cur_limit = cur_nplc = cur_range = None
+    i_last = None
+    for bitval in cfg.bitvals:
+        for jpt, (v, _i_target) in enumerate(fine):
+            if parked():
+                break
+            if round(float(v), 4) in done_v:
+                continue
+            if cfg.vramp_perseg_effort and v > cfg.vramp_knee_v:
+                nplc, n_pm, n_smu, settle_s = (cfg.vramp_lowv_nplc, cfg.vramp_lowv_n_pm,
+                                               cfg.vramp_lowv_n_smu, cfg.vramp_lowv_settle_s)
+            elif cfg.vramp_perseg_effort:
+                nplc, n_pm, n_smu, settle_s = (cfg.vramp_highv_nplc, cfg.vramp_highv_n_pm,
+                                               cfg.vramp_highv_n_smu, cfg.vramp_highv_settle_s)
+            else:
+                nplc, n_pm, n_smu, settle_s = (cfg.sweep_nplc, cfg.n_pm_samples,
+                                               cfg.n_smu_samples, cfg.settle_ms / 1000.0)
+            limit = pick_limit(i_last, cfg)
+            if limit != cur_limit:
+                configure_voltage_source_b(
+                    smu, dataclasses.replace(cfg, nvled_compliance=limit), log)
+                cur_limit, cur_nplc, cur_range = limit, None, None
+            if nplc != cur_nplc:
+                set_nplc(smu, nplc); cur_nplc = nplc
+            if not cfg.perpoint_range and not cfg.highc_b and cfg.nvled_range_i != cur_range:
+                set_measure_range_b(smu, cfg.nvled_range_i); cur_range = cfg.nvled_range_i
+
+            # --- the one dwell this bias costs, for all the pixels below it ---
+            smu.set_voltage("b", float(v))
+            dwell = settle_s * cfg.settle_scale
+            if cfg.trace_settling and dwell >= cfg.trace_settling_min_s:
+                tr = trace_dwell(pm, smu, cfg, dwell)
+                if tr[0].size:
+                    settle_traces.append((f"bias_b{bitval}_v{v:+.4f}", *tr))
+            else:
+                time.sleep(dwell)
+            log(f"  [{jpt + 1}/{len(fine)}] {v:+.3f} V  settled {dwell:g}s once, "
+                f"now {len(live)} pixel(s) at "
+                f"{cfg.pixel_switch_settle_s * cfg.settle_scale:g}s each")
+
+            rows, samps = [], []
+            dead_here = []
+            for (x, y) in live:
+                if parked():
+                    break
+                smile.blank_frame()
+                smile.set_pixel(x, y, bitval)
+                time.sleep(cfg.pixel_switch_settle_s * cfg.settle_scale)
+                row, raw_s = measure_point(pm, smu, smile, x, y, bitval, v, limit,
+                                           n_pm, n_smu, cfg, t0, log, restore=False)
+                if raw_s is not None:
+                    samps.append((x, y, bitval, row["NVLED_V"], row["TIME_START"], raw_s))
+                rows.append(row)
+                i_last = abs(row["NVLED_CURR_MEAN"])
+                # Dead-pixel abort, judged at the FIRST bias only -- which under
+                # high_to_low is the brightest, exactly as in pixel_major. Here it
+                # drops the pixel from every remaining bias, so one judgement saves
+                # n_points measurements instead of n_points-1.
+                if cfg.dead_abort and jpt == 0 and abs(row["PM400_POWER_MEAN"]) < \
+                        max(cfg.dead_abort_nw * 1e-9,
+                            cfg.dead_abort_frac * float(np.median(
+                                [abs(r["PM400_POWER_MEAN"]) for r in rows]))):
+                    dead_here.append((x, y))
+            for px in dead_here:
+                live.remove(px)
+                n_dead += 1
+            if dead_here:
+                log(f"      dead-skip: {len(dead_here)} pixel(s) below the live floor at "
+                    f"the brightest bias - dropped from the remaining {len(fine) - 1} points")
+
+            # One dark reading per bias, with the frame blanked. pixel_major takes one
+            # per pixel at whatever bias it stopped on; per bias is both cheaper and a
+            # better match to what the analysis subtracts.
+            smile.blank_frame()
+            time.sleep(max(cfg.settle_ms, 5.0) / 1000.0)
+            dp, _, div, _, dinv, _, _, _ = acquire_point(pm, smu, cfg.coarse_n_smu, 3)
+            dark = dict(X=live[0][0] if live else first["X"],
+                        Y=live[0][1] if live else first["Y"],
+                        BITVAL=bitval, NVLED_V=round(float(v), 4),
+                        TIME=time.perf_counter() - t0, P=dp, Iv=div, Inv=dinv)
+            writer.submit(rows, dark, samps)
+            n_rows += len(rows)
+    smile.blank_frame()
+    if n_dead:
+        log(f"  dead-skipped {n_dead}/{len(selected)} selected pixels (fast-scan false-alive)")
+    return n_rows
+
+
 def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                       cfg: IQEConfig, log: Logger) -> int:
     """Voltage-source adaptive sweep. Single bitval, low-J-weighted spacing, and
@@ -1100,16 +1335,42 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
             cfg.vramp_low_frac and cfg.vramp_knee_v is not None) else cfg.n_fine // 2
         n_high = max(0, cfg.n_fine - n_low)
         ref_s = 2 * cfg.leak_ref_settle_s if cfg.leak_reference else 0
-        est = len(selected) * (n_low * (cfg.vramp_lowv_settle_s + ref_s)
-                               + n_high * (cfg.vramp_highv_settle_s + ref_s)) * cfg.settle_scale
-        per = est / max(1, len(selected))
-        log(f"  settle time alone: ~{est/3600:.1f} h for {len(selected)} pixels "
-            f"({per/60:.1f} min/pixel = {n_low}x{cfg.vramp_lowv_settle_s:g}s rising + "
-            f"{n_high}x{cfg.vramp_highv_settle_s:g}s droop + {ref_s:g}s reference each).")
+        npx = max(1, len(selected))
+        dwell_all = n_low * cfg.vramp_lowv_settle_s + n_high * cfg.vramp_highv_settle_s
+        if cfg.sweep_order == "bias_major":
+            # The dwell is paid ONCE per bias for every pixel; what scales with pixels
+            # is the frame switch and the reference. Reporting the pixel_major budget
+            # here would overstate a 100-pixel run by more than an order of magnitude.
+            # one reference settle per point here, not two: see measure_point(restore=)
+            ref_bm = cfg.leak_ref_settle_s if cfg.leak_reference else 0
+            est = (dwell_all + npx * cfg.n_fine * (cfg.pixel_switch_settle_s + ref_bm)) \
+                * cfg.settle_scale
+            log(f"  settle time alone: ~{est/3600:.1f} h for {len(selected)} pixels "
+                f"(BIAS-MAJOR: {dwell_all:g}s of dwell ONCE for all of them "
+                f"[{n_low}x{cfg.vramp_lowv_settle_s:g}s rising + "
+                f"{n_high}x{cfg.vramp_highv_settle_s:g}s droop], then "
+                f"{cfg.pixel_switch_settle_s:g}s switch + {ref_bm:g}s reference per point).")
+            px_major = npx * (n_low * (cfg.vramp_lowv_settle_s + ref_s)
+                              + n_high * (cfg.vramp_highv_settle_s + ref_s)) * cfg.settle_scale
+            if px_major > est > 0:
+                log(f"  pixel-major would be ~{px_major/3600:.1f} h "
+                    f"({px_major/est:.0f}x) for the same points.")
+        else:
+            est = npx * (n_low * (cfg.vramp_lowv_settle_s + ref_s)
+                         + n_high * (cfg.vramp_highv_settle_s + ref_s)) * cfg.settle_scale
+            per = est / npx
+            log(f"  settle time alone: ~{est/3600:.1f} h for {len(selected)} pixels "
+                f"({per/60:.1f} min/pixel = {n_low}x{cfg.vramp_lowv_settle_s:g}s rising + "
+                f"{n_high}x{cfg.vramp_highv_settle_s:g}s droop + {ref_s:g}s reference each).")
         if est > 6 * 3600:
-            log(f"  !! that is {est/3600:.0f} hours. To cut it: fewer pixels "
-                f"(--set max_sweep_pixels=N), fewer points (--set n_fine=N), or a looser "
-                f"settle target (--set calibrate_target=0.03) re-measured with --calibrate.")
+            log(f"  !! that is {est/3600:.0f} hours. To cut it: "
+                + ("fewer pixels (--set max_sweep_pixels=N), fewer points "
+                   "(--set n_fine=N), or a looser settle target "
+                   "(--set calibrate_target=0.03) re-measured with --calibrate."
+                   if cfg.sweep_order == "bias_major" else
+                   "--set sweep_order=bias_major, which pays each dwell once for all "
+                   "pixels instead of once per pixel, or fewer pixels "
+                   "(--set max_sweep_pixels=N), or fewer points (--set n_fine=N)."))
     else:
         log(f"VOLTAGE SWEEP — {len(selected)} pixels × bitvals {list(cfg.bitvals)}, {cfg.sweep_direction}, "
             f"current-targeted (w={cfg.lowj_weight}); adaptive low-J NPLC {cfg.lowj_nplc}, high-J {cfg.highj_nplc}; "
@@ -1136,6 +1397,10 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
     n_dead = 0
     t0 = time.perf_counter()
     try:
+      if cfg.sweep_order == "bias_major":
+        # Shares the writer, the trace list and the finally below; only the walk differs.
+        return _sweep_bias_major(pm, smu, smile, selected, writer, settle_traces,
+                                 cfg, log, t0)
       for i, r in enumerate(selected, 1):
         x, y = r["X"], r["Y"]
         if (int(x), int(y)) in skip:
@@ -1224,67 +1489,15 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                             (f"{x}_{y}_b{bitval}_v{v:+.4f}", *tr))
                 else:
                     time.sleep(dwell)
-                raw_s = None
-                if cfg.perpoint_range:
-                    # range from the ACTUAL current (probe-then-measure), not the coarse map
-                    p, ps, iv, ivs, inv, invs, _, _ = acquire_autoranged(pm, smu, n_smu, n_pm, cfg)
-                else:
-                    if not cfg.highc_b and cfg.nvled_range_i != cur_range:
-                        # In High-C the limit governs the range — writing it here is the
-                        # conflict that made earlier High-C runs fail. Leave it alone.
-                        set_measure_range_b(smu, cfg.nvled_range_i); cur_range = cfg.nvled_range_i
-                    if cfg.save_raw_samples:
-                        (p, ps, iv, ivs, inv, invs, _, _), raw_s = acquire_point(
-                            pm, smu, n_smu, n_pm, return_raw=True)
-                    else:
-                        p, ps, iv, ivs, inv, invs, _, _ = acquire_point(pm, smu, n_smu, n_pm)
-                # Leakage reference: the SAME pixel at bitval 0. Measured back to back with
-                # the lit point so both carry the same relaxation history and the
-                # subtraction cancels most of it. At -0.80 V this is 58% of the reading.
-                ref = None
-                if cfg.leak_reference:
-                    smile.set_pixel(x, y, cfg.leak_ref_bitval)
-                    time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
-                    # FULL n_pm, not a quarter of it. The reference current is stable to
-                    # ~0.2 nA and needs almost no averaging, but the reference POWER is the
-                    # dark level being subtracted from a ~250 pW signal, so at the dim end
-                    # it is the dominant error. Run 261014-0035 with n_pm//4: the reference
-                    # SEM was 30 pW against the lit reading's 14 pW -- the term that mattered
-                    # most was averaged the least.
-                    ref = acquire_point(pm, smu, n_smu, n_pm)
-                    smile.set_pixel(x, y, bitval)
-                    time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
-                vr = round(float(v), 4)
-                row = dict(X=x, Y=y, BITVAL=bitval, NVLED_V=vr,
-                           TIME_START=time.perf_counter() - t0, TIME_END=time.perf_counter() - t0,
-                           NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
-                           VLED_CURR_MEAN=iv, VLED_CURR_STD=ivs,
-                           PM400_POWER_MEAN=p, PM400_POWER_STD=ps)
-                if ref is not None:
-                    rp, rps, riv, _, rinv, rinvs, _, _ = ref
-                    row.update(NVLED_CURR_REF=rinv, NVLED_CURR_REF_STD=rinvs,
-                               VLED_CURR_REF=riv, PM400_POWER_REF=rp,
-                               PM400_POWER_REF_STD=rps, LEAK_REF_BITVAL=cfg.leak_ref_bitval)
+                if not cfg.perpoint_range and not cfg.highc_b and cfg.nvled_range_i != cur_range:
+                    # In High-C the limit governs the range — writing it here is the
+                    # conflict that made earlier High-C runs fail. Leave it alone.
+                    set_measure_range_b(smu, cfg.nvled_range_i); cur_range = cfg.nvled_range_i
+                row, raw_s = measure_point(pm, smu, smile, x, y, bitval, v, limit,
+                                           n_pm, n_smu, cfg, t0, log)
+                p, inv = row["PM400_POWER_MEAN"], row["NVLED_CURR_MEAN"]
                 if raw_s is not None:
-                    # honest per-burst stats. _MEAN = true mean, _MEDIAN = median, _SAMPSTD =
-                    # population std, _STD = SEM (σ/√N) — kept as _STD because that is the column
-                    # analyze_array reads for its reliability gate; analyze prefers _MEDIAN as the value.
-                    sn = burst_stats(raw_s["nvled"]); sv = burst_stats(raw_s["vled"]); sp = burst_stats(raw_s["pm"])
-                    row.update(NVLED_CURR_MEAN=sn["mean"], NVLED_CURR_STD=sn["sem"],
-                               NVLED_CURR_MEDIAN=sn["median"], NVLED_CURR_SAMPSTD=sn["std"], NVLED_CURR_N=sn["n"],
-                               VLED_CURR_MEAN=sv["mean"], VLED_CURR_STD=sv["sem"],
-                               VLED_CURR_MEDIAN=sv["median"], VLED_CURR_SAMPSTD=sv["std"],
-                               PM400_POWER_MEAN=sp["mean"], PM400_POWER_STD=sp["sem"],
-                               PM400_POWER_MEDIAN=sp["median"], PM400_POWER_SAMPSTD=sp["std"])
-                    psamps.append((x, y, bitval, vr, row["TIME_START"], raw_s))
-                # A point sitting on the limit is not a measurement. Flag it in the file
-                # and in the log rather than letting it reach the fit as a real current.
-                row["NVLED_LIMIT_A"] = limit
-                at_limit = bool(limit) and abs(inv) >= 0.995 * limit
-                row["NVLED_AT_COMPLIANCE"] = at_limit
-                if at_limit:
-                    log(f"      AT COMPLIANCE at {v:+.3f} V: |I|={abs(inv):.6g} A is the "
-                        f"{limit:g} A limit, not the device. Point is flagged, not usable.")
+                    psamps.append((x, y, bitval, row["NVLED_V"], row["TIME_START"], raw_s))
                 i_last = abs(inv)
                 prows.append(row); sw_rows.append(row)
                 last_v = v

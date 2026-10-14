@@ -379,6 +379,37 @@ class IQEConfig:
                                # --simulate sets it to 0 so a dry run is seconds, not
                                # 15 minutes. Lower it on real hardware only to measure what
                                # the shortcut costs -- it costs the rising side.
+    sweep_order: str = "pixel_major"   # "pixel_major" | "bias_major"
+    # WHICH LOOP IS OUTSIDE. This is the single biggest lever on run time.
+    #
+    #   pixel_major  for pixel: for bias: settle, measure      <- the original
+    #   bias_major   for bias:  settle once; for pixel: measure
+    #
+    # The dwell is paid for the BIAS change, not the pixel change: the array carries one
+    # global 42.8 uF charged by the common cathode, and the frame only selects which
+    # row/column is driven. Measured directly (run 261014-2151, --what switch): holding
+    # a bias for 300 s and then blanking the frame and lighting a different pixel moves
+    # the reading by -0.28% at -1.00 V and -0.87% at -0.85 V, both gone inside a second,
+    # and by less than the noise at -0.80 V. Against that, pixel_major's 54 s dwell
+    # still leaves ~3.8% at the faintest point (run 261014-1501, 600 s asymptote).
+    #
+    # So bias_major is both FASTER and MORE ACCURATE at the faint end. For 100 pixels x
+    # 16 points the dwell total goes from 15.4 h to 553 s.
+    #
+    # What it costs:
+    #   * the fine voltage list is built ONCE, from the first live pixel, instead of per
+    #     pixel. Fine for a voltage ramp (the biases are fixed); not supported for
+    #     fine_sweep_mode="current", where each pixel needs its own targets.
+    #   * an interrupted run leaves every pixel partially swept instead of some pixels
+    #     fully swept, so --resume skips completed BIASES, not completed pixels.
+    #   * the per-pixel conditioning dwell is gone. With sweep_direction=high_to_low the
+    #     first bias visited IS the brightest, so every pixel is conditioned there anyway.
+    pixel_switch_settle_s: float = 2.0  # bias_major: the wait after a frame change,
+                                       # before measuring the next pixel at a held bias.
+                                       # Measured need is <1 s (above); 2 s is the
+                                       # comfortable default. This is the ONLY per-point
+                                       # wait in bias_major, so it sets the run time:
+                                       # n_pixels x n_points x this.
     vramp_perseg_effort: bool = True
     vramp_lowv_nplc: float = 2.0  # integer NPLC, so the mains line is nulled by integration
     vramp_lowv_n_pm: int = 32
@@ -481,9 +512,19 @@ class IQEConfig:
         if self.n_fine < 2 or self.n_coarse < 2:
             raise ValueError("n_fine and n_coarse must be >= 2")
         for name in ("vramp_lowv_settle_s", "vramp_highv_settle_s", "leak_ref_settle_s",
-                     "settle_scale"):
+                     "settle_scale", "pixel_switch_settle_s"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0")
+        if self.sweep_order not in ("pixel_major", "bias_major"):
+            raise ValueError(f"sweep_order={self.sweep_order!r} must be 'pixel_major' "
+                             f"or 'bias_major'")
+        if self.sweep_order == "bias_major" and self.fine_sweep_mode != "voltage":
+            # Current mode picks each pixel's targets from that pixel's own coarse map,
+            # so there is no common grid to hold a "bias" at. Fail loudly rather than
+            # silently measuring one pixel's targets on every pixel.
+            raise ValueError("sweep_order='bias_major' needs fine_sweep_mode='voltage': "
+                             "in current mode every pixel has its own setpoints, so "
+                             "there is no shared bias to amortise.")
         if self.highc_b:
             # In High-C the LIMIT selects the measure range, so a limit too coarse for the
             # segment silently costs resolution rather than failing.
