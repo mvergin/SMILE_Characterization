@@ -500,6 +500,17 @@ def test_calibration_round_trips_and_is_validated():
         cfg = IQEConfig(**FAST, calibrate_seconds=1.5, calibrate_pixels=1)
         path = run_calibration(cfg, simulate=True, base_dir=tmp, log=QUIET)
         assert path.exists()
+        # the transients must be kept: they are the longest records the project has and
+        # the only data that can test whether the dwell may be extrapolated
+        npz = path.parent.parent / "calibration_traces.npz"
+        if not npz.exists():
+            npz = next(Path(tmp).rglob("calibration_traces.npz"))
+        import numpy as _np
+        with _np.load(npz) as d:
+            assert len(d.files) >= 3, f"only {len(d.files)} transients kept"
+            for k in d.files:
+                t, i = d[k]
+                assert t.size >= 2 and _np.isfinite(i).all()
         rec = load_calibration(path)
         assert rec, "calibration recommended nothing"
         fields = {f.name for f in dataclasses.fields(IQEConfig)}
@@ -545,7 +556,10 @@ def test_settle_time_criterion():
     t = np.linspace(0, 20, 2000)
     assert 3 < settle_time(t, 1e-7 * (1 - np.exp(-t / 1.0)), 0.01) < 7
     assert math.isnan(settle_time(t, 1e-7 * (1 + 0.5 * (1 + t) ** -0.4), 0.01))
-    assert settle_time(t, np.full_like(t, 1e-7), 0.01) == 0.0
+    # an already-settled trace reports half a smoothing window, never 0: no measurement
+    # can resolve below the interval it smooths over
+    from measure_iqe.calibrate import SMOOTH_MAX_S
+    assert 0 < settle_time(t, np.full_like(t, 1e-7), 0.01) <= SMOOTH_MAX_S
 
 
 def test_resume_skips_finished_pixels_and_keeps_their_data():

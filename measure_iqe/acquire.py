@@ -1494,7 +1494,7 @@ def run_calibration(config: IQEConfig | None = None, *, simulate: bool = False,
         pixels = [(int(r["X"]), int(r["Y"])) for r in selected[:cfg.calibrate_pixels]]
         if not pixels:
             raise RuntimeError("no alive pixels found to calibrate on")
-        data = calibrate(pm, smu, smile, pixels, cfg, log)
+        data = calibrate(pm, smu, smile, pixels, cfg, log, out_dir=out_dir)
     finally:
         parked.__exit__(None, None, None)
     record, stable = write_calibration(out_dir, data)

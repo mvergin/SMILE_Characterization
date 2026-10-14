@@ -42,6 +42,10 @@ CALIBRATION_VERSION = 2
 # settled: it raises the worst case and marks the result a lower bound.
 RECORD_LIMITED_FRAC = 0.5
 
+# Longest smoothing window, in seconds. Caps the time resolution of a settle time so it
+# does not degrade with record length (see settle_time).
+SMOOTH_MAX_S = 2.0
+
 
 # ---------------------------------------------------------------------------
 # The settling criterion. One implementation, used by the calibration, quoted by
@@ -74,7 +78,14 @@ def settle_time(t, i, frac: float = 0.01) -> float:
     final = float(np.median(i[int(0.8 * i.size):]))
     if final == 0:
         return float("nan")
-    w = max(5, i.size // 20)
+    # Smooth over a fixed TIME, not a fixed fraction of the record. n//20 looks
+    # harmless until the record is long: a 600 s capture gave a 30 s window, so the
+    # first smoothed point sat 15 s in and "settled at t = 0" actually meant "settled
+    # by 15 s, we cannot see sooner". The droop side was recommended a 0.1 s dwell on
+    # that basis. The 5 sigma / sqrt(w) term in the tolerance already adapts to the
+    # smaller window, so capping costs noise rejection only where it was free.
+    dt = float(np.median(np.diff(t))) or 1e-3
+    w = int(np.clip(i.size // 20, 5, max(5, round(SMOOTH_MAX_S / dt))))
     smooth = np.convolve(i, np.ones(w) / w, mode="valid")
     ts = t[w - 1:]
     noise = float(np.std(np.diff(i[int(0.8 * i.size):]))) / np.sqrt(2)
@@ -84,7 +95,9 @@ def settle_time(t, i, frac: float = 0.01) -> float:
         return float("nan")              # the tail is still moving: not settled at all
     bad = np.nonzero(np.abs(smooth - final) > tol)[0]
     if bad.size == 0:
-        return 0.0                       # settled before the first smoothed sample
+        # In band at the first point we can resolve -- which is half a smoothing window
+        # in, not zero. Report that bound rather than a zero the data cannot support.
+        return float(ts[0]) / 2.0
     if bad[-1] + 1 >= smooth.size:
         return float("nan")              # still outside the band at the end
     answer = float(ts[bad[-1]])
@@ -128,8 +141,12 @@ def _ladder(lo: float, hi: float) -> list[float]:
 
 
 def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
-              log: Logger) -> dict[str, Any]:
-    """Measure the settling behaviour of this array. Returns the calibration dict."""
+              log: Logger, out_dir: str | Path | None = None) -> dict[str, Any]:
+    """Measure the settling behaviour of this array. Returns the calibration dict.
+
+    When `out_dir` is given, the raw I(t) of every capture is written beside it as
+    `calibration_traces.npz`.
+    """
     from .acquire import configure_voltage_source_b, pick_limit, set_nplc
 
     # Three biases spanning the sweep: the start, the density knee, the faint end.
@@ -146,6 +163,7 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
         f"approached by {cfg.calibrate_approach_steps} such step(s)")
 
     rows: list[dict[str, Any]] = []
+    traces: dict[str, np.ndarray] = {}
     for (x, y) in pixels:
         smile.blank_frame()
         smile.set_pixel(x, y, cfg.bitvals[0])
@@ -187,6 +205,12 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
             set_nplc(smu, cfg.vramp_lowv_nplc if v > knee else cfg.vramp_highv_nplc)
             t, i = settle_curve(pm, smu, cfg, v, cfg.calibrate_seconds,
                                 cfg.calibrate_period_s)
+            # KEEP the trace. These are the longest and cleanest transients the project
+            # has: cal3 polled three 600 s captures and discarded all three, which are
+            # exactly the records needed to test whether the settled value can be
+            # extrapolated from the first seconds.
+            traces[f"{x}_{y}_v{v:+.4f}"] = np.vstack(
+                [t.astype(np.float32), i.astype(np.float32)])
             prev_i = float(np.median(i[int(0.8 * i.size):])) if i.size else None
             r = dict(pixel_x=x, pixel_y=y, v_to=v, limit_a=limit,
                      settled_a=prev_i, step_v=round(seg_step, 5),
@@ -264,6 +288,12 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
         log(f"     Re-run with --set calibrate_seconds={max(300, 3 * cfg.calibrate_seconds):g} "
             f"to get a real number. The sweep will work with this value, but the low-J "
             f"points carry more unrelaxed tail than the margin assumes.")
+    if out_dir is not None and traces:
+        npz = Path(out_dir) / "calibration_traces.npz"
+        np.savez_compressed(npz, **traces)
+        out["traces_file"] = npz.name
+        log(f"  wrote {npz} ({len(traces)} transients, "
+            f"{npz.stat().st_size/1e6:.1f} MB)")
     log(f"  recommended: " + ", ".join(f"{k}={v}" for k, v in rec.items()))
     return out
 
@@ -340,23 +370,37 @@ def demo() -> None:
     i = 100e-9 * (1 + 0.5 * (1 + t) ** -0.4)
     assert np.isnan(settle_time(t, i, 0.01)), settle_time(t, i, 0.01)
 
-    # already settled: flat plus noise -> 0.0, not NaN
+    # already settled: flat plus noise -> half a smoothing window, never NaN, and
+    # never 0.0, because no measurement can resolve below what it smooths over
     i = 100e-9 + np.random.default_rng(0).normal(0, 1e-12, t.size)
-    assert settle_time(t, i, 0.01) == 0.0
+    assert 0 < settle_time(t, i, 0.01) <= SMOOTH_MAX_S, settle_time(t, i, 0.01)
 
     # noise-aware: a 1% band on a tiny current would be set by noise alone, so a
     # trace that is flat-but-noisy must still count as settled
     i = 1e-9 + np.random.default_rng(1).normal(0, 5e-10, t.size)
-    assert settle_time(i=i, t=t, frac=0.01) == 0.0
+    assert 0 < settle_time(i=i, t=t, frac=0.01) <= SMOOTH_MAX_S
 
-    # last-time-outside: a trace that dips back out at 10 s reports ~10 s, not ~1 s
+    # the resolution must NOT degrade with record length: the same fast settle on a
+    # 600 s record must still report ~seconds, not "0" meaning "sooner than 15 s"
+    tl = np.linspace(0, 600, 1835)
+    il = 100e-9 * (1 - np.exp(-tl / 0.5))
+    assert settle_time(tl, il, 0.03) <= 4.0, settle_time(tl, il, 0.03)
+
+    # last-time-outside: a trace that dips back out at 5 s reports ~5 s, not ~1 s.
+    # (Kept well inside half the record, or the record-limited guard fires instead --
+    # which it should: an answer at 10 s of a 20 s record is not a measurement.)
+    i = 100e-9 * (1 - np.exp(-t / 0.2))
+    i[(t > 4) & (t < 5)] *= 1.05
+    ts = settle_time(t, i, 0.01)
+    assert 4 < ts < 6.5, ts
+
+    # the record-limited guard: the same trace dipping out at 10 s of a 20 s record
     i = 100e-9 * (1 - np.exp(-t / 0.2))
     i[(t > 9) & (t < 10)] *= 1.05
-    ts = settle_time(t, i, 0.01)
-    assert 9 < ts < 11, ts
+    assert np.isnan(settle_time(t, i, 0.01))
 
     print("ok  calibrate.settle_time: settles / never settles / already settled / "
-          "noise-aware / last-time-outside")
+          "noise-aware / last-time-outside / resolution independent of record length")
 
 
 if __name__ == "__main__":
