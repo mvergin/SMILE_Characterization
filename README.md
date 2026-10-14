@@ -844,15 +844,29 @@ unattended: calibrate, transients on one pixel, the sweep with the old method, t
 sweep with the new one. ~2-4 h depending on the calibrated dwell.
 
 ```powershell
-.
-un_comparison_demo.ps1 -Simulate              # dry run, no hardware, ~2 min
-.
-un_comparison_demo.ps1 -Array Array42_IQE -Pixel "35,36"
+.\run_comparison_demo.ps1 -Simulate              # dry run, no hardware, ~2 min
+.\run_comparison_demo.ps1 -Array Array42_IQE -Pixel "35,36"
+.\run_comparison_demo.ps1 -Array Array42_IQE -Pixel "35,36" -SkipCalibration
 ```
+
+The third form reuses `calibrations\<Array>.yaml` instead of measuring a new one.
+Use it whenever you have just run `--calibrate` by hand, because stage 1 would
+otherwise overwrite your result. It refuses to start if no calibration exists.
+
+| parameter | default | what it controls |
+|---|---|---|
+| `-Points` | 16 | sweep points per pixel, both methods, so the voltages match |
+| `-BlockSize` / `-PerBlock` | 8 / 1 | pixel count: (ROI/BlockSize)^2 x PerBlock, so 16 on a 32x32 ROI |
+| `-CalSeconds` | 600 | calibration window. Shorter and the answer is the window, not the device |
+| `-CalTarget` | 0.05 | settle target. The dwell scales as target^-0.8, so 5% is ~3.7x faster than 1% |
+| `-CalPixels` | 1 | pixels to calibrate on |
+| `-Repeats` | 3 | repeats of one pixel per method, for the run-to-run error bar |
+
+The banner prints the resulting pixel and point count before anything starts.
 
 It deliberately does **not** analyse. Analysis needs no hardware, can be repeated and
 re-tuned, and a failing figure must never cost bench time. Instead it writes
-`<Out>nalyse.ps1` with the run directories already filled in -- run that afterwards.
+`<Out>\analyse.ps1` with the run directories already filled in -- run that afterwards.
 
 ### Configuration files
 

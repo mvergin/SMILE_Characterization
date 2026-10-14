@@ -26,6 +26,12 @@
 
 .EXAMPLE
     .\run_comparison_demo.ps1 -Array Array42_IQE -Pixel "35,36"
+
+.EXAMPLE
+    .\run_comparison_demo.ps1 -Array Array42_IQE -Pixel "35,36" -SkipCalibration
+    Use the calibration already in calibrations\<Array>.yaml instead of measuring
+    a new one. Do this when you have just run --calibrate by hand with settings of
+    your own: stage 1 would otherwise overwrite it.
 #>
 [CmdletBinding()]
 param(
@@ -33,7 +39,13 @@ param(
     [string]$Pixel      = "35,36",
     [string]$Roi        = "[32,32,63,63]",
     [string]$Out        = "demo",
-    [double]$CalSeconds = 120,
+    [double]$CalSeconds = 600,
+    [double]$CalTarget  = 0.05,
+    [int]$CalPixels     = 1,
+    [switch]$SkipCalibration,
+    [int]$Points        = 16,
+    [int]$BlockSize     = 8,
+    [int]$PerBlock      = 1,
     [int]$Repeats      = 3,
     [string]$AnalysisRepo = "C:\_D\programs\SMILE_IQE_Analysis",
     [switch]$Simulate
@@ -85,13 +97,27 @@ Write-Host "array      : $Array"
 Write-Host "pixel      : $Pixel"
 Write-Host "ROI        : $Roi"
 Write-Host "output     : $outRoot"
+$roiNums = $Roi.Trim("[","]") -split ","
+$side = [Math]::Abs([int]$roiNums[2] - [int]$roiNums[0]) + 1
+$nPx  = [Math]::Pow([Math]::Floor($side / $BlockSize), 2) * $PerBlock
+Write-Host ("sweep      : {0:n0} pixels ({1}x{1} ROI, {2}px blocks, {3}/block) x {4} points" -f `
+            $nPx, $side, $BlockSize, $PerBlock, $Points)
+if ($SkipCalibration) { Write-Host "calibration: reusing calibrations\$Array.yaml" }
+else { Write-Host ("calibration: {0}s window, {1:p0} target, {2} pixel(s)" -f $CalSeconds, $CalTarget, $CalPixels) }
 if ($Simulate) { Write-Host "MODE       : SIMULATE (no hardware)" }
 
 # ---------------------------------------------------------------- 1. calibrate
 $calDir = Join-Path $outRoot "cal"
-Run-Measure "1/4  CALIBRATE $Array  (~18 min)" (@(
-    "--calibrate", "--array", $Array, "--out", $calDir,
-    "--set", "calibrate_seconds=$CalSeconds") + $sim)
+if ($SkipCalibration) {
+    Say "1/4  CALIBRATE - SKIPPED, using the calibration already on disk"
+} else {
+    Run-Measure ("1/4  CALIBRATE {0}  (~{1:n0} min)" -f $Array,
+                 ($CalPixels * 3 * ($CalSeconds + 15) / 60)) (@(
+        "--calibrate", "--array", $Array, "--out", $calDir,
+        "--set", "calibrate_seconds=$CalSeconds",
+        "--set", "calibrate_target=$CalTarget",
+        "--set", "calibrate_pixels=$CalPixels") + $sim)
+}
 
 $calFile = Join-Path $root "calibrations\$Array.yaml"
 if (Test-Path $calFile) {
@@ -110,6 +136,10 @@ if (Test-Path $calFile) {
                        "The demo still runs and the comparison is still valid - the new run's low-J " +
                        "points just carry more unrelaxed tail. Re-run with -CalSeconds 300 for a real number.")
     }
+} elseif ($SkipCalibration) {
+    Stop-Transcript | Out-Null
+    throw ("-SkipCalibration was given but there is no calibration at $calFile. " +
+           "Run --calibrate --array $Array first, or drop -SkipCalibration.")
 } else {
     Write-Warning "no calibration at $calFile - the sweep will use the defaults"
 }
@@ -138,14 +168,17 @@ $tranRun = Newest $tranDir
 $oldDir = Join-Path $outRoot "old"
 Run-Measure "3/4  SWEEP, OLD METHOD  (~16 min)" (@(
     "--config", "configs\legacy_pre261014.yaml",
-    "--set", "sample_name=$Array", "--set", "roi=$Roi", "--set", "n_fine=30",
+    "--set", "sample_name=$Array", "--set", "roi=$Roi", "--set", "n_fine=$Points",
+    "--set", "block_size=$BlockSize", "--set", "pixels_per_block=$PerBlock",
     "--out", $oldDir) + $sim)
 $oldRun = Newest $oldDir
 
 # ------------------------------------------------------------- 4. new method
 $newDir = Join-Path $outRoot "new"
-Run-Measure "4/4  SWEEP, NEW METHOD  (1-3 h)" (@(
-    "--array", $Array, "--set", "roi=$Roi", "--out", $newDir) + $sim)
+Run-Measure "4/4  SWEEP, NEW METHOD" (@(
+    "--array", $Array, "--set", "roi=$Roi", "--set", "n_fine=$Points",
+    "--set", "block_size=$BlockSize", "--set", "pixels_per_block=$PerBlock",
+    "--out", $newDir) + $sim)
 $newRun = Newest $newDir
 
 # ------------------------------------------------------- 5. repeatability
@@ -160,14 +193,15 @@ if ($Repeats -gt 0) {
         $d = Join-Path $outRoot ("repeat\old_{0}" -f $i)
         Run-Measure ("5/5  REPEAT {0}/{1}, OLD METHOD, pixel {2}" -f $i, $Repeats, $Pixel) (@(
             "--config", "configs\legacy_pre261014.yaml",
-            "--set", "sample_name=$Array", "--set", "roi=$pxRoi", "--set", "n_fine=30",
+            "--set", "sample_name=$Array", "--set", "roi=$pxRoi", "--set", "n_fine=$Points",
             "--out", $d) + $sim)
         $r = Newest $d
         if ($r) { $repOld += $r }
 
         $d = Join-Path $outRoot ("repeat\new_{0}" -f $i)
         Run-Measure ("5/5  REPEAT {0}/{1}, NEW METHOD, pixel {2}" -f $i, $Repeats, $Pixel) (@(
-            "--array", $Array, "--set", "roi=$pxRoi", "--out", $d) + $sim)
+            "--array", $Array, "--set", "roi=$pxRoi", "--set", "n_fine=$Points",
+            "--out", $d) + $sim)
         $r = Newest $d
         if ($r) { $repNew += $r }
     }
