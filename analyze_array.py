@@ -87,7 +87,15 @@ LEAKAGE_MAX = 0.50  # DIAGNOSTIC ONLY (not a rejection gate): the value on
 # the leakage plot above which |Iv+Inv|/max(|Iv|,|Inv|)
 # is flagged. VLED legitimately carries other paths, so
 # divergence from NVLED is expected — never rejected on.
-NOISE_FLOOR_A = 1e-6  # hard floor on |I_NVLED| (~1 µA). The sweep runs on a FIXED
+REF_SUSPECT_FACTOR = 3.0  # a leakage reference this far above its NEIGHBOURS in the
+                          # same sweep was not taken at bitval 0; see enrich()
+NOISE_FLOOR_REF_A = 1e-8  # floor for a run that carries the leakage reference. With High-C
+                          # the limit picks the range, so there is no fixed-range offset to
+                          # hide under, and the measured SEM at 166 nA is 0.16% (run
+                          # 261014-0048). The rel-std and optical-SNR gates below do the
+                          # real work; this only rejects the obviously absent.
+NOISE_FLOOR_A = 1e-6  # hard floor on |I_NVLED| (~1 µA) for runs WITHOUT the reference.
+# The old sweep ran on a FIXED
 # 10 mA range, whose systematic offset is ~range×1e-4 ≈ 1 µA.
 # Below ~1 µA the current read is offset-contaminated — and the
 # offset is REPEATABLE, so its rel-std is small (5–9%) and the
@@ -659,13 +667,43 @@ def enrich(df, dark_W=0.0):
     # carry other paths, so |Iv| > |Inv| is expected, not a fault. LEAKAGE is computed
     # and plotted purely as a diagnostic — the LED current is ch B regardless. (The
     # noise-floor + scatter gates already drop genuinely bad NVLED readings.)
-    reliable = df["I_LED"] >= NOISE_FLOOR_A
+    # The 1 uA floor exists because the OLD sweep ran on a fixed 10 mA range whose
+    # repeatable ~1 uA offset the rel-std gate is blind to. A run with the leakage
+    # reference has neither problem -- it runs in High-C, where the limit picks the
+    # range -- and that floor would throw away the entire J < 1 region this whole
+    # investigation was about (run 261014-0048 reaches J = 0.17).
+    floor = NOISE_FLOOR_REF_A if "NVLED_CURR_REF" in df.columns else NOISE_FLOOR_A
+    reliable = df["I_LED"] >= floor
     # A point that sat on the compliance limit is not a measurement of the device -- the
     # current is the instrument's. Run 261014-0007 had 8 such points in a row reading
     # exactly 10000.4 nA, which would otherwise have entered the fit as a plateau.
     if "NVLED_AT_COMPLIANCE" in df.columns:
         clamped = df["NVLED_AT_COMPLIANCE"].astype(str).str.lower().isin(("true", "1"))
         reliable &= ~clamped
+    # A reference reading that jumps far above the rest of that pixel's sweep did not
+    # measure the pixel at bitval 0 -- the drive had not actually come off yet, or the
+    # frame write did not take. Run 261014-0048 had exactly one such point in 720:
+    # pixel 56,51 at -1.300 V read 18535 nA where its other 29 points read ~227 nA, so
+    # I_LED came out 7x low. Compared against the pixel's OWN median rather than the
+    # per-bias median, because a pixel with a stuck-on neighbour has a legitimately large
+    # reference at every bias and must not be thrown away -- the subtraction handles it.
+    if "I_NVLED_REF" in df.columns and {"X", "Y", "NVLED_V"}.issubset(df.columns):
+        # Compare against the NEIGHBOURING biases of the same pixel, not against the
+        # pixel's median and not against the other pixels:
+        #  * the reference drifts smoothly with bias (219 -> 235 nA), so neighbours are
+        #    the right baseline and a real outlier stands out by ~90x;
+        #  * the pixel's own median would flag the first point of every sweep, whose
+        #    reference is elevated by the warm-up relaxation but is still only 0.6% of
+        #    the reading;
+        #  * the per-bias median across pixels would flag every point of a pixel with a
+        #    stuck-on neighbour, whose reference is legitimately ~50% of lit at every
+        #    bias -- and there the subtraction works, recovering the single-pixel
+        #    current to 0.4% (pixel 33,32 in run 261014-0048).
+        o = df.sort_values(["X", "Y", "NVLED_V"])
+        local = (o.groupby(["X", "Y"])["I_NVLED_REF"]
+                  .transform(lambda v: v.rolling(5, center=True, min_periods=2).median()))
+        df["REF_SUSPECT"] = (o["I_NVLED_REF"] > REF_SUSPECT_FACTOR * local).reindex(df.index)
+        reliable &= ~df["REF_SUSPECT"].fillna(False)
     if "NVLED_CURR_STD" in df.columns:
         relstd = df["NVLED_CURR_STD"].astype(float) / df["I_NVLED"].replace(0, np.nan)
         reliable &= relstd.fillna(np.inf) <= NVLED_RELSTD_MAX
@@ -1952,22 +1990,37 @@ def write_report(
 
     A("## 1. What was measured\n")
     roi = (cfg.get("roi_x1"), cfg.get("roi_y1"), cfg.get("roi_x2"), cfg.get("roi_y2"))
-    A(f"- **Sample:** {cfg.get('sample_name', run_dir.name)} (Array38)")
-    A(
-        f"- **VLED (ch A):** {cfg.get('vled_voltage')} V fixed, "
-        f"compliance {cfg.get('vled_compliance')} A, NPLC {cfg.get('vled_nplc')}, "
-        f"I-range {cfg.get('vled_range_i')} A"
-    )
-    A(
-        f"- **NVLED (ch B):** fast-scan bias {cfg.get('nvled_voltage')} V → "
-        f"sweep target {cfg.get('nvled_sweep_target')} V, NPLC {cfg.get('nvled_nplc')}, "
-        f"I-range {cfg.get('nvled_range_i')} A"
-    )
-    A(
-        f"- **Mode:** {cfg.get('measurement_mode')}, settle {cfg.get('nvled_settle_ms')} ms, "
-        f"PM wavelength {cfg.get('pm_wavelength')} nm, PM range {cfg.get('pm_range')} W"
-    )
-    A(f"- **Bit values:** {cfg.get('bit_values')}\n")
+    # Key names follow IQEConfig. The previous block read pre-refactor names
+    # (vled_nplc, nvled_voltage, measurement_mode, bit_values, ...) and so printed
+    # "None" for almost every setting -- a report that silently misstates what was run.
+    def g(key, default="?"):
+        v = cfg.get(key, default)
+        return default if v is None else v
+
+    A(f"- **Sample:** {g('sample_name', run_dir.name)}, ROI {g('roi')}")
+    A(f"- **VLED (ch A):** {g('vled_voltage')} V fixed, "
+      f"compliance {g('vled_compliance')} A, I-range {g('vled_range_i')} A")
+    A(f"- **NVLED (ch B):** fast scan at {g('nvled_v_fastscan')} V; sweep "
+      f"{g('nvled_v_coarse_start')} to {g('nvled_v_coarse_stop')} V in "
+      f"{g('n_fine')} points, {g('sweep_direction')}")
+    if cfg.get("highc_b"):
+        A(f"- **High-C on**, so the compliance picks the measure range: "
+          f"{g('vramp_lowv_limit_a')} A on the rising side, "
+          f"{g('vramp_highv_limit_a')} A on the droop side")
+    else:
+        A(f"- **High-C OFF**, fixed I-range {g('nvled_range_i')} A -- readings below "
+          f"~10 uA are range artifacts, not currents (see INVESTIGATION_REPORT.md section 1)")
+    A(f"- **Effort:** NPLC {g('vramp_lowv_nplc')}/{g('vramp_highv_nplc')} "
+      f"(rising/droop), settle {g('vramp_lowv_settle_s')}/{g('vramp_highv_settle_s')} s, "
+      f"PM averaging {g('vramp_lowv_n_pm')}/{g('vramp_highv_n_pm')}")
+    if cfg.get("leak_reference"):
+        A(f"- **Leakage reference on:** every point re-measured at bitval "
+          f"{g('leak_ref_bitval')}; I_LED = ch B minus reference")
+    else:
+        A("- **Leakage reference OFF** -- at low bias most of ch B is backplane leakage, "
+          "so the rising side of this run is not trustworthy")
+    A(f"- **Mode:** {g('fine_sweep_mode')} ramp, PM wavelength {g('pm_wavelength')} nm, "
+      f"PM range {g('pm_range')} W, bit values {g('bitvals')}\n")
 
     A("## 2. Fast scan — yield & classification\n")
     A(
@@ -2002,8 +2055,12 @@ def write_report(
     if fs_vs_sweep_ratio is not None:
         A(
             f"- **Fast-scan vs sweep cross-check** (at the shared NVLED bias): median power "
-            f"ratio **{fs_vs_sweep_ratio:.3f}** (1.00 = perfect) → the two acquisitions agree, "
-            f"so the data is reproducible."
+            f"ratio **{fs_vs_sweep_ratio:.3f}** (1.00 = perfect) → "
+            + ("the two acquisitions agree, so the data is reproducible."
+               if 0.8 <= fs_vs_sweep_ratio <= 1.25 else
+               "**they do NOT agree.** The fast scan and the sweep are not measuring the "
+               "same thing at the same bias, so treat the fast-scan efficiency map as "
+               "relative only.")
         )
     if fs_eff is not None:
         A(
@@ -2740,6 +2797,16 @@ def main():
     if not root.exists():
         print(f"ERROR: {root} not found")
         sys.exit(1)
+
+    # The Windows console is cp1252 and raises UnicodeEncodeError on the maths symbols
+    # this script prints. That crash was being caught by a surrounding try/except and
+    # reported as "skipped fast-scan peak-IQE map" -- the map had in fact been written,
+    # and it was the log line that failed. Make output lossy instead of fatal.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
     def log(m):
         print(m)
