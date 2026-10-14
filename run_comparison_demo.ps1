@@ -222,7 +222,10 @@ if ($oldRun -and $newRun) {
         "", "# WHAT it changes",
         "python analyze_array.py '$oldRun'",
         "python analyze_array.py '$newRun'",
-        "python compare_runs.py '$oldRun' '$newRun' --label-old 'old method' --label-new 'new method'")
+        "python compare_runs.py '$oldRun' '$newRun' --label-old 'old method' --label-new 'new method'",
+        "",
+        "# WHETHER the dwell could be shorter -- answered from the new run's own dwell traces",
+        "python eqe_settling.py '$newRun'")
 }
 if ($repOld.Count -gt 0 -or $repNew.Count -gt 0) {
     $lines += @("", "# HOW REPEATABLE each method is (the honest error bar)")
@@ -230,6 +233,14 @@ if ($repOld.Count -gt 0 -or $repNew.Count -gt 0) {
     foreach ($r in $repNew) { $lines += "python analyze_array.py '$r'" }
     for ($i = 0; $i -lt [Math]::Min($repOld.Count, $repNew.Count); $i++) {
         $lines += ("python compare_runs.py '{0}' '{1}' --label-old 'old repeat {2}' --label-new 'new repeat {2}'" -f $repOld[$i], $repNew[$i], ($i + 1))
+    }
+    # The one figure compare_runs cannot make: the spread WITHIN each method, which is
+    # the bar the between-method difference has to clear.
+    if ($repOld.Count -gt 1 -and $repNew.Count -gt 1) {
+        $lines += ("python plot_repeatability.py --old {0} --new {1} --out '{2}'" -f
+            (($repOld | ForEach-Object { "'$_'" }) -join " "),
+            (($repNew | ForEach-Object { "'$_'" }) -join " "),
+            (Join-Path $outRoot "repeat"))
     }
 }
 $lines | Set-Content -Path $analyse -Encoding utf8
