@@ -87,6 +87,21 @@ LEAKAGE_MAX = 0.50  # DIAGNOSTIC ONLY (not a rejection gate): the value on
 # the leakage plot above which |Iv+Inv|/max(|Iv|,|Inv|)
 # is flagged. VLED legitimately carries other paths, so
 # divergence from NVLED is expected — never rejected on.
+# A reference that carries most of the LIGHT means something was still emitting while
+# it was taken. Two very different things look like that, and only one is harmless:
+#
+#   * a stuck-on NEIGHBOUR -- run 261014-0048 pixel (33,32): P_REF/P = 0.46, and the
+#     subtraction works exactly as intended, recovering a net 160.7 nW against a cohort
+#     median of ~155 nW. The contaminant is removed and the pixel survives.
+#   * the measured pixel ITSELF still lit -- run 261014-2308 pixel (56,51): P_REF/P =
+#     0.88, and the subtraction removes the signal. Net 17 nW against the same ~150 nW
+#     cohort, and I_LED collapses to 1.5 nA from a true ~185 nA.
+#
+# The raw fraction cannot separate 0.46 from 0.88 without a threshold fitted to two
+# anecdotes. The NET power can: compared with the other pixels at the same bias, the
+# neighbour case is normal and the self-lit case is an order of magnitude low.
+REF_SWALLOWED_FRAC = 0.2   # net power below this fraction of the per-bias median...
+REF_POWER_SUSPECT = 0.1    # ...while the reference carried at least this much light
 REF_SUSPECT_FACTOR = 3.0  # a leakage reference this far above its NEIGHBOURS in the
                           # same sweep was not taken at bitval 0; see enrich()
 NOISE_FLOOR_REF_A = 1e-8  # floor for a run that carries the leakage reference. With High-C
@@ -704,6 +719,20 @@ def enrich(df, dark_W=0.0):
                   .transform(lambda v: v.rolling(5, center=True, min_periods=2).median()))
         df["REF_SUSPECT"] = (o["I_NVLED_REF"] > REF_SUSPECT_FACTOR * local).reindex(df.index)
         reliable &= ~df["REF_SUSPECT"].fillna(False)
+
+        # The reference swallowed the signal: see REF_SWALLOWED_FRAC above. Needs the
+        # optical reference, because the CURRENT alone cannot tell "the neighbour was
+        # subtracted off" from "the pixel was subtracted off" -- both leave I_REF a
+        # large fraction of I.
+        if "PM400_POWER_REF" in df.columns and "P_W" in df.columns:
+            lit = _val("PM400_POWER").astype(float)
+            refp = df["PM400_POWER_REF"].astype(float)
+            carried = (refp / lit.replace(0, np.nan)).fillna(0.0)
+            cohort = df.groupby(["BITVAL", "NVLED_V"])["P_W"].transform("median")
+            swallowed = ((carried > REF_POWER_SUSPECT)
+                         & (df["P_W"] < REF_SWALLOWED_FRAC * cohort))
+            df["REF_SWALLOWED"] = swallowed
+            reliable &= ~swallowed.fillna(False)
     if "NVLED_CURR_STD" in df.columns:
         relstd = df["NVLED_CURR_STD"].astype(float) / df["I_NVLED"].replace(0, np.nan)
         reliable &= relstd.fillna(np.inf) <= NVLED_RELSTD_MAX
