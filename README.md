@@ -829,6 +829,21 @@ is a lower bound and the run should be repeated with a longer window.
 Precedence: defaults, then `--config`, then `--calibration`, then `--set`. An explicit
 `--set` always wins, so a deliberate override is never silently replaced.
 
+### The old-vs-new demonstration
+
+`run_comparison_demo.ps1` runs the **measurements** for a head-to-head comparison
+unattended: calibrate, transients on one pixel, the sweep with the old method, the
+sweep with the new one. ~2-4 h depending on the calibrated dwell.
+
+```powershell
+.un_comparison_demo.ps1 -Simulate              # dry run, no hardware, ~2 min
+.un_comparison_demo.ps1 -Array Array42_IQE -Pixel "35,36"
+```
+
+It deliberately does **not** analyse. Analysis needs no hardware, can be repeated and
+re-tuned, and a failing figure must never cost bench time. Instead it writes
+`<Out>nalyse.ps1` with the run directories already filled in -- run that afterwards.
+
 ### Configuration files
 
 | file | what it is |

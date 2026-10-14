@@ -1,17 +1,21 @@
 <#
 .SYNOPSIS
-    The whole old-vs-new demonstration, unattended.
+    The measurements for the old-vs-new demonstration, unattended.
 
 .DESCRIPTION
-    Runs, in order, and logs everything to demo\transcript.txt:
+    Measurements only. Runs, in order, and logs everything to <Out>\transcript.txt:
 
-      0. calibrate this array            ~18 min
-      1. transient capture, one pixel    ~15 min   <- shows WHY the old method was wrong
-      2. sweep, old method                ~16 min
-      3. sweep, new method               1-3 h     (depends on the calibrated dwell)
-      4. analysis + the comparison figures
+      1. calibrate this array            ~18 min
+      2. transient capture, one pixel    ~15 min   <- shows WHY the old method was wrong
+      3. sweep, old method               ~16 min
+      4. sweep, new method               1-3 h     (depends on the calibrated dwell)
 
-    Each stage stops the script if it fails, because every later stage depends on it.
+    Analysis is deliberately NOT run here: it needs no hardware, it can be repeated and
+    re-tuned afterwards, and a failing figure must never cost bench time. The exact
+    analysis commands, with the run directories filled in, are printed at the end and
+    written to <Out>\analyse.ps1 -- run that when the bench is free.
+
+    A failed stage stops the script, because every later stage depends on it.
     Ctrl-C is safe at any point: the hardware parks itself.
 
 .EXAMPLE
@@ -73,27 +77,6 @@ function Newest($path) {
     return $null
 }
 
-# The analysis repo's interpreter: its own venv if it has one, else whatever is on PATH.
-$AnalysisPython = Join-Path $AnalysisRepo ".venv\Scripts\python.exe"
-if (-not (Test-Path $AnalysisPython)) { $AnalysisPython = "python" }
-
-function Run-Analysis($stage, $script, $scriptArgs) {
-    Say $stage
-    if (-not (Test-Path (Join-Path $AnalysisRepo $script))) {
-        Write-Warning "$script not found in $AnalysisRepo - skipping $stage"
-        return
-    }
-    Push-Location $AnalysisRepo
-    try {
-        Write-Host ("{0} {1} {2}" -f $AnalysisPython, $script, ($scriptArgs -join " "))
-        & $AnalysisPython $script @scriptArgs
-        # Analysis is best-effort: a figure that fails must not cost the measurements.
-        if ($LASTEXITCODE -ne 0) { Write-Warning "$stage returned $LASTEXITCODE - continuing" }
-    } finally {
-        Pop-Location
-    }
-}
-
 $started = Get-Date
 Write-Host "array      : $Array"
 Write-Host "pixel      : $Pixel"
@@ -101,9 +84,9 @@ Write-Host "ROI        : $Roi"
 Write-Host "output     : $outRoot"
 if ($Simulate) { Write-Host "MODE       : SIMULATE (no hardware)" }
 
-# ---------------------------------------------------------------- 0. calibrate
+# ---------------------------------------------------------------- 1. calibrate
 $calDir = Join-Path $outRoot "cal"
-Run-Measure "0/4  CALIBRATE $Array  (~18 min)" (@(
+Run-Measure "1/4  CALIBRATE $Array  (~18 min)" (@(
     "--calibrate", "--array", $Array, "--out", $calDir,
     "--set", "calibrate_seconds=$CalSeconds") + $sim)
 
@@ -128,9 +111,9 @@ if (Test-Path $calFile) {
     Write-Warning "no calibration at $calFile - the sweep will use the defaults"
 }
 
-# ---------------------------------------------------------- 1. the transients
+# ---------------------------------------------------------- 2. the transients
 $tranDir = Join-Path $outRoot "transients"
-Say "1/4  TRANSIENTS on pixel $Pixel  (~15 min)"
+Say "2/4  TRANSIENTS on pixel $Pixel  (~15 min)"
 $tranArgs = @(
     "--what", "step", "--out", $tranDir, "--pixels", $Pixel,
     "--highc-both", "--ranges", "1e-6", "1e-5", "1e-4",
@@ -145,50 +128,67 @@ if (-not $Simulate) {
     Write-Host "(skipped in -Simulate: characterize_capacitance.py needs real instruments)"
 }
 $tranRun = Newest $tranDir
-if ($tranRun) { Run-Analysis "1b   transient figures" "plot_transients.py" @($tranRun) }
 
-# ------------------------------------------------------------- 2. old method
+# ------------------------------------------------------------- 3. old method
 # --set sample_name, NOT --array: --array would apply the calibration and undo the
 # legacy settle times, which is the one thing this run must keep.
 $oldDir = Join-Path $outRoot "old"
-Run-Measure "2/4  SWEEP, OLD METHOD  (~16 min)" (@(
+Run-Measure "3/4  SWEEP, OLD METHOD  (~16 min)" (@(
     "--config", "configs\legacy_pre261014.yaml",
     "--set", "sample_name=$Array", "--set", "roi=$Roi", "--set", "n_fine=30",
     "--out", $oldDir) + $sim)
 $oldRun = Newest $oldDir
 
-# ------------------------------------------------------------- 3. new method
+# ------------------------------------------------------------- 4. new method
 $newDir = Join-Path $outRoot "new"
-Run-Measure "3/4  SWEEP, NEW METHOD  (1-3 h)" (@(
+Run-Measure "4/4  SWEEP, NEW METHOD  (1-3 h)" (@(
     "--array", $Array, "--set", "roi=$Roi", "--out", $newDir) + $sim)
 $newRun = Newest $newDir
 
-# -------------------------------------------------------------- 4. comparison
-if ($oldRun -and $newRun) {
-    Run-Analysis "4/4  analyse the old run"  "analyze_array.py" @($oldRun)
-    Run-Analysis "4/4  analyse the new run"  "analyze_array.py" @($newRun)
-    Run-Analysis "4/4  compare"              "compare_runs.py" @(
-        $oldRun, $newRun, "--label-old", "old method", "--label-new", "new method")
-} else {
-    Write-Warning "missing a run directory - skipping the comparison"
-}
-
-Say ("DONE in {0:hh\:mm\:ss}" -f ((Get-Date) - $started))
-Write-Host "What to look at, in the order you would present it:"
-Write-Host ""
+# ------------------------------- hand the analysis over as a ready-to-run script
+$analyse = Join-Path $outRoot "analyse.ps1"
+$lines = @(
+    "# Analysis for the run of $($started.ToString('yyyy-MM-dd HH:mm')). No hardware needed.",
+    "# Written by run_comparison_demo.ps1 with the run directories already filled in.",
+    "`$ErrorActionPreference = 'Continue'",
+    "Set-Location '$AnalysisRepo'")
 if ($tranRun) {
-    Write-Host "  1. WHY it was wrong"
-    Write-Host "       $tranRun\settling.png     the current crawls for seconds"
-    Write-Host "       $tranRun\transients.png   the old 20 ms settle is off the left edge"
-    Write-Host "       $tranRun\step.csv         High-C off: 42-52% of whatever range is forced"
+    $lines += @("", "# WHY the old method was wrong", "python plot_transients.py '$tranRun'")
+}
+if ($oldRun -and $newRun) {
+    $lines += @(
+        "", "# WHAT it changes",
+        "python analyze_array.py '$oldRun'",
+        "python analyze_array.py '$newRun'",
+        "python compare_runs.py '$oldRun' '$newRun' --label-old 'old method' --label-new 'new method'")
+}
+$lines | Set-Content -Path $analyse -Encoding utf8
+
+Say ("MEASUREMENTS DONE in {0:hh\:mm\:ss}" -f ((Get-Date) - $started))
+Write-Host "Nothing below needs the bench. Run the analysis with:"
+Write-Host ""
+Write-Host "    $analyse"
+Write-Host ""
+Write-Host "or by hand:"
+Write-Host ""
+foreach ($l in $lines) {
+    if ($l -like "python *") { Write-Host "    $l" }
+}
+Write-Host ""
+Write-Host "Then present, in this order:"
+if ($tranRun) {
+    Write-Host "  1. WHY it was wrong   $tranRun"
+    Write-Host "       settling.png     the current crawls for seconds"
+    Write-Host "       transients.png   the old 20 ms settle is off the left edge"
+    Write-Host "       step.csv         High-C off: 42-52% of whatever range is forced"
 }
 if ($newRun) {
-    Write-Host "  2. WHAT it changes"
-    Write-Host "       $newRun\comparison\eqe_vs_J.png    the headline"
-    Write-Host "       $newRun\comparison\iv.png          how much higher the old reads"
-    Write-Host "       $newRun\comparison\leakage.png     why"
-    Write-Host "       $newRun\comparison\per_pixel.png   per pixel, not one average"
-    Write-Host "       $newRun\comparison\COMPARISON.md   the numbers"
+    Write-Host "  2. WHAT it changes    $newRun\comparison\"
+    Write-Host "       eqe_vs_J.png     the headline"
+    Write-Host "       iv.png           how much higher the old method reads"
+    Write-Host "       leakage.png      why"
+    Write-Host "       per_pixel.png    per pixel, not one average"
+    Write-Host "       COMPARISON.md    the numbers"
 }
 Write-Host ""
 Write-Host "  transcript: $log"
