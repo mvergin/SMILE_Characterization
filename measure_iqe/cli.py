@@ -141,7 +141,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             log(f"array {args.array}: no calibration at {auto} - run "
                 f"--calibrate --array {args.array} to measure this array's settle times "
-                f"instead of inheriting Array38's")
+                f"instead of inheriting another array's")
     if args.calibrate:
         try:
             run_calibration(cfg, simulate=args.simulate, log=log)

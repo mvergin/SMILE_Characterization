@@ -52,7 +52,7 @@ on an `IQEConfig`, and nothing is read from the environment.
 from measure_iqe import IQEConfig, run_iqe_measurement
 
 cfg = IQEConfig(
-    sample_name="Array38_IQE",
+    sample_name="Array42_IQE",
     roi=(32, 32, 63, 63),        # or "FULL" / "TL" / "TR" / "BL" / "BR"
     base_dir="D:/runs",
     sweep_direction="low_to_high",
@@ -214,7 +214,7 @@ runs that pinned each value.
 
 | parameter | type | default | meaning |
 |---|---|---|---|
-| `sample_name` | `str` | `'Array38_IQE'` |  |
+| `sample_name` | `str` | `'Array42_IQE'` | override per array with --array NAME |
 | `base_dir` | `str` | `'results'` | output root; a timestamped run dir is created inside |
 
 #### ROI & pixel selection
@@ -799,7 +799,7 @@ below forces a wait anyway.
 ### Per-array calibration (do this once per array)
 
 The settle time belongs to the **array**, not to the method. The 8 s default was
-measured on Array38 (42.8 uF); another array can need far more or far less, and it
+measured on one array; another can need far more or far less, and it
 does **not** follow from the capacitance, because the settling is a charge relaxation
 rather than an RC charge.
 
@@ -836,8 +836,10 @@ unattended: calibrate, transients on one pixel, the sweep with the old method, t
 sweep with the new one. ~2-4 h depending on the calibrated dwell.
 
 ```powershell
-.un_comparison_demo.ps1 -Simulate              # dry run, no hardware, ~2 min
-.un_comparison_demo.ps1 -Array Array42_IQE -Pixel "35,36"
+.
+un_comparison_demo.ps1 -Simulate              # dry run, no hardware, ~2 min
+.
+un_comparison_demo.ps1 -Array Array42_IQE -Pixel "35,36"
 ```
 
 It deliberately does **not** analyse. Analysis needs no hardware, can be repeated and

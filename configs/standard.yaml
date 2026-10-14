@@ -35,7 +35,7 @@
 
 
 # ---- Run identity & output ----
-sample_name: "Array38_IQE"   # base_dir is relative to the working directory unless you pass an absolute path. ...
+sample_name: "Array42_IQE"   # base_dir is relative to the working directory unless you pass an absolute path. ...
 base_dir: "results"   # output root; a timestamped run dir is created inside
 
 # ---- ROI & pixel selection ----
@@ -52,7 +52,7 @@ max_sweep_pixels: 40   # hard cap (spatial/stride only; blocks controls its own 
 fastscan_bitval: 15   # bitval for the alive/dead fast scan (brightest)
 
 # ---- Source mode ----
-source_mode: "voltage"   # "voltage": ch B sources voltage, adaptive current-targeted sweep. PROVEN on Array38 — ...
+source_mode: "voltage"   # "voltage": ch B sources voltage, adaptive current-targeted sweep. PROVEN on Array42 — ...
 
 # ---- Current-source sweep (source_mode = "current") ----
 current_sweep_low_a: 3.0e-07   # lowest LED current setpoint (1 µA → J ≈ 1)
@@ -173,7 +173,7 @@ fastscan_limit_a: 0.001   # compliance for the FAST SCAN, a different operating 
                           # clamps EVERY pixel (measured 261014-0048: all 1024 read exactly 10.00 uA).
 
 # ---- Per-array calibration (--calibrate) ----
-# The settle time is a property of the ARRAY. 8 s came from Array38 (42.8 uF); another
+# The settle time is a property of the ARRAY, so measure it per array.
 # array may need far more or far less, and it does NOT follow from C, because the
 # settling is a charge relaxation and not an RC charge. Measure it, do not inherit it:
 #   python -m measure_iqe --calibrate --out D:\cal

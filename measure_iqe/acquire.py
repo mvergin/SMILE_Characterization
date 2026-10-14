@@ -9,7 +9,7 @@ Design (informed by auditing the results_georg data and the 10mA/1mA bench runs)
 
   * **Voltage-source adaptive sweep (default, proven).** ch B sources voltage; a
     quick per-pixel coarse pre-sweep maps I(V), then the fine sweep places points
-    at log-spaced LED currents across the IQE peak. On Array38 this captured the
+    at log-spaced LED currents across the IQE peak. On Array42 this captured the
     peak (J≈6, ~59%). A ``source_mode="current"`` path exists (ch B sinks a set
     current) but does NOT work on this device — the +1.8 V anode bypasses ch B
     through a leakage path, so the cathode current setpoint never becomes the LED
@@ -1417,7 +1417,7 @@ def run_calibration(config: IQEConfig | None = None, *, simulate: bool = False,
 
     Run once per array. The sweep then takes `--calibration <file>` instead of a
     handful of hand-typed settle overrides, and the numbers are measured on that
-    array rather than inherited from Array38.
+    array rather than inherited from another.
     """
     cfg = (config or IQEConfig()).validate()
     log = log or make_logger()

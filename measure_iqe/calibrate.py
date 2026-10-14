@@ -4,7 +4,7 @@
     python -m measure_iqe --calibration D:\\cal\\<...>_calibration.yaml
 
 Why this exists: **the settle time is a property of the array, not of the method.**
-The 8 s default came from one array (Array38, 42.8 uF). An array with 7 uF may well
+A dwell measured on one array does not transfer to another. An array with 7 uF may well
 need far less -- or not, because the settling is a charge relaxation and not an RC
 charge, so it does not have to scale with C. Guessing either way is wrong. Measure it.
 
@@ -35,7 +35,12 @@ from .config import SMU_I_RANGES, IQEConfig
 
 Logger = Callable[[str], None]
 
-CALIBRATION_VERSION = 1
+CALIBRATION_VERSION = 2
+
+# Beyond this fraction of the record, a settle time is reporting the window, not the
+# device (see settle_time). Such a capture is treated exactly like one that never
+# settled: it raises the worst case and marks the result a lower bound.
+RECORD_LIMITED_FRAC = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +87,18 @@ def settle_time(t, i, frac: float = 0.01) -> float:
         return 0.0                       # settled before the first smoothed sample
     if bad[-1] + 1 >= smooth.size:
         return float("nan")              # still outside the band at the end
-    return float(ts[bad[-1]])
+    answer = float(ts[bad[-1]])
+    # RECORD-LIMITED. "final" is the median of the last 20% of the record, so a trace
+    # that is still decaying is always close to its own last value and the measured
+    # settle time scales with however long you happened to watch. Measured on one array:
+    #   21 s record -> t_1pct 13.2 s (62% of it)
+    #   81 s record -> t_1pct 54.2 s (67%)
+    #  120 s record -> t_1pct 74.0 s (62%)
+    # all of the same device. An answer past half the record is not a measurement of the
+    # device, it is a measurement of the window, so say so rather than return it.
+    if answer > RECORD_LIMITED_FRAC * float(t[-1]):
+        return float("nan")
+    return answer
 
 
 def settle_curve(pm, smu, cfg: IQEConfig, v_to: float, seconds: float,
@@ -238,12 +254,14 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
     )
     out["lower_bound"] = bool(rising_lb or droop_lb)
     if never:
-        log(f"  !! {len(never)} of {len(rows)} capture(s) never settled within "
+        log(f"  !! {len(never)} of {len(rows)} capture(s) did not settle within "
             f"{cfg.calibrate_seconds:g}s, so the worst case is at least that long and the "
             f"recommendation is a LOWER BOUND.")
         for r in never:
             log(f"       ({r['pixel_x']},{r['pixel_y']}) at {r['v_to']:+.3f} V")
-        log(f"     Re-run with --set calibrate_seconds={max(120, 3 * cfg.calibrate_seconds):g} "
+        log(f"     (either still outside the band at the end, or settling past half the "
+            f"record, which measures the window and not the device.)")
+        log(f"     Re-run with --set calibrate_seconds={max(300, 3 * cfg.calibrate_seconds):g} "
             f"to get a real number. The sweep will work with this value, but the low-J "
             f"points carry more unrelaxed tail than the margin assumes.")
     log(f"  recommended: " + ", ".join(f"{k}={v}" for k, v in rec.items()))

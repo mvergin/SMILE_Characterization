@@ -1,7 +1,7 @@
 """Configuration for the IQE acquisition.
 
 Every tunable of the measurement lives on :class:`IQEConfig` as a field with a
-safe default.  The defaults are the values that were proven on Array38 — change
+safe default.  The defaults are the values that were proven on Array42 — change
 them by constructing the dataclass, or load a JSON/YAML file with
 :meth:`IQEConfig.from_file`.
 
@@ -44,7 +44,7 @@ class IQEConfig:
     # ── Run identity & output ───────────────────────────────────────────
     # base_dir is relative to the working directory unless you pass an absolute
     # path.  Nothing outside it is ever written.
-    sample_name: str = "Array38_IQE"
+    sample_name: str = "Array42_IQE"  # override per array with --array NAME
     base_dir: str = "results"          # output root; a timestamped run dir is created inside
 
     # ── ROI & pixel selection ───────────────────────────────────────────
@@ -80,9 +80,9 @@ class IQEConfig:
 
     # ── Source mode ─────────────────────────────────────────────────────
     # "voltage": ch B sources voltage, adaptive current-targeted sweep. PROVEN on
-    #            Array38 — the 10 mA voltage sweep captured the IQE peak (J≈6,
+    #            Array42 — the 10 mA voltage sweep captured the IQE peak (J≈6,
     #            ~59%). USE THIS.
-    # "current": ch B sources (sinks) current, measures voltage. Tried on Array38
+    # "current": ch B sources (sinks) current, measures voltage. Tried on Array42
     #            (run 260624-1310) and it DOES NOT WORK on this device: when ch B is
     #            told to sink a small current (e.g. 0.3 µA), the +1.8 V anode (ch A)
     #            keeps sourcing the full LED current (~60 µA) through a parallel path

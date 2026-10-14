@@ -387,7 +387,7 @@ def test_unsettled_captures_raise_the_recommendation_not_vanish():
     """A capture that never settled is the SLOWEST one; dropping it biases low."""
     import os
     from measure_iqe import run_calibration
-    from measure_iqe.calibrate import load_calibration
+    from measure_iqe.calibrate import CALIBRATION_VERSION, load_calibration
 
     with tempfile.TemporaryDirectory() as tmp:
         cwd = os.getcwd()
@@ -414,7 +414,7 @@ def test_unsettled_captures_raise_the_recommendation_not_vanish():
 def test_array_flag_names_the_run_and_picks_up_its_calibration():
     """--array NAME must set sample_name AND apply that array's measured settings."""
     import os
-    from measure_iqe.calibrate import calibration_path
+    from measure_iqe.calibrate import CALIBRATION_VERSION, calibration_path
     from measure_iqe.cli import build_config, build_parser
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -430,7 +430,7 @@ def test_array_flag_names_the_run_and_picks_up_its_calibration():
             path = calibration_path("Array42_IQE")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({
-                "calibration_version": 1, "sample_name": "Array42_IQE",
+                "calibration_version": CALIBRATION_VERSION, "sample_name": "Array42_IQE",
                 "recommended": {"vramp_lowv_settle_s": 1.25}}), encoding="utf-8")
             path.rename(path.with_suffix(".yaml")) if False else None
 
@@ -450,7 +450,7 @@ def test_array_flag_names_the_run_and_picks_up_its_calibration():
 def test_calibration_round_trips_and_is_validated():
     """--calibrate measures this array; --calibration applies it. Nothing in between."""
     from measure_iqe import run_calibration
-    from measure_iqe.calibrate import load_calibration
+    from measure_iqe.calibrate import CALIBRATION_VERSION, load_calibration
 
     with tempfile.TemporaryDirectory() as tmp:
         cfg = IQEConfig(**FAST, calibrate_seconds=1.5, calibrate_pixels=1)
@@ -483,7 +483,8 @@ def test_calibration_round_trips_and_is_validated():
         import json as _json
         stale = Path(tmp) / "stale.json"
         stale.write_text(_json.dumps(
-            {"calibration_version": 0, "recommended": {}}), encoding="utf-8")
+            {"calibration_version": CALIBRATION_VERSION - 1, "recommended": {}}),
+            encoding="utf-8")
         try:
             load_calibration(stale)
         except ValueError:
