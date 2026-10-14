@@ -145,9 +145,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 + (" (LOWER BOUND)" if d.get("lower_bound") else ""))
             log(f"  applying {d.get('recommended', {})}")
         else:
-            log(f"array {args.array}: no calibration at {auto} - run "
-                f"--calibrate --array {args.array} to measure this array's settle times "
-                f"instead of inheriting another array's")
+            from .calibrate import CALIB_DIR, calibration_roots
+            looked = ", ".join(str(d / CALIB_DIR) for d in calibration_roots())
+            log(f"array {args.array}: NO CALIBRATION found. Looked in: {looked}")
+            log(f"  the sweep will use the DEFAULT settle times, which were measured on "
+                f"a different array. Run --calibrate --array {args.array} to fix that.")
     if args.calibrate:
         try:
             run_calibration(cfg, simulate=args.simulate, log=log)

@@ -115,8 +115,12 @@ def settle_time(t, i, frac: float = 0.01) -> float:
 
 
 def settle_curve(pm, smu, cfg: IQEConfig, v_to: float, seconds: float,
-                 period: float = 0.05) -> tuple[np.ndarray, np.ndarray]:
-    """Step ch B to `v_to` and poll |I| for `seconds`. Returns (t, |I|)."""
+                 period: float = 0.05, n_pm: int = 0):
+    """Step ch B to `v_to` and poll for `seconds`. Returns (t, |I|, P).
+
+    `n_pm > 0` also records the optical power, which costs a little time per poll and
+    makes the trace able to answer whether EQE = P/I settles faster than either factor.
+    """
     from .acquire import acquire_point
     from .safeexit import parked
 
@@ -124,16 +128,18 @@ def settle_curve(pm, smu, cfg: IQEConfig, v_to: float, seconds: float,
     t0 = time.perf_counter()
     ts: list[float] = []
     iv: list[float] = []
+    pv: list[float] = []
     while (dt := time.perf_counter() - t0) < seconds:
         if parked():                 # Ctrl-C or a shutdown: the session is gone
             break
-        _, _, _, _, inv, _, _, _ = acquire_point(pm, smu, cfg.calibrate_n_smu, 0)
+        p, _, _, _, inv, _, _, _ = acquire_point(pm, smu, cfg.calibrate_n_smu, n_pm)
         ts.append(dt)
         iv.append(abs(inv))
+        pv.append(p)
         rest = period - (time.perf_counter() - t0 - dt)
         if rest > 0:
             time.sleep(rest)
-    return np.asarray(ts), np.asarray(iv)
+    return np.asarray(ts), np.asarray(iv), np.asarray(pv)
 
 
 def _ladder(lo: float, hi: float) -> list[float]:
@@ -195,22 +201,22 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
                 configure_voltage_source_b(
                     smu, __import__("dataclasses").replace(cfg, nvled_compliance=limit), log)
                 set_nplc(smu, cfg.vramp_lowv_nplc if v > knee else cfg.vramp_highv_nplc)
-                tk, ik = settle_curve(pm, smu, cfg, vk, cfg.calibrate_approach_s,
-                                      cfg.calibrate_period_s)
+                tk, ik, _ = settle_curve(pm, smu, cfg, vk, cfg.calibrate_approach_s,
+                                         cfg.calibrate_period_s)
                 if ik.size:
                     prev_i = float(np.median(ik[int(0.8 * ik.size):]))
             limit = pick_limit(prev_i, cfg)
             configure_voltage_source_b(
                 smu, __import__("dataclasses").replace(cfg, nvled_compliance=limit), log)
             set_nplc(smu, cfg.vramp_lowv_nplc if v > knee else cfg.vramp_highv_nplc)
-            t, i = settle_curve(pm, smu, cfg, v, cfg.calibrate_seconds,
-                                cfg.calibrate_period_s)
+            t, i, p = settle_curve(pm, smu, cfg, v, cfg.calibrate_seconds,
+                                   cfg.calibrate_period_s, cfg.trace_settling_n_pm)
             # KEEP the trace. These are the longest and cleanest transients the project
             # has: cal3 polled three 600 s captures and discarded all three, which are
             # exactly the records needed to test whether the settled value can be
             # extrapolated from the first seconds.
             traces[f"{x}_{y}_v{v:+.4f}"] = np.vstack(
-                [t.astype(np.float32), i.astype(np.float32)])
+                [t.astype(np.float32), i.astype(np.float32), p.astype(np.float32)])
             prev_i = float(np.median(i[int(0.8 * i.size):])) if i.size else None
             r = dict(pixel_x=x, pixel_y=y, v_to=v, limit_a=limit,
                      settled_a=prev_i, step_v=round(seg_step, 5),
@@ -301,9 +307,36 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
 CALIB_DIR = "calibrations"      # gitignored, so a share re-export never clobbers it
 
 
-def calibration_path(sample_name: str, root: str | Path = ".") -> Path:
-    """Where `--array NAME` looks for, and `--calibrate` saves, a calibration."""
-    return Path(root) / CALIB_DIR / f"{sample_name}.yaml"
+def calibration_roots(root: str | Path | None = None) -> list[Path]:
+    """Where a calibration may live, most specific first.
+
+    The current directory, then the directory holding the measure_iqe package. Being
+    cwd-relative alone is a trap: --calibrate run from one directory and the sweep run
+    from another would silently not find each other, and the sweep would fall back to
+    the defaults with only a line in the log to say so.
+    """
+    here = Path(root) if root is not None else Path.cwd()
+    install = Path(__file__).resolve().parent.parent
+    seen, out = set(), []
+    for d in (here, install):
+        d = d.resolve()
+        if d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def calibration_path(sample_name: str, root: str | Path | None = None) -> Path:
+    """Where `--array NAME` looks for a calibration.
+
+    Returns the first existing file; if there is none, the preferred location to write.
+    """
+    roots = calibration_roots(root)
+    for d in roots:
+        cand = d / CALIB_DIR / f"{sample_name}.yaml"
+        if cand.exists():
+            return cand
+    return roots[0] / CALIB_DIR / f"{sample_name}.yaml"
 
 
 def _dump(path: Path, data: dict[str, Any]) -> Path:
@@ -327,7 +360,11 @@ def write_calibration(out_dir: str | Path, data: dict[str, Any],
     """
     name = str(data.get("sample_name") or "array")
     record = _dump(Path(out_dir) / f"{name}_calibration.yaml", data)
-    stable = _dump(calibration_path(name, root), data)
+    # Write to every root, so a sweep started from either directory finds it. They are
+    # small, and a stale copy in the other root would be worse than a duplicate.
+    stable = None
+    for d in calibration_roots(root if root != "." else None):
+        stable = _dump(d / CALIB_DIR / f"{name}.yaml", data)
     return record, stable
 
 

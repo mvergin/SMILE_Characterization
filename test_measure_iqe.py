@@ -472,6 +472,7 @@ def test_array_flag_names_the_run_and_picks_up_its_calibration():
             assert cfg.vramp_lowv_settle_s == IQEConfig().vramp_lowv_settle_s
 
             path = calibration_path("Array42_IQE")
+            assert path.parent.parent.resolve() == Path(tmp).resolve(), path
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({
                 "calibration_version": CALIBRATION_VERSION, "sample_name": "Array42_IQE",
@@ -487,6 +488,39 @@ def test_array_flag_names_the_run_and_picks_up_its_calibration():
             args = build_parser().parse_args(
                 ["--array", "Array42_IQE", "--set", "vramp_lowv_settle_s=9.0"])
             assert build_config(args).vramp_lowv_settle_s == 9.0
+        finally:
+            os.chdir(cwd)
+
+
+def test_a_calibration_is_found_from_either_directory():
+    """--calibrate in one directory and the sweep in another must still meet.
+
+    calibration_path was cwd-relative only, so the two could silently miss each other
+    and the sweep would fall back to another array's settle times with one line in the
+    log to say so.
+    """
+    import os
+    from measure_iqe.calibrate import CALIB_DIR, calibration_path, calibration_roots
+
+    install = Path(acquire.__file__).resolve().parent.parent
+    cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            os.chdir(tmp)
+            roots = calibration_roots()
+            assert Path(tmp).resolve() in [r.resolve() for r in roots]
+            assert install in [r.resolve() for r in roots], (install, roots)
+
+            # a calibration living beside the package must be found from anywhere
+            beside = install / CALIB_DIR / "FoundFromAnywhere.yaml"
+            beside.parent.mkdir(parents=True, exist_ok=True)
+            beside.write_text("{}", encoding="utf-8")
+            try:
+                assert calibration_path("FoundFromAnywhere").resolve() == beside.resolve()
+            finally:
+                beside.unlink()
+                if not any(beside.parent.iterdir()):
+                    beside.parent.rmdir()
         finally:
             os.chdir(cwd)
 
@@ -509,8 +543,8 @@ def test_calibration_round_trips_and_is_validated():
         with _np.load(npz) as d:
             assert len(d.files) >= 3, f"only {len(d.files)} transients kept"
             for k in d.files:
-                t, i = d[k]
-                assert t.size >= 2 and _np.isfinite(i).all()
+                t, i, pw = d[k]          # power too, for the EQE-settling question
+                assert t.size >= 2 and _np.isfinite(i).all() and _np.isfinite(pw).all()
         rec = load_calibration(path)
         assert rec, "calibration recommended nothing"
         fields = {f.name for f in dataclasses.fields(IQEConfig)}
