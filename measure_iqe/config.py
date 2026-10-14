@@ -340,6 +340,15 @@ class IQEConfig:
     calibrate_n_smu: int = 4  # SMU samples per poll; small, this is a time series
     calibrate_period_s: float = 0.05  # poll interval, and the floor on what the
                                       # calibration can resolve
+    calibrate_target: float = 0.01  # how close to the final value counts as settled.
+                                    # The settling is a power law, so the dwell scales as
+                                    # target^(-1/1.3): 0.03 is ~2.3x faster than 0.01.
+                                    # A looser target is a real, statable trade -- the
+                                    # residual is common-mode across pixels either way.
+    calibrate_approach_steps: int = 3  # sweep-sized steps taken before each measured one,
+                                       # so the capture sees the step the sweep takes and
+                                       # the range the sweep uses, not a 0.5 V jump
+    calibrate_approach_s: float = 5.0  # dwell on each of those approach steps
     calibrate_margin: float = 1.5  # safety factor on the measured worst case, because
                                    # the calibration sees 3 biases and the sweep visits 30
 

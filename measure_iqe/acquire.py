@@ -1061,12 +1061,22 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
         if cfg.leak_reference:
             log(f"  leakage reference: every point re-measured at bitval {cfg.leak_ref_bitval} "
                 f"(+{cfg.leak_ref_settle_s:g}s each) → NVLED_CURR_REF. I_LED = MEAN - REF.")
-        est = len(selected) * cfg.n_fine * (
-            (cfg.vramp_lowv_settle_s + cfg.vramp_highv_settle_s) / 2
-            + (2 * cfg.leak_ref_settle_s if cfg.leak_reference else 0)) * cfg.settle_scale
-        log(f"  settle time alone: ~{est/60:.0f} min for {len(selected)} pixels "
-            f"({est/max(1, len(selected)):.0f} s/pixel). Measured, not guessed: the current "
-            f"approaches its final value as t^-1.3.")
+        # Weight by the ACTUAL split, not the average of the two settles: with 18 slow
+        # points and 12 fast ones the average under-reported by 16% (run 261014-1306).
+        n_low = max(2, int(round(cfg.n_fine * cfg.vramp_low_frac))) if (
+            cfg.vramp_low_frac and cfg.vramp_knee_v is not None) else cfg.n_fine // 2
+        n_high = max(0, cfg.n_fine - n_low)
+        ref_s = 2 * cfg.leak_ref_settle_s if cfg.leak_reference else 0
+        est = len(selected) * (n_low * (cfg.vramp_lowv_settle_s + ref_s)
+                               + n_high * (cfg.vramp_highv_settle_s + ref_s)) * cfg.settle_scale
+        per = est / max(1, len(selected))
+        log(f"  settle time alone: ~{est/3600:.1f} h for {len(selected)} pixels "
+            f"({per/60:.1f} min/pixel = {n_low}x{cfg.vramp_lowv_settle_s:g}s rising + "
+            f"{n_high}x{cfg.vramp_highv_settle_s:g}s droop + {ref_s:g}s reference each).")
+        if est > 6 * 3600:
+            log(f"  !! that is {est/3600:.0f} hours. To cut it: fewer pixels "
+                f"(--set max_sweep_pixels=N), fewer points (--set n_fine=N), or a looser "
+                f"settle target (--set calibrate_target=0.03) re-measured with --calibrate.")
     else:
         log(f"VOLTAGE SWEEP — {len(selected)} pixels × bitvals {list(cfg.bitvals)}, {cfg.sweep_direction}, "
             f"current-targeted (w={cfg.lowj_weight}); adaptive low-J NPLC {cfg.lowj_nplc}, high-J {cfg.highj_nplc}; "

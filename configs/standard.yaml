@@ -183,6 +183,12 @@ calibrate_seconds: 40.0    # poll each bias this long. Shorter than the real set
                            # makes the answer a lower bound, and the file says so.
 calibrate_n_smu: 4
 calibrate_period_s: 0.05   # poll interval, and the floor on what can be resolved
+calibrate_target: 0.01     # how close to the final value counts as settled. THE SPEED KNOB:
+                           # the settling is a power law, so the dwell scales as
+                           # target^(-1/1.3) -- 0.03 is 2.3x faster than 0.01, 0.05 is 3.4x.
+calibrate_approach_steps: 3   # sweep-sized steps before each measured one, so the capture
+                              # sees the step the sweep takes and the range the sweep uses
+calibrate_approach_s: 5.0     # dwell on each approach step
 calibrate_margin: 1.5      # safety factor: 3 biases are measured, 30 are swept
 
 resume: false              # --resume RUN_DIR sets this; skip the pixels a killed run

@@ -318,6 +318,64 @@ def test_nothing_touches_the_instruments_after_parking():
     assert not after, f"{len(after)} instrument call(s) after parking"
 
 
+def test_calibration_approaches_a_bias_the_way_the_sweep_does():
+    """It must take sweep-sized steps from the HIGHER current, not jump 0.5 V.
+
+    Run 261014-1156 jumped -1.30 -> -0.80 V, an 18x larger step than the sweep takes,
+    measured 85 s, and produced a 45-hour sweep estimate. It also landed on the 100 uA
+    range where the sweep uses 10 uA, which under High-C is a different measurement.
+    """
+    import os
+    from measure_iqe import run_calibration
+
+    seen = []
+    real = acquire.configure_voltage_source_b
+
+    class Spy:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def set_voltage(self, ch, v):
+            if ch == "b":
+                seen.append(float(v))
+            return self._inner.set_voltage(ch, v)
+
+        def __getattr__(self, k):
+            return getattr(self._inner, k)
+
+    real_connect = acquire.connect_sim
+
+    def wrapped(cfg, log):
+        pm, smu, smile = real_connect(cfg, log)
+        return pm, Spy(smu), smile
+
+    acquire.connect_sim = wrapped
+    cwd = os.getcwd()
+    cfg = IQEConfig(**FAST, calibrate_seconds=0.3, calibrate_approach_s=0.1,
+                    calibrate_pixels=1, calibrate_approach_steps=3)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                os.chdir(tmp)
+                run_calibration(cfg, simulate=True, base_dir=tmp, log=QUIET)
+            finally:
+                os.chdir(cwd)      # Windows cannot delete the cwd
+    finally:
+        acquire.connect_sim = real_connect
+
+    n_low = max(2, round(cfg.n_fine * cfg.vramp_low_frac))
+    step = abs(cfg.nvled_v_coarse_start - cfg.vramp_knee_v) / n_low
+    target = cfg.nvled_v_coarse_start                     # the faint end, -0.80
+    want = [round(target - k * step, 4) for k in (3, 2, 1)]
+    rounded = [round(v, 4) for v in seen]
+    for v in want:
+        assert v in rounded, f"approach step {v} never set; saw {sorted(set(rounded))}"
+    # and every approach step must be MORE negative than the target: the sweep runs
+    # high current -> low current, so it arrives from above, not below
+    for v in want:
+        assert v < target, f"{v} is on the low-current side of {target}"
+
+
 def test_unsettled_captures_raise_the_recommendation_not_vanish():
     """A capture that never settled is the SLOWEST one; dropping it biases low."""
     import os
@@ -355,7 +413,7 @@ def test_array_flag_names_the_run_and_picks_up_its_calibration():
     with tempfile.TemporaryDirectory() as tmp:
         cwd = os.getcwd()
         os.chdir(tmp)                       # calibration_path is relative to cwd
-        try:
+        try:                                # ... and chdir back before the cleanup
             args = build_parser().parse_args(["--array", "Array42_IQE"])
             cfg = build_config(args)
             assert cfg.sample_name == "Array42_IQE"

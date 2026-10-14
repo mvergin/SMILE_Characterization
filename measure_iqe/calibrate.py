@@ -121,10 +121,13 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
     knee = cfg.vramp_knee_v if cfg.vramp_knee_v is not None else (
         (cfg.nvled_v_coarse_start + cfg.nvled_v_coarse_stop) / 2)
     biases = [cfg.nvled_v_coarse_stop, float(knee), cfg.nvled_v_coarse_start]
-    step = abs(cfg.nvled_v_coarse_start - knee) / max(
-        1, round(cfg.n_fine * cfg.vramp_low_frac))
-    log(f"CALIBRATION — {len(pixels)} pixel(s), biases {biases}, "
-        f"{cfg.calibrate_seconds:g}s each; sweep step on the rising side is {step*1e3:.0f} mV")
+    n_low = max(2, round(cfg.n_fine * cfg.vramp_low_frac))
+    step = abs(cfg.nvled_v_coarse_start - knee) / n_low
+    droop_step = abs(knee - cfg.nvled_v_coarse_stop) / max(1, cfg.n_fine - n_low)
+    log(f"CALIBRATION — {len(pixels)} pixel(s), biases {biases}, {cfg.calibrate_seconds:g}s "
+        f"each, target {cfg.calibrate_target*100:g}%; the sweep steps {step*1e3:.0f} mV on the "
+        f"rising side and {droop_step*1e3:.0f} mV on the droop side, and each capture is "
+        f"approached by {cfg.calibrate_approach_steps} such step(s)")
 
     rows: list[dict[str, Any]] = []
     for (x, y) in pixels:
@@ -132,23 +135,46 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
         smile.set_pixel(x, y, cfg.bitvals[0])
         prev_i = None
         for v in biases:
+            # APPROACH THE BIAS THE WAY THE SWEEP DOES. The sweep arrives at -0.80 V by
+            # eighteen 28 mV steps from a nearly-settled neighbour; an earlier version of
+            # this jumped straight from -1.30 V, a 0.5 V step, and measured 85 s where the
+            # sweep may need far less (run 261014-1156 -> a 45 h sweep). The pre-steps also
+            # bring prev_i down to the ADJACENT point's current, so pick_limit lands on the
+            # same range the sweep will use -- the jump version measured -0.80 V on the
+            # 100 uA range while the sweep uses 10 uA, and under High-C that is a different
+            # measurement, not a detail.
+            seg_step = step if v > knee else droop_step
+            for k in range(cfg.calibrate_approach_steps, 0, -1):
+                # MORE negative, i.e. from the higher current: the sweep runs
+                # high_to_low, so the point before v is v - step, every time. Getting
+                # this sign wrong approaches from the low-current side, which is the
+                # opposite memory condition to the one being measured.
+                vk = v - k * seg_step
+                limit = pick_limit(prev_i, cfg)
+                configure_voltage_source_b(
+                    smu, __import__("dataclasses").replace(cfg, nvled_compliance=limit), log)
+                set_nplc(smu, cfg.vramp_lowv_nplc if v > knee else cfg.vramp_highv_nplc)
+                tk, ik = settle_curve(pm, smu, cfg, vk, cfg.calibrate_approach_s,
+                                      cfg.calibrate_period_s)
+                if ik.size:
+                    prev_i = float(np.median(ik[int(0.8 * ik.size):]))
             limit = pick_limit(prev_i, cfg)
             configure_voltage_source_b(
                 smu, __import__("dataclasses").replace(cfg, nvled_compliance=limit), log)
             set_nplc(smu, cfg.vramp_lowv_nplc if v > knee else cfg.vramp_highv_nplc)
-            # Approach each bias the way the sweep does -- from the previous, larger
-            # current -- so the measured time is the time the sweep will actually need.
             t, i = settle_curve(pm, smu, cfg, v, cfg.calibrate_seconds,
                                 cfg.calibrate_period_s)
             prev_i = float(np.median(i[int(0.8 * i.size):])) if i.size else None
             r = dict(pixel_x=x, pixel_y=y, v_to=v, limit_a=limit,
-                     settled_a=prev_i,
+                     settled_a=prev_i, step_v=round(step, 5),
+                     t_target=settle_time(t, i, cfg.calibrate_target),
                      t_1pct=settle_time(t, i, 0.01),
                      t_01pct=settle_time(t, i, 0.001),
                      n_samples=int(i.size))
             rows.append(r)
-            log(f"  ({x},{y}) {v:+.3f} V  I={(prev_i or 0)*1e9:9.1f} nA  "
-                f"limit {limit:g} A  t_1%={r['t_1pct']:.2f}s  t_0.1%={r['t_01pct']:.2f}s")
+            log(f"  ({x},{y}) {v:+.3f} V  I={(prev_i or 0)*1e9:9.1f} nA  limit {limit:g} A  "
+                f"t_{cfg.calibrate_target*100:g}%={r['t_target']:.2f}s  "
+                f"(1%={r['t_1pct']:.2f}s  0.1%={r['t_01pct']:.2f}s)")
     smile.blank_frame()
 
     def worst(key: str, keep) -> tuple[float, bool]:
@@ -167,9 +193,9 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
             vals.append(cfg.calibrate_seconds)
         return (float(max(vals)) if vals else float("nan")), bool(unsettled)
 
-    rising, rising_lb = worst("t_1pct", lambda r: r["v_to"] > knee)
-    droop, droop_lb = worst("t_1pct", lambda r: r["v_to"] <= knee)
-    never = [r for r in rows if not np.isfinite(r["t_1pct"])]
+    rising, rising_lb = worst("t_target", lambda r: r["v_to"] > knee)
+    droop, droop_lb = worst("t_target", lambda r: r["v_to"] <= knee)
+    never = [r for r in rows if not np.isfinite(r["t_target"])]
     currents = [r["settled_a"] for r in rows if r["settled_a"]]
 
     # Margin, because the calibration sees three biases and the sweep visits thirty.
@@ -193,6 +219,8 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
         measured_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         pixels=[list(p) for p in pixels],
         seconds_per_capture=cfg.calibrate_seconds,
+        target=cfg.calibrate_target,
+        approach_steps=cfg.calibrate_approach_steps,
         margin=m,
         rising_step_v=round(step, 5),
         recommended=rec,

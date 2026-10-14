@@ -8,7 +8,9 @@
       1. calibrate this array            ~18 min
       2. transient capture, one pixel    ~15 min   <- shows WHY the old method was wrong
       3. sweep, old method               ~16 min
-      4. sweep, new method               1-3 h     (depends on the calibrated dwell)
+      4. sweep, new method               depends on the calibrated dwell -- the script
+                                         prints the estimate before it starts
+      5. repeatability: the SAME pixel swept -Repeats times with each method
 
     Analysis is deliberately NOT run here: it needs no hardware, it can be repeated and
     re-tuned afterwards, and a failing figure must never cost bench time. The exact
@@ -32,6 +34,7 @@ param(
     [string]$Roi        = "[32,32,63,63]",
     [string]$Out        = "demo",
     [double]$CalSeconds = 120,
+    [int]$Repeats      = 3,
     [string]$AnalysisRepo = "C:\_D\programs\SMILE_IQE_Analysis",
     [switch]$Simulate
 )
@@ -145,6 +148,31 @@ Run-Measure "4/4  SWEEP, NEW METHOD  (1-3 h)" (@(
     "--array", $Array, "--set", "roi=$Roi", "--out", $newDir) + $sim)
 $newRun = Newest $newDir
 
+# ------------------------------------------------------- 5. repeatability
+# The same pixel, several times, each method. Run-to-run spread is the honest error
+# bar on everything else here: a difference between the methods only means something
+# if it is larger than each method's own repeatability.
+$repOld = @(); $repNew = @()
+if ($Repeats -gt 0) {
+    $px = $Pixel -split ","
+    $pxRoi = "[{0},{1},{0},{1}]" -f $px[0].Trim(), $px[1].Trim()
+    for ($i = 1; $i -le $Repeats; $i++) {
+        $d = Join-Path $outRoot ("repeat\old_{0}" -f $i)
+        Run-Measure ("5/5  REPEAT {0}/{1}, OLD METHOD, pixel {2}" -f $i, $Repeats, $Pixel) (@(
+            "--config", "configs\legacy_pre261014.yaml",
+            "--set", "sample_name=$Array", "--set", "roi=$pxRoi", "--set", "n_fine=30",
+            "--out", $d) + $sim)
+        $r = Newest $d
+        if ($r) { $repOld += $r }
+
+        $d = Join-Path $outRoot ("repeat\new_{0}" -f $i)
+        Run-Measure ("5/5  REPEAT {0}/{1}, NEW METHOD, pixel {2}" -f $i, $Repeats, $Pixel) (@(
+            "--array", $Array, "--set", "roi=$pxRoi", "--out", $d) + $sim)
+        $r = Newest $d
+        if ($r) { $repNew += $r }
+    }
+}
+
 # ------------------------------- hand the analysis over as a ready-to-run script
 $analyse = Join-Path $outRoot "analyse.ps1"
 $lines = @(
@@ -161,6 +189,14 @@ if ($oldRun -and $newRun) {
         "python analyze_array.py '$oldRun'",
         "python analyze_array.py '$newRun'",
         "python compare_runs.py '$oldRun' '$newRun' --label-old 'old method' --label-new 'new method'")
+}
+if ($repOld.Count -gt 0 -or $repNew.Count -gt 0) {
+    $lines += @("", "# HOW REPEATABLE each method is (the honest error bar)")
+    foreach ($r in $repOld) { $lines += "python analyze_array.py '$r'" }
+    foreach ($r in $repNew) { $lines += "python analyze_array.py '$r'" }
+    for ($i = 0; $i -lt [Math]::Min($repOld.Count, $repNew.Count); $i++) {
+        $lines += ("python compare_runs.py '{0}' '{1}' --label-old 'old repeat {2}' --label-new 'new repeat {2}'" -f $repOld[$i], $repNew[$i], ($i + 1))
+    }
 }
 $lines | Set-Content -Path $analyse -Encoding utf8
 
@@ -189,6 +225,12 @@ if ($newRun) {
     Write-Host "       leakage.png      why"
     Write-Host "       per_pixel.png    per pixel, not one average"
     Write-Host "       COMPARISON.md    the numbers"
+}
+if ($repOld.Count -gt 0) {
+    Write-Host "  3. HOW REPEATABLE it is   $outRoot
+epeat\"
+    Write-Host ("       {0} runs of pixel {1} per method - the spread within a method is" -f $repOld.Count, $Pixel)
+    Write-Host "       the error bar that the between-method difference has to beat"
 }
 Write-Host ""
 Write-Host "  transcript: $log"
