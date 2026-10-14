@@ -39,6 +39,7 @@ a built-in ABC-model rig, with no hardware attached.
 
 from __future__ import annotations
 
+import csv
 import dataclasses
 import datetime
 import json
@@ -53,6 +54,7 @@ from typing import Any, Callable, Iterable, Iterator, NamedTuple
 import numpy as np
 
 from .config import Q_E, SMU_I_RANGES, IQEConfig
+from .safeexit import safe_exit
 
 Logger = Callable[[str], None]
 Row = dict[str, Any]          # one CSV row: column name -> value
@@ -508,30 +510,37 @@ class BackgroundWriter:
     The aggregate is what the analysis reads — an interrupted run needs no reconstruction."""
 
     def __init__(self, raw_path: str | Path, agg_folder: str | Path,
-                 cfg: IQEConfig, log: Logger) -> None:
+                 cfg: IQEConfig, log: Logger, append: bool = False) -> None:
         self._agg_folder = Path(agg_folder)
         Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
         self._agg_folder.mkdir(parents=True, exist_ok=True)
         self._log = log
         self._q: queue.Queue = queue.Queue()
-        self._raw_f = open(raw_path, "w")
-        self._raw_f.write(RAW_HEADER)
-        self._raw_f.flush()
+        self._append = append          # resuming: keep what the killed run already wrote
+        mode = "a" if append else "w"
+        self._raw_f = open(raw_path, mode)
+        if not append:
+            self._raw_f.write(RAW_HEADER)
+            self._raw_f.flush()
         self._cols = agg_cols(cfg)
         # Per-individual-sample file (every burst reading), when enabled.
         self._samp_f = None
         if cfg.save_raw_samples:
-            self._samp_f = open(Path(raw_path).parent / "Sweep_samples.csv", "w")
-            self._samp_f.write("X,Y,BITVAL,NVLED_V,TIME,TYPE,SAMPLE_IDX,VALUE\n")
-            self._samp_f.flush()
+            self._samp_f = open(Path(raw_path).parent / "Sweep_samples.csv", mode)
+            if not append:
+                self._samp_f.write("X,Y,BITVAL,NVLED_V,TIME,TYPE,SAMPLE_IDX,VALUE\n")
+                self._samp_f.flush()
         self._agg_f = {}
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
 
     def _agg_fh(self, bitval):
         if bitval not in self._agg_f:
-            f = open(self._agg_folder / f"aggregated_bitval={bitval}_mean_std.csv", "w")
-            f.write(",".join(self._cols) + "\n")
+            path = self._agg_folder / f"aggregated_bitval={bitval}_mean_std.csv"
+            existing = self._append and path.exists() and path.stat().st_size > 0
+            f = open(path, "a" if existing else "w")
+            if not existing:
+                f.write(",".join(self._cols) + "\n")
             self._agg_f[bitval] = f
         return self._agg_f[bitval]
 
@@ -944,6 +953,7 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
     if med < thr:
         log(f"  NOTE: ROI is majority-dark (median {med*1e9:.2f} nW < threshold {thr*1e9:.1f} nW) — "
             f"most of this region is dead; block selection draws from the lit minority.")
+    smile.blank_frame()      # never hand the next stage a lit pixel
     return select_sweep_pixels(alive, cfg, log)
 
 
@@ -997,6 +1007,37 @@ def run_sweep_current(pm, smu, smile, selected: list[Row], run_dir: Path,
     return len(sw_rows)
 
 
+def completed_pixels(run_dir: str | Path) -> set[tuple[int, int]]:
+    """Pixels already written to a run's aggregated sweep CSV.
+
+    The writer flushes per pixel, so a run killed mid-sweep -- by Windows Update, say --
+    has complete rows for every pixel it finished. Those are the ones to skip on resume.
+    A pixel that was interrupted PART WAY through its own sweep is not complete, so it
+    is re-measured from scratch rather than stitched.
+    """
+    done: set[tuple[int, int]] = set()
+    sweep = Path(run_dir) / "NVLEDSweep" / "Sweep"
+    counts: dict[tuple[int, int], int] = {}
+    for agg in sweep.glob("aggregated_bitval=*_mean_std.csv"):
+        try:
+            with agg.open() as f:
+                rdr = csv.DictReader(f)
+                for row in rdr:
+                    try:
+                        key = (int(float(row["X"])), int(float(row["Y"])))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    counts[key] = counts.get(key, 0) + 1
+        except OSError:
+            continue
+    if not counts:
+        return done
+    # A finished pixel has the full point count. Use the mode rather than the max, so one
+    # over-long pixel cannot mark every other one unfinished.
+    full = max(set(counts.values()), key=list(counts.values()).count)
+    return {k for k, v in counts.items() if v >= full}
+
+
 def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                       cfg: IQEConfig, log: Logger) -> int:
     """Voltage-source adaptive sweep. Single bitval, low-J-weighted spacing, and
@@ -1039,7 +1080,12 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
     # measurement thread, so slow (Nextcloud/network) flushes don't block the sweep, and the
     # aggregate is written per pixel → an interrupted run is directly analysable. try/finally
     # ensures close() drains the queue and joins on a clean stop or caught interrupt.
-    writer = BackgroundWriter(sweep_dir / "raw_data" / "Sweep.csv", sweep_dir, cfg, log)
+    skip = completed_pixels(run_dir) if cfg.resume else set()
+    if skip:
+        log(f"  resuming: {len(skip)} pixel(s) already complete, "
+            f"{sum(1 for r in selected if (int(r['X']), int(r['Y'])) not in skip)} to go")
+    writer = BackgroundWriter(sweep_dir / "raw_data" / "Sweep.csv", sweep_dir, cfg, log,
+                              append=bool(skip))
     sw_rows = []
     live_peaks = []                 # brightest-point power (W) of confirmed-live pixels
     n_dead = 0
@@ -1047,6 +1093,9 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
     try:
       for i, r in enumerate(selected, 1):
         x, y = r["X"], r["Y"]
+        if (int(x), int(y)) in skip:
+            log(f"  [{i}/{len(selected)}] pixel ({x},{y}) - already complete, skipping")
+            continue
         log(f"  [{i}/{len(selected)}] pixel ({x},{y})")
         prows = []
         psamps = []                              # per-sample bursts for this pixel (raw file)
@@ -1058,6 +1107,13 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
         dead_thr = max(cfg.dead_abort_nw * 1e-9, cfg.dead_abort_frac * live_med)
         first_p = None
         for bitval in cfg.bitvals:
+            # Blank FIRST, every pixel, exactly as the fast scan does. Without this the
+            # first swept pixel inherits whatever the fast scan left lit -- run_fast_scan
+            # returns without blanking -- so two pixels emit while "lit" and the leftover
+            # one still emits at bitval 0. That is the "stuck-on neighbour" seen on the
+            # first pixel of every scan, old script included: run 261014-0048 pixel 33,32
+            # had REF/lit = 0.5018 against 0.0065 for all 23 others.
+            smile.blank_frame()
             smile.set_pixel(x, y, bitval)
             fine = build_fine_voltages(pm, smu, cfg, log, tag=f"bit{bitval}: ")
             # Conditioning dwell: hold at high current to clear the slow non-radiative
@@ -1366,6 +1422,10 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
     """
     cfg = (config or IQEConfig()).validate()
     log = log or make_logger()
+    if run_dir is not None and Path(run_dir).exists():
+        # Resuming into an existing directory. Turn it on in the config rather than as a
+        # separate argument, so --print-config and the saved settings both show it.
+        cfg = dataclasses.replace(cfg, resume=True)
     x1, y1, x2, y2 = cfg.resolve_roi()
     out_dir = Path(run_dir) if run_dir is not None else make_run_dir(cfg, base_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1379,6 +1439,12 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
         log("  simulate: settle_scale=0 (pass --set settle_scale=1 to keep the real waits)")
     pm, smu, smile = connect(cfg, log, simulate=simulate)
     n_points = 0
+    # try/finally does not cover the case that actually bit us: Windows Update
+    # restarted the machine mid-run and the SMU output stayed on. safe_exit also
+    # catches the console-close / logoff / shutdown events, which Python turns into
+    # no signal at all and which atexit never sees.
+    parked = safe_exit(lambda: shutdown(pm, smu, smile, cfg), log)
+    parked.__enter__()
     selected: list[dict[str, Any]] = []
     try:
         configure_common(pm, smu, cfg, log)
@@ -1404,5 +1470,5 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
             log('Analyze separately (SMILE_IQE_Analysis):\n'
                 f'    python analyze_array.py "{out_dir}"')
     finally:
-        shutdown(pm, smu, smile, cfg)
+        parked.__exit__(None, None, None)      # idempotent: shutdown() runs exactly once
     return IQEResult(run_dir=out_dir, n_pixels=len(selected), n_points=n_points, config=cfg)

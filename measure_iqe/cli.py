@@ -57,6 +57,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="override one config field; repeatable")
     ap.add_argument("--out", metavar="DIR",
                     help="output root, overriding base_dir from the config")
+    ap.add_argument("--resume", metavar="RUN_DIR",
+                    help="continue an interrupted run: skip the pixels this directory "
+                         "already finished and append to its files")
     ap.add_argument("--simulate", action="store_true",
                     help="run against the built-in ABC-model rig, no hardware")
     ap.add_argument("--warmup-diag", action="store_true",
@@ -95,7 +98,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     log = make_logger()
     try:
         result = run_iqe_measurement(cfg, simulate=args.simulate,
-                                     warmup_diag=args.warmup_diag, log=log)
+                                     warmup_diag=args.warmup_diag, log=log,
+                                     run_dir=args.resume)
     except KeyboardInterrupt:
         log("interrupted — partial results are on disk")
         return 130

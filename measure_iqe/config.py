@@ -328,6 +328,12 @@ class IQEConfig:
     #   * measure the bitval-0 reference back to back with the lit point, so both carry the
     #     same history and the subtraction cancels most of it
     # Spend the time budget on fewer points with a longer dwell, not more points.
+    resume: bool = False  # with --out pointing at an existing run directory, skip the
+                          # pixels it already finished and append. The aggregated CSV is
+                          # flushed per pixel, so a run killed mid-sweep (Windows Update,
+                          # a power cut) keeps every completed pixel and resumes from the
+                          # next one. A pixel interrupted part way through its own sweep
+                          # is re-measured whole, not stitched.
     settle_scale: float = 1.0  # multiplies every sweep settle. 1 = the measured times.
                                # --simulate sets it to 0 so a dry run is seconds, not
                                # 15 minutes. Lower it on real hardware only to measure what

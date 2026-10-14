@@ -234,6 +234,88 @@ def test_leakage_reference_is_measured_and_written():
         assert "NVLED_CURR_REF" not in agg.read_text().splitlines()[0]
 
 
+def test_every_swept_pixel_starts_from_a_blank_frame():
+    """The first swept pixel must not inherit whatever the fast scan left lit.
+
+    Run 261014-0048 pixel 33,32 (the FIRST measured) had a reference exactly 50% of
+    its lit current at all 30 biases: two emitters lit, one still on at bitval 0.
+    run_fast_scan used to return without blanking.
+    """
+    calls = []
+
+    class Spy:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def set_pixel(self, x, y, bit):
+            calls.append(("set", x, y, bit))
+            return self._inner.set_pixel(x, y, bit)
+
+        def blank_frame(self):
+            calls.append(("blank",))
+            return self._inner.blank_frame()
+
+        def __getattr__(self, k):
+            return getattr(self._inner, k)
+
+    real_connect = acquire.connect_sim
+
+    def wrapped(cfg, log):
+        pm, smu, smile = real_connect(cfg, log)
+        return pm, smu, Spy(smile)
+
+    acquire.connect_sim = wrapped
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_iqe_measurement(IQEConfig(**FAST), simulate=True, base_dir=tmp, log=QUIET)
+    finally:
+        acquire.connect_sim = real_connect
+
+    # every drive-level write must have a blank somewhere before it with no other
+    # pixel left lit in between -- i.e. the call right before each sweep bitval write
+    sets = [i for i, c in enumerate(calls) if c[0] == "set" and c[3] != 0]
+    assert sets, "no pixels were lit at all"
+    for i in sets:
+        prev = calls[i - 1]
+        assert prev[0] == "blank" or (prev[0] == "set" and prev[1:3] == calls[i][1:3]), (
+            f"pixel {calls[i][1:3]} was lit while {prev} was still in the frame")
+
+
+def test_resume_skips_finished_pixels_and_keeps_their_data():
+    """A run killed mid-sweep must continue, not restart and not duplicate."""
+    from measure_iqe.acquire import completed_pixels
+
+    with tempfile.TemporaryDirectory() as tmp:
+        first = _run(tmp)
+        agg = next((first.run_dir / "NVLEDSweep" / "Sweep").glob("aggregated_*.csv"))
+        rows = list(csv.DictReader(agg.open()))
+        done = completed_pixels(first.run_dir)
+        assert done, "no completed pixels found in a finished run"
+        assert len(done) == len({(int(float(r["X"])), int(float(r["Y"]))) for r in rows})
+
+        # resume a COMPLETE run: nothing left to do, and nothing lost
+        again = run_iqe_measurement(IQEConfig(**FAST), simulate=True, base_dir=tmp,
+                                    log=QUIET, run_dir=first.run_dir)
+        after = list(csv.DictReader(agg.open()))
+        assert again.run_dir == first.run_dir
+        assert len(after) == len(rows), f"{len(rows)} rows became {len(after)} on resume"
+
+        # drop one pixel's rows and resume: exactly that pixel is re-measured
+        victim = sorted(done)[-1]
+        keep = [r for r in rows
+                if (int(float(r["X"])), int(float(r["Y"]))) != victim]
+        with agg.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=rows[0].keys())
+            w.writeheader()
+            w.writerows(keep)
+        assert victim not in completed_pixels(first.run_dir)
+        run_iqe_measurement(IQEConfig(**FAST), simulate=True, base_dir=tmp, log=QUIET,
+                            run_dir=first.run_dir)
+        final = list(csv.DictReader(agg.open()))
+        assert len(final) == len(rows), f"expected {len(rows)} rows, got {len(final)}"
+        assert victim in completed_pixels(first.run_dir)
+
+
 def test_fast_scan_does_not_run_at_the_sweep_limit():
     """-1.35 V draws ~30 uA; the sweep's rising-side limit clamps every pixel there."""
     seen = []
