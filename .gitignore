@@ -223,3 +223,8 @@ charatests/
 # Deliberately untracked: they are measured facts about one physical array, and the
 # share export (git archive) must never overwrite them.
 calibrations/
+
+# Measurement output. Runs are data, not source; the share export must not carry them.
+demo/
+demo_test/
+caprun/
