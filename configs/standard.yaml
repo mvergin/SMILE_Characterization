@@ -227,3 +227,15 @@ smu_display_off: false
 # ---- Derived / helpers ----
 
 # ---- Serialisation ----
+
+# --- loop order (section 15) ------------------------------------------------------
+# WHICH LOOP IS OUTSIDE. The single biggest lever on run time.
+#   pixel_major  for pixel: for bias: settle, measure      (the original)
+#   bias_major   for bias:  settle once; for pixel: measure
+# The dwell is paid for the BIAS change, not the pixel change: one global 42.8 uF on the
+# common cathode, and the frame only picks the driven row/column. Measured 261014-2223:
+# a frame change at a held bias costs under 0.5% and is over at once, against the ~3.8%
+# a 54 s pixel-major dwell still leaves. 100 pixels x 30 points: 31.0 h -> 3.6 h.
+sweep_order: pixel_major
+pixel_switch_settle_s: 2.0   # bias_major only: the wait after a frame change. Measured
+                             # need is under 1 s; 2 s leaves 0.21-0.33%.
