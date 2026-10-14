@@ -865,10 +865,19 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
 
       1. light the `--switch-from` pixel and hold the bias until the node is settled
       2. blank the frame and light the target pixel -- the burst starts here
-      3. capture I(t) and ask how long until it is within 1 % of its own final value
+      3. compare the first second against the spread of every later second
 
-    `t_1pct` of a few hundred ms means the restructure is free. Seconds means it is
-    not, and the dwell belongs to the pixel after all.
+    Run it WITH --highc. Without it the per-sample noise is ~20 nA against a 480 nA
+    reading, which cannot resolve the faint end below about 1 %; with it the noise is
+    0.8 nA (section 13) and the bound is ~0.1 %:
+
+        --what switch --highc --pixels 35,36 --switch-from 39 40
+        --voltages -0.80 -0.85 -1.00 --switch-hold-s 300 --samples 500 --nplc 1.0
+
+    Measured on Array42, 261014-2151, High-C off: the first second sits 0.3-0.9 %
+    below the later ones at -0.85 and -1.00 V, and is lost in the noise at -0.80 V.
+    So the switch costs well under a percent and is done inside a second, against the
+    ~3.8 % the pixel-major sweep leaves after 54 s. Bias-major wins on both counts.
     """
     rows = []
     x, y = pixel
@@ -909,18 +918,54 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
                           f"_{fx}-{fy}to{x}-{y}", t, ia, ib, args.trace_points)
         nan = float("nan")
         p_lit, p_std = read_power(pm, args.step_n_pm) if args.step_n_pm else (nan, nan)
+
+        # The honest bound, and the reason this does not read t_1pct. A short capture
+        # of a quiet signal returns t_1pct = half a smoothing window -- a sentinel
+        # meaning "nothing was ever outside the band", not a measured settling time.
+        # Without High-C that band is ~10 % of the reading, so "t1%=0.1s" would
+        # announce success from a measurement that cannot see 10 %. Instead: compare
+        # the FIRST second against the spread of every later second. That spread
+        # already contains the correlated low-frequency noise an N**-0.5 estimate
+        # throws away, so it is the error bar this question has to clear.
+        first = later = res = nan
+        ib_a = np.abs(np.asarray(ib, float))
+        if t.size > 8:
+            dt = float(np.median(np.diff(t))) or 1e-3
+            w = max(2, int(round(1.0 / dt)))
+            if ib_a.size > 3 * w:
+                wins = [ib_a[k:k + w].mean() for k in range(2 * w, ib_a.size - w, w)]
+                if len(wins) > 2:
+                    first = float(ib_a[:w].mean())
+                    later = float(np.mean(wins))
+                    res = float(np.std(wins, ddof=1))        # 1 s resolution, measured
+        dev = 100.0 * (first / later - 1.0) if later else nan
+        res_pct = 100.0 * res / later if later else nan
+        sigma = (first - later) / res if res else nan
+
         rows.append(dict(v=v, from_x=fx, from_y=fy, to_x=x, to_y=y,
                          hold_s=args.switch_hold_s, **met, power_W=p_lit,
-                         power_std=p_std,
+                         power_std=p_std, first_s_a=first, later_s_a=later,
+                         switch_dev_pct=dev, resolution_pct=res_pct,
+                         switch_sigma=sigma,
                          **{f"spec_{k}": val for k, val in spec.items()}))
-        verdict = ("SWITCH IS FREE" if met["t_1pct"] == met["t_1pct"]
-                   and met["t_1pct"] < 1.0 else
-                   "costs real time" if met["t_1pct"] == met["t_1pct"] else
-                   "NOT SETTLED in the record")
+
+        if not np.isfinite(sigma):
+            verdict = "no verdict: the record is too short to form an error bar"
+        elif abs(sigma) < 2:
+            verdict = (f"FREE to within what this can see "
+                       f"(<{max(abs(dev), 2 * res_pct):.1f}%)")
+        elif abs(dev) < 1.0:
+            verdict = f"real but small: {dev:+.2f}% in the first second"
+        else:
+            verdict = f"COSTS {abs(dev):.1f}% -- the pixel owns part of the dwell"
         log(f"    {v:+.3f} V  ({fx},{fy}) -> ({x},{y})  "
-            f"I={met['settled']*1e9:+9.1f} nA  t1%={met['t_1pct']:.3f}s "
-            f"t0.1%={met['t_01pct']:.3f}s  rec={t[-1] if t.size else 0:.1f}s  "
-            f"<< {verdict}")
+            f"I={met['settled']*1e9:+9.1f} nA  "
+            f"first 1s {dev:+.2f}% vs later ({res_pct:.2f}% resolution, "
+            f"{sigma:+.1f} sigma)  rec={t[-1] if t.size else 0:.1f}s")
+        log(f"            << {verdict}")
+        if not cfg.highc_b:
+            log(f"            (High-C OFF: the noise floor is ~20 nA, so the faint end "
+                f"cannot be resolved below ~1%. Re-run with --highc.)")
     smile.blank_frame()
     return rows
 
