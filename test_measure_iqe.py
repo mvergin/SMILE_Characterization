@@ -237,7 +237,8 @@ def test_leakage_reference_is_measured_and_written():
 def test_fast_scan_does_not_run_at_the_sweep_limit():
     """-1.35 V draws ~30 uA; the sweep's rising-side limit clamps every pixel there."""
     seen = []
-    cfg = IQEConfig(**FAST)
+    # a value no other setting uses, so seeing it proves the fast scan asked for it
+    cfg = IQEConfig(**FAST, fastscan_limit_a=3e-4)
     real = acquire.configure_voltage_source_b
 
     def spy(smu, c, log=None):
@@ -250,9 +251,9 @@ def test_fast_scan_does_not_run_at_the_sweep_limit():
             run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
     finally:
         acquire.configure_voltage_source_b = real
-    assert seen[0] == cfg.fastscan_limit_a, (
-        f"the fast scan ran at {seen[0]} A, not its own {cfg.fastscan_limit_a} A limit")
-    assert cfg.fastscan_limit_a > cfg.vramp_lowv_limit_a
+    assert 3e-4 in seen, f"the fast scan never applied its own limit: {sorted(set(seen))}"
+    assert IQEConfig().fastscan_limit_a > IQEConfig().vramp_lowv_limit_a, (
+        "the fast-scan limit must clear the ~30 uA that -1.35 V draws")
 
 
 def test_pick_limit_never_clamps_the_real_iv_curve():

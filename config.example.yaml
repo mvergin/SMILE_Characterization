@@ -143,6 +143,10 @@ vramp_highv_n_smu: 8
 vramp_highv_settle_s: 2.0     # droop side: big currents, the relaxation is a smaller fraction
 vramp_highv_limit_a: 0.001    # -2.6 V draws ~175 uA, far above the rising-side limit
 
+fastscan_limit_a: 0.001   # compliance for the FAST SCAN, a different operating point from the sweep.
+                          # At -1.35 V a pixel draws ~30 uA, so the sweep's 10 uA rising-side limit
+                          # clamps EVERY pixel (measured 261014-0048: all 1024 read exactly 10.00 uA).
+
 # ---- Leakage reference (the low-J correction) ----
 # ch B reads the TOTAL cathode current. Measured over 12 pixels in 4 quadrants: the reference is 8% of the
 # reading at -0.95 V and 58% at -0.80 V. Without the subtraction the EQE appears to collapse 20x on the

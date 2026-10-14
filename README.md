@@ -385,6 +385,7 @@ runs that pinned each value.
 
 | parameter | type | default | meaning |
 |---|---|---|---|
+| `fastscan_limit_a` | `float` | `0.001` | compliance for the fast scan, a different operating point from the sweep: -1.35 V draws ~30 uA, so the sweep's 10 uA rising-side limit clamps every pixel |
 | `leak_reference` | `bool` | `True` | measure every sweep point a second time at `leak_ref_bitval` |
 | `leak_ref_bitval` | `int` | `0` | the reference drive level: addressed, but off |
 | `leak_ref_settle_s` | `float` | `2.0` | after switching drive level; the bias does not move |
