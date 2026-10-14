@@ -79,6 +79,7 @@ from pathlib import Path
 import numpy as np
 
 import measure_iqe as m
+from measure_iqe.calibrate import RECORD_LIMITED_FRAC, SMOOTH_MAX_S
 from measure_iqe import IQEConfig
 
 # Voltages worth probing: the sub-turn-on region that reaches J < 1, the rising side
@@ -343,8 +344,9 @@ def spectrum_summary(t, i, mains_hz=50.0, tail_frac=0.5):
     real noise. The tail is also the only part that matters, because that is where
     the sweep averages.
     """
-    out = dict(fs_hz=float("nan"), peak_hz=float("nan"), peak_amp=float("nan"),
-               mains_amp=float("nan"), mains2_amp=float("nan"), rms_ac=float("nan"))
+    out = dict(fs_hz=float("nan"), nyquist_hz=float("nan"), peak_hz=float("nan"),
+               peak_amp=float("nan"), mains_amp=float("nan"), mains2_amp=float("nan"),
+               rms_ac=float("nan"))
     ok = np.isfinite(i) & (np.abs(i) < OVERFLOW)
     if ok.sum() < 64 or t.size < 2:
         return out
@@ -362,7 +364,7 @@ def spectrum_summary(t, i, mains_hz=50.0, tail_frac=0.5):
     amp = np.abs(np.fft.rfft(iv * w)) * (4.0 / iv.size)      # ~peak amplitude
     f = np.fft.rfftfreq(iv.size, dt)
     lo = f > 2.0                                              # skip residual drift
-    out.update(fs_hz=fs, rms_ac=float(np.std(iv)))
+    out.update(fs_hz=fs, nyquist_hz=fs / 2, rms_ac=float(np.std(iv)))
     if lo.any():
         k = int(np.argmax(amp[lo]))
         out.update(peak_hz=float(f[lo][k]), peak_amp=float(amp[lo][k]))
@@ -429,7 +431,14 @@ def settling_metrics(t, i):
     # negligible even over thousands of samples. When the noise is larger than the
     # nominal band the tolerance is noise-dominated, which is honest -- 2% per-sample
     # noise cannot resolve 1% settling. t_*pct_tol records the tolerance actually used.
-    w = max(5, iv.size // 100)
+    # Cap the smoothing window in TIME, not as a fraction of the record, and reject an
+    # answer past half the record: both from measure_iqe.calibrate, which is where this
+    # criterion is defined. A fraction-of-record window makes the resolution degrade as
+    # the record grows (a 600 s capture smoothed over 30 s), and without the record
+    # limit the answer scales with how long you happened to watch -- 63%, 67%, 62% of
+    # the record on three captures of the same device.
+    dtm = float(np.median(np.diff(tv))) or 1e-3
+    w = int(np.clip(iv.size // 100, 5, max(5, round(SMOOTH_MAX_S / dtm))))
     smooth = np.convolve(iv, np.ones(w) / w, mode="valid")
     ts = tv[w - 1:]
     base["smooth_window"] = int(w)
@@ -438,9 +447,11 @@ def settling_metrics(t, i):
         base[key + "_tol"] = tol
         bad = np.nonzero(np.abs(smooth - settled) > tol)[0]
         if bad.size == 0:
-            base[key] = 0.0                     # in band from the first valid sample
+            base[key] = float(ts[0]) / 2.0      # no better than half a smoothing window
         elif bad[-1] + 1 >= smooth.size:
             base[key] = float("nan")            # never settled inside the record
+        elif float(ts[bad[-1]]) > RECORD_LIMITED_FRAC * float(tv[-1]):
+            base[key] = float("nan")            # measures the window, not the device
         else:
             base[key] = float(ts[bad[-1]])
     # A short record can LOOK settled, because "settled" is measured against the end
@@ -555,7 +566,13 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                     f"ripple={100*met['ripple']:.0f}%  over={met['n_overflow']}/{met['n']}  "
                     f"rec={float(t[-1]) if t.size else 0:.2f}s  "
                     f"sine {spec['peak_hz']:.1f}Hz@{spec['peak_amp']*1e9:.1f}nA "
-                    f"(50Hz {spec['mains_amp']*1e9:.1f}nA)"
+                    # NaN here is not a failure: it means 50 Hz is above this capture's
+                    # Nyquist frequency and therefore cannot be measured. At NPLC 1.0 the
+                    # sample rate is ~25 Hz, so Nyquist is ~12 Hz. Say that instead of
+                    # printing "nannA", which reads like something broke.
+                    + (f"(50Hz {spec['mains_amp']*1e9:.1f}nA)"
+                       if np.isfinite(spec['mains_amp'])
+                       else f"(50Hz n/a: above Nyquist {spec['fs_hz']/2:.0f}Hz)")
                     + ("  << NOT SETTLED" if not met["settled_ok"] else "")
                     + (f"  ERR: {err}" if err else ""))
     smile.blank_frame()
