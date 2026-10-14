@@ -1442,7 +1442,7 @@ def raster_grid(
     G[Y - ylo, X - xlo] = V
     if vlo is None:
         vlo, vhi = np.nanpercentile(V, [2, 98])
-    cm = plt.cm.get_cmap(cmap).copy()
+    cm = plt.get_cmap(cmap).copy()
     cm.set_bad("white")
     fig, ax = plt.subplots(figsize=(7.5, 6.2))
     im = ax.imshow(

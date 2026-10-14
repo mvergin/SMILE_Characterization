@@ -28,6 +28,11 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import analyze_array as aa          # noqa: E402  (after the path fix)
 
+try:                     # the em dashes printed below must survive a cp1252 console
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 AREA_CM2 = 100.0 * 1e-8
 
 

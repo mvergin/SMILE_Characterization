@@ -373,12 +373,21 @@ def summarise(traces: dict[str, np.ndarray], mains_hz: float) -> None:
                 return float("nan")
             b = np.abs(f - target) < max(2.0, 3 * fs / tc.size)
             return float(np.max(amp[b])) if b.any() else float("nan")
+        def fmt(target, width=9):
+            # Above Nyquist the line is not absent, it is unrepresentable. Saying so
+            # beats printing "nannA", which reads as a broken measurement.
+            if target >= fs / 2:
+                return f"{'>fN':>{width}}"
+            return f"{band(target)*1e9:>{width-2}.2f}nA"
+
         cut = int(0.5 * tc.size)
         print(f"  {label_of(key):<30} {fs:>7.1f}Hz {f[sel][k]:>8.1f}Hz "
-              f"{amp[sel][k]*1e9:>7.2f}nA {band(mains_hz)*1e9:>7.2f}nA "
-              f"{band(2*mains_hz)*1e9:>6.2f}nA {np.std(ic[cut:])*1e9:>7.2f}nA")
+              f"{amp[sel][k]*1e9:>7.2f}nA {fmt(mains_hz)} "
+              f"{fmt(2 * mains_hz, 8)} {np.std(ic[cut:])*1e9:>7.2f}nA")
     print("\n  A peak at the mains line means the readings carry mains pickup, which an")
     print("  integer NPLC would null entirely. NPLC 0.01 rejects none of it.")
+    print('  ">fN" means the sample rate cannot represent that frequency at all, so the')
+    print("  capture says nothing about it either way (NPLC 1 at ~25 Hz: fN = 12 Hz).")
     print("  rms_ac is the per-sample noise in the tail. It falls as sqrt(NPLC).\n")
 
 
