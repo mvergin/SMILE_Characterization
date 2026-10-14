@@ -543,6 +543,86 @@ def test_bias_major_pays_each_dwell_once_for_all_pixels():
         f"restore the pixel and wait again")
 
 
+def test_bias_major_serves_the_dwell_with_a_pixel_lit():
+    """The dwell must relax in the state the measurement is taken in.
+
+    Run 261014-2308 paid the dwell with the frame BLANKED -- the previous bias ends
+    with a blank for its dark reading, and nothing re-lit before the voltage stepped.
+    A blanked frame conducts ~4x the bitval-0 level, so the array settled to a
+    different charge, and the run read 2.2-2.9% LOW against the pixel-major run on the
+    same 16 pixels at every bias from -1.25 to -0.90 V. Nothing in the suite noticed,
+    because the grid and the columns were perfect.
+
+    So: record the order of frame operations, voltage steps and sleeps, and assert that
+    the long sleep after each voltage step is preceded by a set_pixel, not a blank.
+    """
+    import time as _time
+    import measure_iqe.acquire as acq
+    from measure_iqe import run_iqe_measurement
+
+    # The simulated rig is _SimSmile/_SimSMU inside acquire.py, NOT instruments.sim --
+    # patching the latter records nothing and the test passes vacuously, which is what
+    # the "test is not biting" assertion at the end exists to catch.
+    events: list[tuple] = []
+    orig_set, orig_blank = acq._SimSmile.set_pixel, acq._SimSmile.blank_frame
+    orig_v = acq._SimSMU.set_voltage
+    real_sleep = _time.sleep
+
+    def rec_set(self, x, y, b):
+        events.append(("pixel", x, y, b))
+        return orig_set(self, x, y, b)
+
+    def rec_blank(self):
+        events.append(("blank",))
+        return orig_blank(self)
+
+    def rec_v(self, ch, v):
+        if ch == "b":
+            events.append(("volt", round(float(v), 4)))
+        return orig_v(self, ch, v)
+
+    DWELL = 0.0213                      # distinctive: no other sleep is this size
+    try:
+        acq._SimSmile.set_pixel = rec_set
+        acq._SimSmile.blank_frame = rec_blank
+        acq._SimSMU.set_voltage = rec_v
+        _time.sleep = lambda s: (events.append(("sleep", round(float(s), 6))),
+                                 real_sleep(0))[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = IQEConfig(**{**FAST, "n_fine": 4, "roi": (0, 0, 7, 7),
+                               "block_size": 4, "pixels_per_block": 1, "block_seed": 0,
+                               "dead_abort": False, "sweep_order": "bias_major",
+                               "settle_scale": 1.0, "vramp_lowv_settle_s": DWELL,
+                               "vramp_highv_settle_s": DWELL,
+                               "leak_ref_settle_s": 0.003,
+                               "pixel_switch_settle_s": 0.007,
+                               "trace_settling": False, "warmup_ms": 0.0})
+            run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
+    finally:
+        acq._SimSmile.set_pixel, acq._SimSmile.blank_frame = orig_set, orig_blank
+        acq._SimSMU.set_voltage = orig_v
+        _time.sleep = real_sleep
+
+    dwells = [k for k, e in enumerate(events) if e == ("sleep", DWELL)]
+    assert dwells, f"no dwell sleep of {DWELL}s found in {len(events)} events"
+    checked = 0
+    for k in dwells:
+        # the voltage step this dwell belongs to, then the frame state it stepped in
+        volt = next((j for j in range(k - 1, max(-1, k - 4), -1)
+                     if events[j][0] == "volt"), None)
+        if volt is None:
+            continue                    # a dwell not tied to a bias step; not ours
+        frame = next((events[j] for j in range(volt - 1, -1, -1)
+                      if events[j][0] in ("pixel", "blank")), None)
+        checked += 1
+        assert frame is not None and frame[0] == "pixel", (
+            f"the dwell for {events[volt]} was served with the frame "
+            f"{frame[0] if frame else 'unset'}; a blanked frame conducts ~4x bitval 0, "
+            f"so the array settles to a charge the measurement never sees. "
+            f"Context: {events[max(0, volt - 3):k + 1]}")
+    assert checked >= 2, f"only {checked} bias dwell(s) identified - test is not biting"
+
+
 def test_completed_biases_finds_whole_biases_not_whole_pixels():
     """--resume in bias_major order skips biases; completed_pixels cannot see them."""
     from measure_iqe.acquire import completed_biases, completed_pixels

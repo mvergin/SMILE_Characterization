@@ -1247,6 +1247,21 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
                 set_measure_range_b(smu, cfg.nvled_range_i); cur_range = cfg.nvled_range_i
 
             # --- the one dwell this bias costs, for all the pixels below it ---
+            #
+            # Light a pixel FIRST. The previous bias ended with a blanked frame for its
+            # dark reading, and relaxing at the new bias in that state is not the state
+            # the measurements are taken in: a blanked frame conducts ~4x the bitval-0
+            # level (section 6), so the array settles to a different charge. Run
+            # 261014-2308 paid its dwell blanked and read 2.2-2.9% LOW at every bias
+            # from -1.25 to -0.90 V against the pixel-major run on the same 16 pixels --
+            # with the reference and the raw lit current both confirming the offset was
+            # in the lit reading, not the subtraction.
+            #
+            # The switch test (261014-2223) held the bias with ANOTHER PIXEL LIT, which
+            # is why it measured 0.3% and this loop lost 2.5%: it was not reproducing
+            # the condition the test validated.
+            smile.blank_frame()
+            smile.set_pixel(live[0][0], live[0][1], bitval)
             smu.set_voltage("b", float(v))
             dwell = settle_s * cfg.settle_scale
             if cfg.trace_settling and dwell >= cfg.trace_settling_min_s:
@@ -1255,8 +1270,8 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
                     settle_traces.append((f"bias_b{bitval}_v{v:+.4f}", *tr))
             else:
                 time.sleep(dwell)
-            log(f"  [{jpt + 1}/{len(fine)}] {v:+.3f} V  settled {dwell:g}s once, "
-                f"now {len(live)} pixel(s) at "
+            log(f"  [{jpt + 1}/{len(fine)}] {v:+.3f} V  settled {dwell:g}s once "
+                f"with ({live[0][0]},{live[0][1]}) lit, now {len(live)} pixel(s) at "
                 f"{cfg.pixel_switch_settle_s * cfg.settle_scale:g}s each")
 
             rows, samps = [], []
@@ -1291,7 +1306,8 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
 
             # One dark reading per bias, with the frame blanked. pixel_major takes one
             # per pixel at whatever bias it stopped on; per bias is both cheaper and a
-            # better match to what the analysis subtracts.
+            # better match to what the analysis subtracts. It leaves the frame blanked,
+            # which is why the next bias re-lights before it steps -- see above.
             smile.blank_frame()
             time.sleep(max(cfg.settle_ms, 5.0) / 1000.0)
             dp, _, div, _, dinv, _, _, _ = acquire_point(pm, smu, cfg.coarse_n_smu, 3)
