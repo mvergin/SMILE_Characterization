@@ -144,7 +144,14 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
             # 100 uA range while the sweep uses 10 uA, and under High-C that is a different
             # measurement, not a detail.
             seg_step = step if v > knee else droop_step
-            for k in range(cfg.calibrate_approach_steps, 0, -1):
+            # Never drive past the sweep's own range. -2.6 V is the FIRST point of the
+            # sweep, so there is nothing before it, and stepping "before" it would mean
+            # -2.93 V -- harder than the sweep ever drives, and straight into compliance.
+            lo = min(cfg.nvled_v_coarse_start, cfg.nvled_v_coarse_stop)
+            n_approach = cfg.calibrate_approach_steps
+            while n_approach and v - n_approach * seg_step < lo:
+                n_approach -= 1
+            for k in range(n_approach, 0, -1):
                 # MORE negative, i.e. from the higher current: the sweep runs
                 # high_to_low, so the point before v is v - step, every time. Getting
                 # this sign wrong approaches from the low-current side, which is the
@@ -166,7 +173,8 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
                                 cfg.calibrate_period_s)
             prev_i = float(np.median(i[int(0.8 * i.size):])) if i.size else None
             r = dict(pixel_x=x, pixel_y=y, v_to=v, limit_a=limit,
-                     settled_a=prev_i, step_v=round(step, 5),
+                     settled_a=prev_i, step_v=round(seg_step, 5),
+                     approach_steps=n_approach,
                      t_target=settle_time(t, i, cfg.calibrate_target),
                      t_1pct=settle_time(t, i, 0.01),
                      t_01pct=settle_time(t, i, 0.001),

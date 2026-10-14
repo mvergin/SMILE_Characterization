@@ -123,9 +123,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     log = make_logger()
     if args.array and not args.calibrate and not args.calibration:
         auto = calibration_path(args.array)
-        log(f"array {args.array}: " + (f"using {auto}" if auto.exists() else
-            f"no calibration at {auto} - run --calibrate --array {args.array} "
-            f"to measure this array's settle times instead of inheriting Array38's"))
+        if auto.exists():
+            # Say WHICH calibration and WHEN it was measured. Several --calibrate runs
+            # leave several record folders, but only one file is ever consulted: this
+            # one, overwritten by the most recent run. Printing the timestamp and the
+            # values makes it impossible to analyse a sweep against the wrong one.
+            try:
+                import yaml
+                d = yaml.safe_load(auto.read_text(encoding="utf-8")) or {}
+            except Exception:
+                d = {}
+            log(f"array {args.array}: using {auto}")
+            log(f"  measured {d.get('measured_utc', '?')} on pixels {d.get('pixels', '?')}, "
+                f"target {d.get('target', '?')}, window {d.get('seconds_per_capture', '?')}s"
+                + (" (LOWER BOUND)" if d.get("lower_bound") else ""))
+            log(f"  applying {d.get('recommended', {})}")
+        else:
+            log(f"array {args.array}: no calibration at {auto} - run "
+                f"--calibrate --array {args.array} to measure this array's settle times "
+                f"instead of inheriting Array38's")
     if args.calibrate:
         try:
             run_calibration(cfg, simulate=args.simulate, log=log)

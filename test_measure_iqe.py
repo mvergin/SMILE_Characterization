@@ -375,6 +375,13 @@ def test_calibration_approaches_a_bias_the_way_the_sweep_does():
     for v in want:
         assert v < target, f"{v} is on the low-current side of {target}"
 
+    # NOTHING may be driven past the sweep's own range. -2.6 V is the first sweep point,
+    # so approaching it would mean -2.93 V: harder than the sweep ever drives, straight
+    # into compliance, on a real device.
+    lo = min(cfg.nvled_v_coarse_start, cfg.nvled_v_coarse_stop)
+    assert min(seen) >= lo - 1e-9, (
+        f"drove to {min(seen):+.3f} V, past the sweep's {lo:+.3f} V limit")
+
 
 def test_unsettled_captures_raise_the_recommendation_not_vanish():
     """A capture that never settled is the SLOWEST one; dropping it biases low."""
