@@ -67,6 +67,26 @@ The split is deliberate: measuring a variation needs the hardware, judging it
 needs the ABC fit. The measurement repo writes the fit-free precision metrics
 and stops; this script does the rest.
 
+### `compare_runs.py` — old method against new, same pixels
+
+```bash
+python compare_runs.py OLD_RUN NEW_RUN --label-old "legacy" --label-new "rebuilt"
+```
+
+Measure one ROI with `configs/legacy_pre261014.yaml` and again with the defaults,
+then run this. It matches the two runs pixel by pixel and writes, into
+`NEW_RUN/comparison/`:
+
+* `eqe_vs_J.png` — EQE(J) under each method, median over the pixels with the
+  inter-quartile band. The headline figure.
+* `iv.png` — the I–V each method reports, and the ratio between them
+* `leakage.png` — the fraction of channel B that is not the LED, which is *why*
+* `per_pixel.png` — peak IQE per pixel, old against new, so it is not one average
+* `COMPARISON.md` — the numbers, with the figures embedded
+
+It reads only what each run contains, so an old run with no leakage reference is
+handled: its `I_LED` is the total cathode current, which is the point being made.
+
 ### `plot_transients.py` — settling curves and their spectra
 
 ```bash
