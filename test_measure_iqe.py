@@ -461,32 +461,39 @@ def test_array_flag_names_the_run_and_picks_up_its_calibration():
     from measure_iqe.calibrate import CALIBRATION_VERSION, calibration_path
     from measure_iqe.cli import build_config, build_parser
 
+    # NOT a real array name. calibration_roots() also searches the install directory,
+    # so any array that has actually been calibrated -- Array42_IQE has -- would make
+    # the "no calibration yet" branch below pass for the wrong reason.
+    name = "ZZZ_UncalibratedTestArray"
+
     with tempfile.TemporaryDirectory() as tmp:
         cwd = os.getcwd()
         os.chdir(tmp)                       # calibration_path is relative to cwd
         try:                                # ... and chdir back before the cleanup
-            args = build_parser().parse_args(["--array", "Array42_IQE"])
+            assert not calibration_path(name).exists(), (
+                f"{name} must not exist on disk for this test to mean anything")
+            args = build_parser().parse_args(["--array", name])
             cfg = build_config(args)
-            assert cfg.sample_name == "Array42_IQE"
+            assert cfg.sample_name == name
             # no calibration yet: the defaults stand, and nothing pretends otherwise
             assert cfg.vramp_lowv_settle_s == IQEConfig().vramp_lowv_settle_s
 
-            path = calibration_path("Array42_IQE")
+            path = calibration_path(name)
             assert path.parent.parent.resolve() == Path(tmp).resolve(), path
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({
-                "calibration_version": CALIBRATION_VERSION, "sample_name": "Array42_IQE",
+                "calibration_version": CALIBRATION_VERSION, "sample_name": name,
                 "recommended": {"vramp_lowv_settle_s": 1.25}}), encoding="utf-8")
             path.rename(path.with_suffix(".yaml")) if False else None
 
-            args = build_parser().parse_args(["--array", "Array42_IQE"])
+            args = build_parser().parse_args(["--array", name])
             cfg = build_config(args)
-            assert cfg.sample_name == "Array42_IQE"
+            assert cfg.sample_name == name
             assert cfg.vramp_lowv_settle_s == 1.25, "the calibration was not applied"
 
             # an explicit --set still wins over the calibration
             args = build_parser().parse_args(
-                ["--array", "Array42_IQE", "--set", "vramp_lowv_settle_s=9.0"])
+                ["--array", name, "--set", "vramp_lowv_settle_s=9.0"])
             assert build_config(args).vramp_lowv_settle_s == 9.0
         finally:
             os.chdir(cwd)
