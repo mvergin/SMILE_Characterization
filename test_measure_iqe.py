@@ -28,7 +28,15 @@ from measure_iqe.cli import parse_override
 QUIET = lambda _msg: None                                 # noqa: E731 - tests stay silent
 
 # small but exercises every branch: 2x2 blocks, both ramp segments, raw samples on
-FAST = dict(roi=(0, 0, 7, 7), block_size=4, pixels_per_block=1, n_fine=6, n_coarse=4,
+# NOT a real array. write_calibration() deliberately writes to every calibration root,
+# including the install directory, so a sweep started from anywhere finds the file. The
+# tests inherited the default sample_name -- Array42_IQE -- and so every calibration
+# test silently overwrote the bench's measured calibration for the real array with
+# simulator output (0.8 s in place of 54.47 s). A test must never name a real array.
+TEST_ARRAY = "ZZZ_SimTestArray"
+
+FAST = dict(sample_name=TEST_ARRAY,
+            roi=(0, 0, 7, 7), block_size=4, pixels_per_block=1, n_fine=6, n_coarse=4,
             warmup_ms=0.0, thermal_settle_ms=1.0, settle_ms=1.0, fastscan_settle_ms=0.0,
             settle_scale=0.0,   # the real settles are seconds; a test must not wait them
             vramp_lowv_n_pm=2, vramp_highv_n_pm=2, lowj_n_pm=2, highj_n_pm=2, n_pm_samples=2)
@@ -752,9 +760,34 @@ def test_cli_runs_a_simulated_measurement():
         assert list(Path(tmp).glob("*/NVLEDSweep/Sweep/*.csv")), "CLI produced no sweep output"
 
 
+def _repo_calibrations() -> dict[str, float]:
+    """Hash every calibration in the install tree, so the suite can prove it kept them."""
+    import hashlib
+    from measure_iqe.calibrate import CALIB_DIR
+    d = Path(__file__).resolve().parent / CALIB_DIR
+    return {f.name: hashlib.sha256(f.read_bytes()).hexdigest()
+            for f in sorted(d.glob("*.yaml"))} if d.is_dir() else {}
+
+
 if __name__ == "__main__":
+    # write_calibration() writes to every calibration root, the install tree included.
+    # That is wanted for a real --calibrate and poison for a test: the suite once
+    # replaced the bench's measured Array42_IQE calibration with simulator output and
+    # said "all checks passed". The run is not green unless the arrays it found on disk
+    # are still there, byte for byte.
+    before = _repo_calibrations()
+
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             fn()
             print(f"ok  {name}")
+
+    after = _repo_calibrations()
+    clobbered = [k for k, v in before.items() if after.get(k) != v]
+    assert not clobbered, (
+        f"the suite modified real calibration(s): {clobbered}. A test must use "
+        f"sample_name=TEST_ARRAY, never a name a bench has measured.")
+    for stray in set(after) - set(before):
+        (Path(__file__).resolve().parent / "calibrations" / stray).unlink()
+        print(f"ok  removed the test calibration the suite wrote: {stray}")
     print("all checks passed")
