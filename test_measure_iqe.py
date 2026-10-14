@@ -287,6 +287,34 @@ def test_every_swept_pixel_starts_from_a_blank_frame():
             f"pixel {calls[i][1:3]} was lit while {prev} was still in the frame")
 
 
+def test_unsettled_captures_raise_the_recommendation_not_vanish():
+    """A capture that never settled is the SLOWEST one; dropping it biases low."""
+    import os
+    from measure_iqe import run_calibration
+    from measure_iqe.calibrate import load_calibration
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cwd = os.getcwd()
+        os.chdir(tmp)
+        try:
+            # a window far too short to resolve anything: every capture is unsettled
+            cfg = IQEConfig(**FAST, calibrate_seconds=0.4, calibrate_pixels=1,
+                            calibrate_margin=2.0)
+            path = run_calibration(cfg, simulate=True, base_dir=tmp, log=QUIET)
+            import yaml
+            data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+            if not data["never_settled"]:
+                return                      # the rig settled instantly; nothing to assert
+            assert data["lower_bound"] is True
+            rec = load_calibration(path)
+            for k in ("vramp_lowv_settle_s", "vramp_highv_settle_s"):
+                if k in rec:
+                    assert rec[k] >= cfg.calibrate_seconds * cfg.calibrate_margin - 1e-9, (
+                        f"{k}={rec[k]} is below the window that failed to settle")
+        finally:
+            os.chdir(cwd)
+
+
 def test_array_flag_names_the_run_and_picks_up_its_calibration():
     """--array NAME must set sample_name AND apply that array's measured settings."""
     import os

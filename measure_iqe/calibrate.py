@@ -148,12 +148,24 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
                 f"limit {limit:g} A  t_1%={r['t_1pct']:.2f}s  t_0.1%={r['t_01pct']:.2f}s")
     smile.blank_frame()
 
-    def worst(key: str, keep) -> float:
-        vals = [r[key] for r in rows if keep(r) and np.isfinite(r[key])]
-        return float(max(vals)) if vals else float("nan")
+    def worst(key: str, keep) -> tuple[float, bool]:
+        """(worst case over the segment, is it only a lower bound?).
 
-    rising = worst("t_1pct", lambda r: r["v_to"] > knee)
-    droop = worst("t_1pct", lambda r: r["v_to"] <= knee)
+        A capture that never settled is the SLOWEST one, so dropping it would bias the
+        recommendation low by exactly the data that matters -- which is what the first
+        version of this did. An unsettled capture is still outside the band at the end
+        of the window, so it contributes at least `calibrate_seconds`, and the result
+        is flagged as a lower bound.
+        """
+        seg = [r for r in rows if keep(r)]
+        vals = [r[key] for r in seg if np.isfinite(r[key])]
+        unsettled = len(seg) - len(vals)
+        if unsettled:
+            vals.append(cfg.calibrate_seconds)
+        return (float(max(vals)) if vals else float("nan")), bool(unsettled)
+
+    rising, rising_lb = worst("t_1pct", lambda r: r["v_to"] > knee)
+    droop, droop_lb = worst("t_1pct", lambda r: r["v_to"] <= knee)
     never = [r for r in rows if not np.isfinite(r["t_1pct"])]
     currents = [r["settled_a"] for r in rows if r["settled_a"]]
 
@@ -182,12 +194,19 @@ def calibrate(pm, smu, smile, pixels: list[tuple[int, int]], cfg: IQEConfig,
         rising_step_v=round(step, 5),
         recommended=rec,
         never_settled=[{k: r[k] for k in ("pixel_x", "pixel_y", "v_to")} for r in never],
+        lower_bound=False,          # set below once both segments are known
         measurements=rows,
     )
+    out["lower_bound"] = bool(rising_lb or droop_lb)
     if never:
-        log(f"  !! {len(never)} capture(s) never settled within {cfg.calibrate_seconds:g}s. "
-            f"The recommendation is a LOWER BOUND — re-run with a longer "
-            f"--set calibrate_seconds.")
+        log(f"  !! {len(never)} of {len(rows)} capture(s) never settled within "
+            f"{cfg.calibrate_seconds:g}s, so the worst case is at least that long and the "
+            f"recommendation is a LOWER BOUND.")
+        for r in never:
+            log(f"       ({r['pixel_x']},{r['pixel_y']}) at {r['v_to']:+.3f} V")
+        log(f"     Re-run with --set calibrate_seconds={max(120, 3 * cfg.calibrate_seconds):g} "
+            f"to get a real number. The sweep will work with this value, but the low-J "
+            f"points carry more unrelaxed tail than the margin assumes.")
     log(f"  recommended: " + ", ".join(f"{k}={v}" for k, v in rec.items()))
     return out
 
