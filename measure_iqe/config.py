@@ -447,10 +447,18 @@ class IQEConfig:
                                        # !! DO NOT RAISE THIS. It was measured, twice,
                                        # and it is not the knob it looks like.
                                        #
-                                       # bias_major reads ~3.2 % low in current on the
-                                       # rising side against pixel_major on the same
-                                       # pixels, flat across every pixel. That looked
-                                       # like an unfinished switch transient, so
+                                       # bias_major reads up to ~3 % low in current on
+                                       # the rising side against pixel_major on the same
+                                       # pixels, flat across every pixel. !! That is an
+                                       # UPPER BOUND: every bias_major run is compared
+                                       # to one pixel_major run from the day before, so
+                                       # elapsed time and loop order are confounded and
+                                       # the optical channel visibly drifts across the
+                                       # window. A back-to-back A/B (~1.3 h, 6 pixels)
+                                       # is what settles it.
+                                       #
+                                       # The deficit looked like an unfinished switch
+                                       # transient, so
                                        # run 261015-0958 repeated it at 20 s -- ten times
                                        # the wait, 3.5x the run time:
                                        #
@@ -481,13 +489,11 @@ class IQEConfig:
                                        # points, one second here is 50 min of run time,
                                        # so 2 -> 20 s is 15 hours for nothing.
                                        #
-                                       # The leading candidate for the offset is in this
-                                       # file: warmup_ms/warmup_nvled_v hold every pixel
-                                       # at -2.6 V for 1.5 s in pixel_major, and
-                                       # bias_major holds NO pixel there -- see the
-                                       # sweep_order note above, which assumes the first
-                                       # bias covers it. That assumption is now the open
-                                       # question. Conditioning is
+                                       # The conditioning candidate is dead too: run
+                                       # 261015-1321 held all 16 pixels at -2.6 V before
+                                       # the first bias (bias_major_precondition) and
+                                       # read -3.02 % against the unconditioned
+                                       # -2.99 %. Conditioning is
                                        # bought with current, not with waiting -- which
                                        # is exactly why 20 s changed nothing. See
                                        # section 17.

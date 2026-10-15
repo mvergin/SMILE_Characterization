@@ -1249,13 +1249,13 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
     # Say it every run, because an operator who sees a 3% deficit will reach for this
     # knob, and 261015-0958 already paid 2 hours to prove it is the wrong one.
     sw = cfg.pixel_switch_settle_s * cfg.settle_scale
-    log(f"  !! bias_major reads ~3.2% low in current and ~5% low in power on the rising "
-        f"side vs pixel_major, flat across every pixel. NOT the switch wait (261015-0958 "
-        f"ran at 20s, no change) and NOT a loop position (261015-1225 rotated the list; "
-        f"the clean pixel followed the pixel). At matched CURRENT the two orders agree "
-        f"to within 1.9%, so EQE(J)/IQE are fine and EQE(V) is 5% low. Report against "
-        f"J, and leave pixel_switch_settle_s={sw:g}s alone -- see "
-        f"config.pixel_switch_settle_s.")
+    log(f"  !! bias_major reads up to ~3% low in current on the rising side vs the "
+        f"pixel_major run of 261014-1616. Five runs failed to move it: the switch wait "
+        f"(0958), the loop order (1225), a conditioning pass (1321). But all five are "
+        f"compared to ONE reference from the day before, so elapsed time and loop order "
+        f"are confounded -- treat 3% as an upper bound until a back-to-back A/B exists. "
+        f"Report against J: at matched CURRENT the orders agree to within 1.9%. Leave "
+        f"pixel_switch_settle_s={sw:g}s alone -- see config.pixel_switch_settle_s.")
     if sw > 5.0:
         log(f"  !! pixel_switch_settle_s={sw:g}s costs n_px x n_points x {sw:g}s and buys "
             f"nothing measurable. 2s is the measured-correct value.")
