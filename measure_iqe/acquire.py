@@ -978,6 +978,7 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
 def run_sweep_current(pm, smu, smile, selected: list[Row], run_dir: Path,
                       cfg: IQEConfig, log: Logger) -> int:
     """Current-source sweep: set log-spaced currents at bitval 15, measure V + P."""
+    _ref_warned.clear()
     setpoints = build_current_setpoints(cfg)
     log("=" * 56)
     log(f"CURRENT-SOURCE SWEEP — {len(selected)} pixels, bitval {cfg.current_sweep_bitval}, "
@@ -1025,6 +1026,11 @@ def run_sweep_current(pm, smu, smile, selected: list[Row], run_dir: Path,
         json.dumps({"settings": cfg.to_dict(), "provenance": provenance()}, indent=2),
         encoding="utf-8")
     return len(sw_rows)
+
+
+_ref_warned: set[tuple[int, int]] = set()
+# ponytail: one set per process, cleared by the sweep entry points. A process runs one
+# sweep, so this only matters to the tests, which is why they clear it.
 
 
 def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
@@ -1089,6 +1095,25 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
         row.update(NVLED_CURR_REF=rinv, NVLED_CURR_REF_STD=rinvs,
                    VLED_CURR_REF=riv, PM400_POWER_REF=rp,
                    PM400_POWER_REF_STD=rps, LEAK_REF_BITVAL=cfg.leak_ref_bitval)
+        # Say it at the bench, not three days later in the analysis. 3 of the 100 pixels
+        # in run 261015-0015 never went dark at bitval 0, and the operator found out
+        # from a CSV. Section 19, open question 9.
+        #
+        # Only on the pixel's FIRST point, which is its brightest: the sweep runs high
+        # current to low current, and at the faint end even a healthy pixel's reference
+        # is legitimately 58% of the reading (section 6), so the same gate there would
+        # fire on everything. At the bright end the separation is 38x -- 1.5% healthy
+        # against 57% contaminated -- and needs no threshold tuning.
+        if (x, y) not in _ref_warned:
+            _ref_warned.add((x, y))
+            frac = abs(rp / p) if p else float("nan")
+            if frac > 0.25:
+                log(f"  !! ({x},{y}) does not go dark at bitval "
+                    f"{cfg.leak_ref_bitval}: its reference carries {100*frac:.0f}% of "
+                    f"its own light at {v:+.2f} V. The subtraction removes most of the "
+                    f"signal, so this pixel's EQE is not usable. Retrying the frame "
+                    f"write does NOT help -- it is the pixel, not the write (section "
+                    f"19). The analysis flags it REF_CONTAMINATED.")
     if raw_s is not None:
         # honest per-burst stats. _MEAN = true mean, _MEDIAN = median, _SAMPSTD =
         # population std, _STD = SEM (sigma/sqrt(N)) -- kept as _STD because that is the
@@ -1401,6 +1426,7 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                       cfg: IQEConfig, log: Logger) -> int:
     """Voltage-source adaptive sweep. Single bitval, low-J-weighted spacing, and
     longer integration on the low-current rising side (per-point NPLC)."""
+    _ref_warned.clear()
     log("=" * 56)
     if cfg.fine_sweep_mode == "voltage":
         eff = (f"low-V NPLC {cfg.vramp_lowv_nplc}/{cfg.vramp_lowv_n_pm} PM/"

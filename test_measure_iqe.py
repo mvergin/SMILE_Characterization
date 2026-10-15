@@ -252,6 +252,54 @@ def test_leakage_reference_is_measured_and_written():
         assert "NVLED_CURR_REF" not in agg.read_text().splitlines()[0]
 
 
+def test_a_pixel_that_does_not_go_dark_is_flagged_once_at_the_bench():
+    """Section 19: 3 of 100 pixels never went dark at bitval 0 and the operator found
+    out from a CSV three days later. The warning fires on the pixel's FIRST point --
+    its brightest -- because at the faint end a healthy reference is legitimately 58 %
+    of the reading and the same gate would fire on everything.
+    """
+    class _Smile:
+        def set_pixel(self, *a):
+            pass
+
+        def blank_frame(self):
+            pass
+
+    def _point(lit_w, ref_w):
+        """Stub acquire_point: lit reading first, then the bitval-0 reference."""
+        seq = [(lit_w, 0.0, 1e-5, 0.0, -1e-5, 0.0, 0.0, 0.0),
+               (ref_w, 0.0, 1e-7, 0.0, -1e-7, 0.0, 0.0, 0.0)]
+        return lambda *a, **k: seq.pop(0) if len(seq) > 1 else seq[0]
+
+    cfg = IQEConfig(**dict(FAST, leak_reference=True, perpoint_range=False,
+                           save_raw_samples=False))
+    real = acquire.acquire_point
+    try:
+        for (lit, ref, want, who) in ((1e-9, 6e-10, True, "contaminated, 60 %"),
+                                      (1e-9, 2e-13, False, "healthy, 2e-4")):
+            acquire.acquire_point = _point(lit, ref)
+            acquire._ref_warned.clear()
+            said = []
+            row, _ = acquire.measure_point(
+                None, None, _Smile(), 7, 9, 15, -2.6, 1e-3, 8, 8, cfg, 0.0,
+                said.append, restore=False)
+            hit = [m for m in said if "does not go dark" in m]
+            assert bool(hit) == want, f"{who}: warned={bool(hit)}, wanted {want}"
+            if want:
+                assert "(7,9)" in hit[0] and "60%" in hit[0], hit[0]
+                assert "does NOT help" in hit[0], "must say the retry is useless"
+                # and only ONCE per pixel, not on all 30 of its biases
+                said.clear()
+                acquire.measure_point(
+                    None, None, _Smile(), 7, 9, 15, -2.5, 1e-3, 8, 8, cfg, 0.0,
+                    said.append, restore=False)
+                assert not [m for m in said if "does not go dark" in m],                     "warned twice for one pixel"
+            assert row["PM400_POWER_REF"] == ref
+    finally:
+        acquire.acquire_point = real
+        acquire._ref_warned.clear()
+
+
 def test_every_swept_pixel_starts_from_a_blank_frame():
     """The first swept pixel must not inherit whatever the fast scan left lit.
 
