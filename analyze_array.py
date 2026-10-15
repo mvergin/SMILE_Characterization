@@ -731,8 +731,19 @@ def enrich(df, dark_W=0.0):
             cohort = df.groupby(["BITVAL", "NVLED_V"])["P_W"].transform("median")
             swallowed = ((carried > REF_POWER_SUSPECT)
                          & (df["P_W"] < REF_SWALLOWED_FRAC * cohort))
+            # ...but the net-power half only fires where the damage is already severe.
+            # In run 261015-0015 four pixels whose reference carried ~58 % of their
+            # light passed this gate at -1.35 V -- net still above a fifth of the
+            # cohort -- and came out 42-58 % below the fast scan. The contamination is
+            # a property of the PIXEL, not of one bias: its median carried fraction
+            # over the whole sweep is 0.55-0.61 while every other pixel sits at 0.000
+            # to 0.001. That is a 500x gap with nothing in it, so flagging the pixel
+            # needs no threshold fitted to anecdotes, unlike the 0.46-vs-0.88 single
+            # point the net-power test was introduced for.
+            per_px = carried.groupby([df["X"], df["Y"]]).transform("median")
+            df["REF_CONTAMINATED"] = per_px > REF_POWER_SUSPECT
             df["REF_SWALLOWED"] = swallowed
-            reliable &= ~swallowed.fillna(False)
+            reliable &= ~(swallowed | df["REF_CONTAMINATED"]).fillna(False)
     if "NVLED_CURR_STD" in df.columns:
         relstd = df["NVLED_CURR_STD"].astype(float) / df["I_NVLED"].replace(0, np.nan)
         reliable &= relstd.fillna(np.inf) <= NVLED_RELSTD_MAX
