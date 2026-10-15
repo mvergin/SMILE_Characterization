@@ -26,3 +26,6 @@ investigation_report/
 .vscode/
 .DS_Store
 *.stackdump
+
+# presentation slides (local only)
+slides/
