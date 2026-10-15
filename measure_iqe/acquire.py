@@ -1229,12 +1229,13 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
     # Say it every run, because an operator who sees a 3% deficit will reach for this
     # knob, and 261015-0958 already paid 2 hours to prove it is the wrong one.
     sw = cfg.pixel_switch_settle_s * cfg.settle_scale
-    log(f"  !! bias_major reads ~3.0% low in current and ~5% low in power on the rising "
-        f"side vs pixel_major, for every pixel but the one holding the frame through "
-        f"the dwell. This is NOT the switch wait: 261015-0958 ran at 20s and the "
-        f"deficit did not move. At matched CURRENT the two orders agree to 1.9%, so "
-        f"EQE(J)/IQE are fine and EQE(V) is 5% low. Report against J, and leave "
-        f"pixel_switch_settle_s={sw:g}s alone -- see config.pixel_switch_settle_s.")
+    log(f"  !! bias_major reads ~3.2% low in current and ~5% low in power on the rising "
+        f"side vs pixel_major, flat across every pixel. NOT the switch wait (261015-0958 "
+        f"ran at 20s, no change) and NOT a loop position (261015-1225 rotated the list; "
+        f"the clean pixel followed the pixel). At matched CURRENT the two orders agree "
+        f"to within 1.9%, so EQE(J)/IQE are fine and EQE(V) is 5% low. Report against "
+        f"J, and leave pixel_switch_settle_s={sw:g}s alone -- see "
+        f"config.pixel_switch_settle_s.")
     if sw > 5.0:
         log(f"  !! pixel_switch_settle_s={sw:g}s costs n_px x n_points x {sw:g}s and buys "
             f"nothing measurable. 2s is the measured-correct value.")
@@ -1281,15 +1282,21 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
             #     order 0  (here)    -2.53% I            -0.70% I     <- the fix
             #     order >0 (switch)  -2.42% I            -2.99% I     <- untouched
             #
-            # So the blanked dwell was real and is fixed, and the 2.5% the first run
-            # showed was mostly something else -- which is NOT the switch wait either:
-            # run 261015-0958 ran this loop at pixel_switch_settle_s=20 and order >0
-            # went -2.99% -> -3.25%, no reduction at ten times the wait.
+            # Lighting a pixel before the step is still right -- a blanked frame
+            # conducts ~4x the bitval-0 level (section 6) -- but it did NOT cause the
+            # order-0 improvement once credited to it. Two later runs killed that:
             #
-            # What is left is a 4-6 mV offset that does not decay, and at matched
-            # current the two orders agree to 1.9%. The candidate cause is a few lines
-            # down in _sweep_pixel_major: it conditions EVERY pixel at warmup_nvled_v
-            # before sweeping it, and this loop conditions only selected[0].
+            #   261015-0958  the same loop at pixel_switch_settle_s=20. Order >0 went
+            #                -2.99% -> -3.25%. Ten times the wait, no reduction.
+            #   261015-1225  the same loop with sweep_rotate=1. The clean pixel followed
+            #                the PIXEL to slot 15 (-0.22%), and the pixel moved into
+            #                slot 0 came out worst in the run (-3.84%).
+            #
+            # So there is no privileged slot and nothing here to wait out. What is left
+            # is a flat 4-6 mV offset that does not decay. The one live candidate is
+            # that _sweep_pixel_major conditions EVERY pixel at warmup_nvled_v before
+            # sweeping it (line ~1480) and this loop conditions NONE -- not even
+            # selected[0]. Conditioning is bought with current, not with waiting.
             #
             # See config.pixel_switch_settle_s and section 17.
             smile.blank_frame()

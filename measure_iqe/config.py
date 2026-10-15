@@ -413,6 +413,12 @@ class IQEConfig:
     #     fully swept, so --resume skips completed BIASES, not completed pixels.
     #   * the per-pixel conditioning dwell is gone. With sweep_direction=high_to_low the
     #     first bias visited IS the brightest, so every pixel is conditioned there anyway.
+    #     !! UNVERIFIED, and it is the last standing explanation for the 3.2% deficit
+    #     this loop shows against pixel_major (see pixel_switch_settle_s). pixel_major
+    #     gives each pixel 1.5s at -2.6V IMMEDIATELY before its own ramp; here a pixel
+    #     gets ~6s at -2.6V and then sits dark through most of the next 15 biases. The
+    #     cheap test is to condition all selected pixels once before the first bias
+    #     (+1.5s each, ~24s for 16) and see whether the deficit collapses. Section 17.
     pixel_switch_settle_s: float = 2.0  # bias_major: the wait after a frame change,
                                        # before measuring the next pixel at a held bias.
                                        # This is the ONLY per-point wait in bias_major,
@@ -421,11 +427,10 @@ class IQEConfig:
                                        # !! DO NOT RAISE THIS. It was measured, twice,
                                        # and it is not the knob it looks like.
                                        #
-                                       # bias_major reads ~3.0 % low in current on the
+                                       # bias_major reads ~3.2 % low in current on the
                                        # rising side against pixel_major on the same
-                                       # pixels, for every pixel except the one holding
-                                       # the frame through the 54.47 s bias dwell. That
-                                       # looked like an unfinished switch transient, so
+                                       # pixels, flat across every pixel. That looked
+                                       # like an unfinished switch transient, so
                                        # run 261015-0958 repeated it at 20 s -- ten times
                                        # the wait, 3.5x the run time:
                                        #
@@ -438,6 +443,13 @@ class IQEConfig:
                                        # pixel's own mean is removed, +0.001 %/100 s
                                        # against time-since-the-bias-step over a 15x
                                        # lever, 0.00 %/h against elapsed run time.
+                                       #
+                                       # The order-0 row above is ONE PIXEL, not a slot.
+                                       # Run 261015-1225 rotated the measurement order
+                                       # (sweep_rotate=1): the clean pixel followed the
+                                       # pixel to slot 15 (-0.22 %), and the pixel moved
+                                       # into slot 0 came out worst in the run
+                                       # (-3.84 %). There is no privileged position.
                                        #
                                        # What is left is a 4-6 mV offset on the voltage
                                        # axis that does not decay. At matched CURRENT the
@@ -452,9 +464,10 @@ class IQEConfig:
                                        # The leading candidate for the offset is in this
                                        # file: warmup_ms/warmup_nvled_v hold every pixel
                                        # at -2.6 V for 1.5 s in pixel_major, and
-                                       # bias_major does it only for selected[0] --
-                                       # which is the pixel that reads clean.
-                                       # Conditioning is
+                                       # bias_major holds NO pixel there -- see the
+                                       # sweep_order note above, which assumes the first
+                                       # bias covers it. That assumption is now the open
+                                       # question. Conditioning is
                                        # bought with current, not with waiting -- which
                                        # is exactly why 20 s changed nothing. See
                                        # section 17.
