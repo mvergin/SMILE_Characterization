@@ -53,10 +53,12 @@ def build_config(args: argparse.Namespace) -> IQEConfig:
         # the array is characterised is legitimate, it just uses the defaults.
         auto = calibration_path(args.array)
         cal = str(auto) if auto.exists() else None
-        data["_calibration_source"] = cal or ""
     if cal:
         data.update(load_calibration(cal))
-    data.pop("_calibration_source", None)
+        # Kept in the config, not popped: the saved *_config.json then names the file
+        # that produced the run, and acquire.stamp_run copies it into the run directory.
+        # Set for an explicit --calibration too, not only the --array lookup.
+        data["calibration_source"] = str(cal)
     overrides = dict(args.set or [])
     data.update(overrides)
     if args.simulate and "settle_scale" not in overrides:

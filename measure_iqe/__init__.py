@@ -35,6 +35,7 @@ from .acquire import (
     run_sweep_voltage,
     run_warmup_diag,
     select_sweep_pixels,
+    stamp_run,
     set_current_b,
     set_measure_range_b,
     set_nplc,
@@ -42,6 +43,8 @@ from .acquire import (
     spacing_summary,
 )
 from .config import NAMED_ROIS, SMU_I_RANGES, IQEConfig
+from .calibrate import load_calibration, settle_time
+from .provenance import provenance, run_file, run_slug, write_provenance
 
 __version__ = "1.0.0"
 
@@ -66,9 +69,14 @@ __all__ = [
     "run_calibration",
     "run_iqe_measurement",
     "run_sweep_current",
+    "provenance",
+    "run_file",
+    "run_slug",
     "run_sweep_voltage",
+    "write_provenance",
     "run_warmup_diag",
     "select_sweep_pixels",
+    "stamp_run",
     "set_current_b",
     "set_measure_range_b",
     "set_nplc",

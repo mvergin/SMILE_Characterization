@@ -398,6 +398,12 @@ class IQEConfig:
     calibrate_margin: float = 1.5  # safety factor on the measured worst case, because
                                    # the calibration sees 3 biases and the sweep visits 30
 
+    calibration_source: str = ""
+    # Set by --array/--calibration: the file whose `recommended` block was applied on
+    # top of the defaults. Kept in the config (rather than popped) for two reasons: the
+    # saved *_config.json then says WHICH calibration produced the run, and the run
+    # directory gets a copy of that file. A sweep that believes it is calibrated and
+    # cannot say by what is not reproducible.
     resume: bool = False  # with --out pointing at an existing run directory, skip the
                           # pixels it already finished and append. The aggregated CSV is
                           # flushed per pixel, so a run killed mid-sweep (Windows Update,

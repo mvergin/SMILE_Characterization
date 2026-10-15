@@ -20,7 +20,8 @@ from pathlib import Path
 
 import numpy as np
 
-from measure_iqe import IQEConfig, run_iqe_measurement, select_sweep_pixels
+from measure_iqe import (IQEConfig, run_file, run_iqe_measurement,
+                         select_sweep_pixels)
 from measure_iqe import acquire
 from measure_iqe.cli import main as cli_main
 from measure_iqe.cli import parse_override
@@ -191,18 +192,21 @@ def test_voltage_sweep_writes_the_expected_files():
     with tempfile.TemporaryDirectory() as tmp:
         result = _run(tmp)
         assert result.n_pixels == 4 and result.n_points == 24
-        agg = result.run_dir / "NVLEDSweep" / "Sweep" / "aggregated_bitval=15_mean_std.csv"
+        agg = run_file(result.run_dir,
+                       "NVLEDSweep/Sweep/aggregated_bitval=15_mean_std.csv")
         rows = list(csv.DictReader(agg.open()))
         assert len(rows) == result.n_points
         assert AGG_COLS == list(rows[0])[:len(AGG_COLS)], "SMILE_IQE_Analysis column contract"
         assert "NVLED_CURR_MEDIAN" in rows[0], "raw-sample stats must be written"
         assert float(rows[0]["PM400_POWER_MEAN"]) > 0
 
-        fast = result.run_dir / "FastScan" / "aggregated_bitval=15_mean_std.csv"
+        fast = run_file(result.run_dir, "FastScan/aggregated_bitval=15_mean_std.csv")
         assert len(list(csv.DictReader(fast.open()))) == 64      # every ROI pixel scanned
 
-        saved = json.loads((result.run_dir / "NVLEDSweep" / "Sweep" / "raw_data"
-                            / "Sweep_config.json").read_text(encoding="utf-8"))["settings"]
+        saved = json.loads(run_file(
+            result.run_dir,
+            "NVLEDSweep/Sweep/raw_data/Sweep_config.json").read_text(
+                encoding="utf-8"))["settings"]
         assert saved["n_fine"] == 6 and saved["sample_name"] == result.config.sample_name
         assert len(saved) == len(dataclasses.fields(IQEConfig)), "full config is recorded"
 
@@ -228,7 +232,7 @@ def test_leakage_reference_is_measured_and_written():
     """The bitval-0 reference is the low-J correction, not an optional extra."""
     with tempfile.TemporaryDirectory() as tmp:
         result = _run(tmp)
-        agg = next((result.run_dir / "NVLEDSweep" / "Sweep").glob("aggregated_*.csv"))
+        agg = next((result.run_dir / "NVLEDSweep" / "Sweep").glob("*aggregated_*.csv"))
         rows = list(csv.DictReader(agg.open()))
         assert rows, "no sweep rows"
         for col in ("NVLED_CURR_REF", "NVLED_CURR_REF_STD", "VLED_CURR_REF",
@@ -244,7 +248,7 @@ def test_leakage_reference_is_measured_and_written():
 
         # and it must be possible to turn off, for comparison with the older runs
         off = _run(tmp, leak_reference=False)
-        agg = next((off.run_dir / "NVLEDSweep" / "Sweep").glob("aggregated_*.csv"))
+        agg = next((off.run_dir / "NVLEDSweep" / "Sweep").glob("*aggregated_*.csv"))
         assert "NVLED_CURR_REF" not in agg.read_text().splitlines()[0]
 
 
@@ -352,7 +356,7 @@ def test_dwell_traces_are_free_and_do_not_shorten_the_dwell():
                                  simulate=True, base_dir=tmp, log=QUIET)
         t_on = _time.perf_counter() - t0
 
-        npz = on.run_dir / "NVLEDSweep" / "Sweep" / "settling_traces.npz"
+        npz = run_file(on.run_dir, "NVLEDSweep/Sweep/settling_traces.npz")
         assert npz.exists(), "no traces written"
         import numpy as _np
         with _np.load(npz) as d:
@@ -365,7 +369,7 @@ def test_dwell_traces_are_free_and_do_not_shorten_the_dwell():
 
         # the dwell must not have been shortened OR meaningfully lengthened
         assert off.run_dir != on.run_dir, "two runs collided into one directory"
-        assert not (off.run_dir / "NVLEDSweep" / "Sweep" / "settling_traces.npz").exists()
+        assert not list((off.run_dir / "NVLEDSweep" / "Sweep").glob("*settling_traces.npz"))
         assert t_on >= t_off * 0.9, f"tracing shortened the run: {t_on:.1f}s vs {t_off:.1f}s"
         assert t_on <= t_off * 1.6, f"tracing added too much overhead: {t_on:.1f}s vs {t_off:.1f}s"
 
@@ -467,7 +471,7 @@ def _sweep_grid(run_dir):
     """(X, Y, NVLED_V) of every aggregated row, plus the column set."""
     import csv as _csv
     grid, cols = set(), None
-    for agg in (Path(run_dir) / "NVLEDSweep" / "Sweep").glob("aggregated_bitval=*.csv"):
+    for agg in (Path(run_dir) / "NVLEDSweep" / "Sweep").glob("*aggregated_bitval=*.csv"):
         with agg.open() as f:
             rdr = _csv.DictReader(f)
             cols = tuple(rdr.fieldnames or ())
@@ -475,6 +479,56 @@ def _sweep_grid(run_dir):
                 grid.add((int(float(row["X"])), int(float(row["Y"])),
                           round(float(row["NVLED_V"]), 4)))
     return grid, cols
+
+
+def test_a_run_says_what_produced_it():
+    """Every output file carries <sample>_<stamp>_, and the run records its commit.
+
+    A CSV copied out of its directory must still name its run, and a run must name the
+    code and the calibration behind it -- see measure_iqe/provenance.py.
+    """
+    import json
+
+    from measure_iqe import run_iqe_measurement
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cal = Path(tmp) / "fake_calibration.yaml"
+        cal.write_text("sample_name: ZZZ_Prov\nrecommended: {}\n", encoding="utf-8")
+        cfg = IQEConfig(**{**FAST, "n_fine": 4, "roi": (0, 0, 3, 3),
+                           "sample_name": "ZZZ_Prov",
+                           "calibration_source": str(cal)})
+        res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
+
+    # Impossible to assert after the TemporaryDirectory closes, so collect inside.
+        files = [p for p in res.run_dir.rglob("*") if p.is_file()]
+        names = {p.name for p in files}
+        stamp = res.run_dir.name.split("_", 1)[0]
+        pfx = f"ZZZ_Prov_{stamp}_"
+
+        data = [p for p in files if p.suffix in (".csv", ".npz")]
+        assert data, "the run wrote no data files"
+        unprefixed = [p.name for p in data if not p.name.startswith(pfx)]
+        assert not unprefixed, f"data files without the run prefix: {unprefixed}"
+
+        prov_path = res.run_dir / "RUN_PROVENANCE.json"
+        assert prov_path.exists(), f"no RUN_PROVENANCE.json in {names}"
+        prov = json.loads(prov_path.read_text(encoding="utf-8"))
+        for key in ("commit", "dirty", "started", "host", "sample_name"):
+            assert key in prov, f"provenance is missing {key}: {sorted(prov)}"
+        assert prov["sample_name"] == "ZZZ_Prov"
+        assert isinstance(prov["dirty"], bool)
+
+        copied = [n for n in names if "calibration_applied" in n]
+        assert copied, f"the applied calibration was not copied in: {sorted(names)}"
+        assert (res.run_dir / copied[0]).read_text(encoding="utf-8") == \
+            cal.read_text(encoding="utf-8"), "the copy differs from the calibration"
+
+        # and the saved config must name the file, not just its values
+        cfgs = [p for p in files if p.name.endswith("_config.json")]
+        assert cfgs, "no saved config"
+        saved = json.loads(cfgs[0].read_text(encoding="utf-8"))
+        assert saved["settings"]["calibration_source"] == str(cal)
+        assert saved["provenance"]["commit"] == prov["commit"]
 
 
 def test_bias_major_measures_the_same_grid_as_pixel_major():
@@ -831,7 +885,7 @@ def test_resume_skips_finished_pixels_and_keeps_their_data():
 
     with tempfile.TemporaryDirectory() as tmp:
         first = _run(tmp)
-        agg = next((first.run_dir / "NVLEDSweep" / "Sweep").glob("aggregated_*.csv"))
+        agg = next((first.run_dir / "NVLEDSweep" / "Sweep").glob("*aggregated_*.csv"))
         rows = list(csv.DictReader(agg.open()))
         done = completed_pixels(first.run_dir)
         assert done, "no completed pixels found in a finished run"

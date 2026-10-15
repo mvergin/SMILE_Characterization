@@ -54,6 +54,7 @@ from typing import Any, Callable, Iterable, Iterator, NamedTuple
 import numpy as np
 
 from .config import Q_E, SMU_I_RANGES, IQEConfig
+from .provenance import provenance, run_slug, write_provenance
 from .calibrate import calibrate, write_calibration
 from .safeexit import parked, safe_exit
 
@@ -449,10 +450,11 @@ def write_aggregated_one(path: str | Path, rows: list[Row]) -> None:
             f.write(",".join(repr(r[c]) for c in _AGG_COLS) + "\n")
 
 
-def write_aggregated_per_bitval(folder: str | Path, rows: list[Row]) -> None:
+def write_aggregated_per_bitval(folder: str | Path, rows: list[Row],
+                                prefix: str = "") -> None:
     folder = Path(folder)
     for b in sorted({r["BITVAL"] for r in rows}):
-        write_aggregated_one(folder / f"aggregated_bitval={b}_mean_std.csv",
+        write_aggregated_one(folder / f"{prefix}aggregated_bitval={b}_mean_std.csv",
                              [r for r in rows if r["BITVAL"] == b])
 
 
@@ -511,7 +513,9 @@ class BackgroundWriter:
     The aggregate is what the analysis reads — an interrupted run needs no reconstruction."""
 
     def __init__(self, raw_path: str | Path, agg_folder: str | Path,
-                 cfg: IQEConfig, log: Logger, append: bool = False) -> None:
+                 cfg: IQEConfig, log: Logger, append: bool = False,
+                 prefix: str = "") -> None:
+        self._prefix = prefix
         self._agg_folder = Path(agg_folder)
         Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
         self._agg_folder.mkdir(parents=True, exist_ok=True)
@@ -527,7 +531,8 @@ class BackgroundWriter:
         # Per-individual-sample file (every burst reading), when enabled.
         self._samp_f = None
         if cfg.save_raw_samples:
-            self._samp_f = open(Path(raw_path).parent / "Sweep_samples.csv", mode)
+            self._samp_f = open(
+                Path(raw_path).parent / f"{prefix}Sweep_samples.csv", mode)
             if not append:
                 self._samp_f.write("X,Y,BITVAL,NVLED_V,TIME,TYPE,SAMPLE_IDX,VALUE\n")
                 self._samp_f.flush()
@@ -537,7 +542,8 @@ class BackgroundWriter:
 
     def _agg_fh(self, bitval):
         if bitval not in self._agg_f:
-            path = self._agg_folder / f"aggregated_bitval={bitval}_mean_std.csv"
+            path = self._agg_folder / \
+                f"{self._prefix}aggregated_bitval={bitval}_mean_std.csv"
             existing = self._append and path.exists() and path.stat().st_size > 0
             f = open(path, "a" if existing else "w")
             if not existing:
@@ -935,12 +941,17 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
                             NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
                             VLED_CURR_MEAN=iv, VLED_CURR_STD=ivs,
                             PM400_POWER_MEAN=p, PM400_POWER_STD=ps))
-    write_aggregated_one(run_dir / "FastScan" / f"aggregated_bitval={cfg.fastscan_bitval}_mean_std.csv",
-                         fs_rows)
-    raw = IncrementalRaw(run_dir / "FastScan" / "raw_data" / "FastScan.csv")
+    # Every file a run writes carries <sample>_<stamp>_, so a CSV that is copied out of
+    # its directory can still be traced back to the run that made it.
+    pfx = run_slug(cfg.sample_name, run_dir) + "_"
+    write_aggregated_one(
+        run_dir / "FastScan" / f"{pfx}aggregated_bitval={cfg.fastscan_bitval}_mean_std.csv",
+        fs_rows)
+    raw = IncrementalRaw(run_dir / "FastScan" / "raw_data" / f"{pfx}FastScan.csv")
     raw.append(fs_rows); raw.close()
-    (run_dir / "FastScan" / "raw_data" / "FastScan_config.json").write_text(
-        json.dumps({"settings": cfg.to_dict()}, indent=2), encoding="utf-8")
+    (run_dir / "FastScan" / "raw_data" / f"{pfx}FastScan_config.json").write_text(
+        json.dumps({"settings": cfg.to_dict(), "provenance": provenance()}, indent=2),
+        encoding="utf-8")
 
     P = np.array([abs(r["PM400_POWER_MEAN"]) for r in fs_rows])
     med = np.nanmedian(P)
@@ -975,7 +986,8 @@ def run_sweep_current(pm, smu, smile, selected: list[Row], run_dir: Path,
     configure_current_source_b(smu, cfg)
     set_nplc(smu, cfg.sweep_nplc)
     sweep_dir = run_dir / "NVLEDSweep" / "Sweep"
-    raw = IncrementalRaw(sweep_dir / "raw_data" / "Sweep.csv")
+    pfx = run_slug(cfg.sample_name, run_dir) + "_"
+    raw = IncrementalRaw(sweep_dir / "raw_data" / f"{pfx}Sweep.csv")
     sw_rows = []
     t0 = time.perf_counter()
     # try/finally so an interrupt mid-run still closes the raw file with every
@@ -1008,9 +1020,10 @@ def run_sweep_current(pm, smu, smile, selected: list[Row], run_dir: Path,
             raw.append(prows, dark)                # incremental flush per pixel
     finally:
         raw.close()
-        write_aggregated_per_bitval(sweep_dir, sw_rows)
-    (sweep_dir / "raw_data" / "Sweep_config.json").write_text(
-        json.dumps({"settings": cfg.to_dict()}, indent=2), encoding="utf-8")
+        write_aggregated_per_bitval(sweep_dir, sw_rows, prefix=pfx)
+    (sweep_dir / "raw_data" / f"{pfx}Sweep_config.json").write_text(
+        json.dumps({"settings": cfg.to_dict(), "provenance": provenance()}, indent=2),
+        encoding="utf-8")
     return len(sw_rows)
 
 
@@ -1110,7 +1123,7 @@ def completed_pixels(run_dir: str | Path) -> set[tuple[int, int]]:
     done: set[tuple[int, int]] = set()
     sweep = Path(run_dir) / "NVLEDSweep" / "Sweep"
     counts: dict[tuple[int, int], int] = {}
-    for agg in sweep.glob("aggregated_bitval=*_mean_std.csv"):
+    for agg in sweep.glob("*aggregated_bitval=*_mean_std.csv"):
         try:
             with agg.open() as f:
                 rdr = csv.DictReader(f)
@@ -1172,7 +1185,7 @@ def completed_biases(run_dir: str | Path) -> set[float]:
     """
     rows: dict[float, set[tuple[int, int]]] = {}
     sweep = Path(run_dir) / "NVLEDSweep" / "Sweep"
-    for agg in sweep.glob("aggregated_bitval=*_mean_std.csv"):
+    for agg in sweep.glob("*aggregated_bitval=*_mean_std.csv"):
         try:
             with agg.open() as f:
                 for row in csv.DictReader(f):
@@ -1452,10 +1465,13 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
             f"per-point range={cfg.perpoint_range}")
     configure_voltage_source_b(smu, cfg, log)
     sweep_dir = run_dir / "NVLEDSweep" / "Sweep"
+    pfx = run_slug(cfg.sample_name, run_dir) + "_"
     (sweep_dir / "raw_data").mkdir(parents=True, exist_ok=True)
-    # Config up front so it exists even if the run is interrupted.
-    (sweep_dir / "raw_data" / "Sweep_config.json").write_text(
-        json.dumps({"settings": cfg.to_dict()}, indent=2), encoding="utf-8")
+    # Config up front so it exists even if the run is interrupted, and with it the
+    # commit that produced the run -- see measure_iqe/provenance.py.
+    (sweep_dir / "raw_data" / f"{pfx}Sweep_config.json").write_text(
+        json.dumps({"settings": cfg.to_dict(), "provenance": provenance()}, indent=2),
+        encoding="utf-8")
     # Self-contained background writer (no external deps): raw + aggregate are flushed off the
     # measurement thread, so slow (Nextcloud/network) flushes don't block the sweep, and the
     # aggregate is written per pixel → an interrupted run is directly analysable. try/finally
@@ -1465,8 +1481,8 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
     if skip:
         log(f"  resuming: {len(skip)} pixel(s) already complete, "
             f"{sum(1 for r in selected if (int(r['X']), int(r['Y'])) not in skip)} to go")
-    writer = BackgroundWriter(sweep_dir / "raw_data" / "Sweep.csv", sweep_dir, cfg, log,
-                              append=bool(skip))
+    writer = BackgroundWriter(sweep_dir / "raw_data" / f"{pfx}Sweep.csv", sweep_dir,
+                              cfg, log, append=bool(skip), prefix=pfx)
     sw_rows = []
     live_peaks = []                 # brightest-point power (W) of confirmed-live pixels
     n_dead = 0
@@ -1601,7 +1617,7 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
     finally:
         writer.close()                  # drain queue + join → files complete on clean stop
         if settle_traces:
-            npz = sweep_dir / "settling_traces.npz"
+            npz = sweep_dir / f"{pfx}settling_traces.npz"
             np.savez_compressed(npz, **{
                 tag: np.vstack([t, i, p]) for tag, t, i, p in settle_traces})
             log(f"  wrote {npz} ({len(settle_traces)} dwell traces, "
@@ -1698,6 +1714,31 @@ class IQEResult(NamedTuple):
     n_pixels: int           # pixels selected for the full sweep
     n_points: int           # sweep points written (0 for a warm-up diagnostic)
     config: IQEConfig       # the configuration actually used
+
+
+def stamp_run(out_dir: Path, cfg: IQEConfig, log: Logger) -> None:
+    """Record what produced this run: the commit, and the calibration that was applied.
+
+    Both are written before any measurement, so an interrupted run is still identified.
+    The calibration is COPIED rather than referenced: `calibrations/` is gitignored and
+    gets overwritten by the next --calibrate, so a path alone would rot.
+    """
+    prov = provenance()
+    write_provenance(out_dir, {"sample_name": cfg.sample_name,
+                               "calibration_source": cfg.calibration_source})
+    log(f"  code: {prov['describe']} on {prov['branch']}"
+        + (f"  !! WORKING TREE DIRTY ({len(prov['changed'])} file(s)): this run cannot "
+           f"be reproduced from the commit alone" if prov["dirty"] else ""))
+    src = Path(cfg.calibration_source) if cfg.calibration_source else None
+    if src and src.is_file():
+        dst = out_dir / f"{run_slug(cfg.sample_name, out_dir)}_calibration_applied{src.suffix}"
+        try:
+            dst.write_bytes(src.read_bytes())
+            log(f"  calibration: {src}  (copied to the run as {dst.name})")
+        except OSError as e:                      # a share went away; not worth aborting
+            log(f"  calibration: {src}  !! could not copy into the run: {e}")
+    elif src:
+        log(f"  calibration: {src}  !! NO LONGER ON DISK - not copied")
 
 
 def make_run_dir(cfg: IQEConfig, base_dir: str | Path | None = None,
@@ -1829,6 +1870,7 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
     out_dir = Path(run_dir) if run_dir is not None else make_run_dir(cfg, base_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"Output: {out_dir}   (source_mode={cfg.source_mode})")
+    stamp_run(out_dir, cfg, log)
 
     if simulate and cfg.settle_scale:
         # The CLI zeroes settle_scale under --simulate unless the user set it explicitly;

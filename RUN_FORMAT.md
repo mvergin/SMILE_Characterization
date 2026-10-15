@@ -22,19 +22,60 @@ it. If a change breaks one side, the other side's test fails too.
 
 ```
 <YYMMDD-HHMM>_<sample_name>_ROI_(x1, y1, x2, y2)/
+├── RUN_PROVENANCE.json                         what produced this run
+├── <P>calibration_applied.yaml                 the calibration, copied (if any)
 ├── FastScan/
-│   ├── aggregated_bitval=<b>_mean_std.csv      one row per ROI pixel
+│   ├── <P>aggregated_bitval=<b>_mean_std.csv   one row per ROI pixel
 │   └── raw_data/
-│       ├── FastScan.csv                        long-format per-channel rows
-│       └── FastScan_config.json                settings used
+│       ├── <P>FastScan.csv                     long-format per-channel rows
+│       └── <P>FastScan_config.json             settings used
 └── NVLEDSweep/
     └── Sweep/
-        ├── aggregated_bitval=<b>_mean_std.csv  one row per sweep point
+        ├── <P>aggregated_bitval=<b>_mean_std.csv  one row per sweep point
+        ├── <P>settling_traces.npz              per-point transients (optional)
         └── raw_data/
-            ├── Sweep.csv                       long format + dark readings
-            ├── Sweep_samples.csv               every burst sample (optional)
-            └── Sweep_config.json               settings used
+            ├── <P>Sweep.csv                    long format + dark readings
+            ├── <P>Sweep_samples.csv            every burst sample (optional)
+            └── <P>Sweep_config.json            settings used
 ```
+
+### The filename prefix `<P>`
+
+`<P>` is `<sample_name>_<YYMMDD-HHMM>_`, the same stamp as the directory. It is there
+so a CSV **copied out of its directory can still name the run it came from** — the
+commonest way a measurement loses its identity is someone pasting one file into a
+slide deck.
+
+**Readers must accept both spellings.** Every run taken before 16 October 2026 has no
+prefix, and those runs are the comparison baseline for the whole investigation. Glob
+with a leading `*`:
+
+```python
+sorted(run.glob("NVLEDSweep/*/*aggregated_bitval=*_mean_std.csv"))
+```
+
+`measure_iqe.run_file(run_dir, "NVLEDSweep/Sweep/Sweep.csv")` does this for you and
+raises `FileNotFoundError` naming the directory rather than returning nothing.
+
+### `RUN_PROVENANCE.json`
+
+Written before the first measurement, so an interrupted run is still identified. The
+same block is embedded under `"provenance"` in every `*_config.json`.
+
+| key | meaning |
+|---|---|
+| `commit`, `commit_short`, `branch` | the code that ran |
+| `describe` | `git describe --tags --always --dirty` |
+| `dirty`, `changed`, `diff_sha256` | uncommitted edits: whether, which files, and a fingerprint of the diff |
+| `started`, `host`, `python`, `platform` | when and where |
+| `sample_name`, `calibration_source` | what was measured, and with which calibration |
+
+**`dirty: true` means the run cannot be reproduced from `commit` alone.** `changed`
+names up to 50 files and `diff_sha256` fingerprints the uncommitted diff, so two dirty
+runs with the same `commit` and `diff_sha256` did run identical code.
+
+A git **tag** is deliberately not the mechanism here: it needs someone to remember to
+move it, and that discipline fails. Tags remain useful as a human label on top.
 
 `--warmup-diag` runs write `warmup_diag.csv` + `warmup_diag_config.json` at the
 run root instead of `NVLEDSweep/`, and are not part of this contract.
@@ -243,3 +284,6 @@ python -m measure_iqe --simulate --set sample_name=FixtureArray \
   --set roi='[0,0,7,7]' --set block_size=4 --set pixels_per_block=1 \
   --set n_fine=6 --set warmup_ms=0
 ```
+
+Then strip `RUN_PROVENANCE.json` from the copy: it records the commit and host of
+whoever regenerated it, which would make the fixture churn on every machine.
