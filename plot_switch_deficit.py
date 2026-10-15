@@ -37,6 +37,8 @@ part of the same trace.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import re
 import sys
 from pathlib import Path
 
@@ -50,6 +52,15 @@ except Exception:
 
 FAINT_LO, FAINT_HI = -1.25, -0.80   # the band the deficit is quoted over
 EXCLUDE = {(56, 51)}                 # section 15: does not go dark at bitval 0
+
+
+def started(run: Path) -> dt.datetime | None:
+    """Wall-clock start, from the run directory's own YYMMDD-HHMM name."""
+    m = re.match(r"(\d{2})(\d{2})(\d{2})-(\d{2})(\d{2})", run.name)
+    if not m:
+        return None
+    yy, mm, dd, HH, MM = (int(g) for g in m.groups())
+    return dt.datetime(2000 + yy, mm, dd, HH, MM)
 
 
 def load(run: Path) -> pd.DataFrame:
@@ -147,6 +158,23 @@ def main() -> None:
         summarize(j, lbl)
         js.append((lbl, j))
 
+    # Every run above is measured against the SAME reference, so elapsed time since
+    # that reference is a confound on every number in this script. Print it: the
+    # optical channel moves ~2 %/day and the table is the only place that shows it.
+    t_ref = started(args.reference)
+    if t_ref is not None:
+        span = (ref["TIME_START"].max() - ref["TIME_START"].min()) / 7200
+        t_ref += dt.timedelta(hours=span)          # its midpoint, not its first point
+        print(f"\n{'run':<28}{'h after ref':>12}{'current':>10}{'P at matched I':>17}")
+        for (lbl, j), r in zip(js, args.runs):
+            t = started(r)
+            b = j[(j["V"] >= FAINT_LO) & (j["V"] <= FAINT_HI) & (j["order"] > 0)]
+            print(f"{lbl:<28}"
+                  f"{((t - t_ref).total_seconds() / 3600) if t else float('nan'):>12.1f}"
+                  f"{b['dI'].median():>9.2f} %{b['dP_at_I'].median():>16.2f} %")
+        print("  a trend down this table with no change of method is the reference "
+              "ageing, not the method.")
+
     fig, ax = plt.subplots(1, 3, figsize=(18, 4.8))
     for k, (lbl, j) in enumerate(js):
         c = f"C{k}"
@@ -242,8 +270,11 @@ def demo() -> None:
     # and a real light loss at fixed current must survive
     q2 = q.copy(); q2["P"] *= 0.95
     assert abs(at_matched_current(r, q2)["dP_at_I"].median() + 5.0) < 1e-6
+    assert started(Path("261015-0822_Array42_IQE_ROI_(32, 32, 63, 63)")) == \
+        dt.datetime(2026, 10, 15, 8, 22)
+    assert started(Path("not-a-run")) is None
     print("ok  plot_switch_deficit: pairs on (pixel, bias), order resets per bias, "
-          "matched-current cancels a pure current shift")
+          "matched-current cancels a pure current shift, run times parse")
 
 
 if __name__ == "__main__":
