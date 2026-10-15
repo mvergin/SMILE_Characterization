@@ -955,7 +955,13 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
         log(f"  NOTE: ROI is majority-dark (median {med*1e9:.2f} nW < threshold {thr*1e9:.1f} nW) — "
             f"most of this region is dead; block selection draws from the lit minority.")
     smile.blank_frame()      # never hand the next stage a lit pixel
-    return select_sweep_pixels(alive, cfg, log)
+    sel = select_sweep_pixels(alive, cfg, log)
+    if cfg.sweep_rotate and sel:
+        k = cfg.sweep_rotate % len(sel)
+        sel = sel[k:] + sel[:k]
+        log(f"  sweep_rotate={cfg.sweep_rotate}: same {len(sel)} pixels, order rotated by "
+            f"{k}. Slot 0 is now ({sel[0]['X']},{sel[0]['Y']}).")
+    return sel
 
 
 def run_sweep_current(pm, smu, smile, selected: list[Row], run_dir: Path,

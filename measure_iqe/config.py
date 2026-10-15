@@ -72,6 +72,15 @@ class IQEConfig:
     # between nearby pixels is a physical question, so it is a knob); 1 disables the
     # guard. A block too dead or too small to honour it falls back and says so in the log.
     min_pixel_separation: int = 2
+    sweep_rotate: int = 0  # rotate the MEASUREMENT ORDER by N, same pixels. Under
+                           # bias_major the pixel in slot 0 holds the frame through the
+                           # whole bias dwell and reads ~3% higher in current than the
+                           # other fifteen -- but it has been the same pixel, (35,36),
+                           # in every run so far, so "the slot is clean" and "that pixel
+                           # is clean" are indistinguishable. Rotating separates them in
+                           # one 33 min run: if the clean pixel follows the slot, loop
+                           # position is real; if it follows the pixel, slot 0 was never
+                           # special. Section 17, open question 13.
     sweep_fraction: float = 0.10  # spatial mode: fraction of ALIVE pixels to sweep
     min_sweep_pixels: int = 6  # spatial mode: floor on the count (so tiny ROIs still map)
     nth_pixel_sweep: int = 5  # stride mode: sweep every Nth alive pixel
