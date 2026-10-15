@@ -13,10 +13,18 @@ Two figures:
 The point of the second figure. A fast-scan point is a 10 ms dwell on an array whose
 cathode carries 42.8 uF, so it reads an UNSETTLED charge state, and the expectation was
 that it could only ever be a qualitative picture. It is not. Against the sweep's 54.47 s
-settle, at matched bias, the bulk of pixels agree to **1.0 % robust spread** on power
-with a -2.6 % median offset, and the deviations in the two channels correlate at
-r = 0.99 -- whatever moves a pixel moves its light and its current together. So the
-offset cancels in the ratio: EQE agrees to +0.2 % median, 1.5 % robust.
+settle, at matched bias, the bulk of pixels agree to **1.0 % robust spread** on power,
+and the deviations in the two channels correlate at r = 0.96 -- whatever moves a pixel
+moves its light and its current together, so the EQE ratio is tighter still at 1.4 %.
+
+The MEDIAN OFFSET is a different matter and this script does not resolve it. The sweep
+side carries section 15's switch deficit: every pixel but the first at each bias gets a
+2 s switch wait that is too short, worth about -5 % in power at this bias. So the -2.6 %
+printed here is the fast scan against bias_major as it currently runs, not against a
+correctly settled sweep. Quote the spreads from this script, not the offsets, until the
+switch settle is measured. The spreads are safe because the deficit is a common factor:
+its per-pixel spread is 0.4-1.4 %, and the two loop orders measure the array's own
+spread to within 0.5 pp.
 
 The std of the power ratio is 6.3 %, not 1.0 %, and the gap between the two is the
 result. It is three pixels of ninety-seven, all low, 23-42 %. Three more were dropped
