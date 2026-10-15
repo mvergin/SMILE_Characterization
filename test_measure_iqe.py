@@ -252,49 +252,73 @@ def test_leakage_reference_is_measured_and_written():
         assert "NVLED_CURR_REF" not in agg.read_text().splitlines()[0]
 
 
-def test_a_pixel_that_does_not_go_dark_is_flagged_once_at_the_bench():
-    """Section 19: 3 of 100 pixels never went dark at bitval 0 and the operator found
-    out from a CSV three days later. The warning fires on the pixel's FIRST point --
-    its brightest -- because at the faint end a healthy reference is legitimately 58 %
-    of the reading and the same gate would fire on everything.
+def test_a_failed_bitval0_write_is_retried_and_then_reported():
+    """Section 19: the FPGA does not always write the frame correctly, so the bitval-0
+    reference is verified optically and re-written when it fails.
+
+    The evidence that it is the WRITE and not the pixel is intermittency: (56,51)
+    referenced clean in 2 of 6 runs and contaminated in 4, and single points flip inside
+    one sweep. The gate is optical because a healthy backplane conducts 58 % of the
+    reading at -0.80 V without emitting.
     """
     class _Smile:
-        def set_pixel(self, *a):
-            pass
+        def __init__(self):
+            self.writes = []
+
+        def set_pixel(self, x, y, bv):
+            self.writes.append((x, y, bv))
 
         def blank_frame(self):
-            pass
+            self.writes.append("blank")
 
-    def _point(lit_w, ref_w):
-        """Stub acquire_point: lit reading first, then the bitval-0 reference."""
-        seq = [(lit_w, 0.0, 1e-5, 0.0, -1e-5, 0.0, 0.0, 0.0),
-               (ref_w, 0.0, 1e-7, 0.0, -1e-7, 0.0, 0.0, 0.0)]
-        return lambda *a, **k: seq.pop(0) if len(seq) > 1 else seq[0]
+    LIT = 1e-9
 
-    cfg = IQEConfig(**dict(FAST, leak_reference=True, perpoint_range=False,
-                           save_raw_samples=False))
+    def _stub(ref_powers):
+        """Lit reading, then one reference per attempt from `ref_powers`."""
+        seq = [LIT] + list(ref_powers)
+        def _f(*a, **k):
+            w = seq.pop(0) if len(seq) > 1 else seq[0]
+            return (w, 0.0, 1e-5, 0.0, -1e-5, 0.0, 0.0, 0.0)
+        return _f
+
+    BAD, OK = 0.6e-9, 2e-13          # 60 % of the lit light, and 2e-4 of it
+    cases = (
+        # ref readings per attempt      tries  warns  what it exercises
+        ([OK],                              1, False, "healthy: one write, no retry"),
+        ([BAD, OK],                         2, False, "one failure, second write lands"),
+        ([BAD, BAD, OK],                    3, False, "two failures, third lands"),
+        ([BAD, BAD, BAD],                   3, True,  "never lands: give up and report"),
+    )
     real = acquire.acquire_point
     try:
-        for (lit, ref, want, who) in ((1e-9, 6e-10, True, "contaminated, 60 %"),
-                                      (1e-9, 2e-13, False, "healthy, 2e-4")):
-            acquire.acquire_point = _point(lit, ref)
+        for refs, want_tries, want_warn, who in cases:
+            acquire.acquire_point = _stub(refs)
             acquire._ref_warned.clear()
-            said = []
-            row, _ = acquire.measure_point(
-                None, None, _Smile(), 7, 9, 15, -2.6, 1e-3, 8, 8, cfg, 0.0,
-                said.append, restore=False)
-            hit = [m for m in said if "does not go dark" in m]
-            assert bool(hit) == want, f"{who}: warned={bool(hit)}, wanted {want}"
-            if want:
-                assert "(7,9)" in hit[0] and "60%" in hit[0], hit[0]
-                assert "does NOT help" in hit[0], "must say the retry is useless"
-                # and only ONCE per pixel, not on all 30 of its biases
-                said.clear()
-                acquire.measure_point(
-                    None, None, _Smile(), 7, 9, 15, -2.5, 1e-3, 8, 8, cfg, 0.0,
-                    said.append, restore=False)
-                assert not [m for m in said if "does not go dark" in m],                     "warned twice for one pixel"
-            assert row["PM400_POWER_REF"] == ref
+            cfg = IQEConfig(**dict(FAST, leak_reference=True, perpoint_range=False,
+                                   save_raw_samples=False, leak_ref_tries=3,
+                                   leak_ref_max_frac=0.25))
+            smile, said = _Smile(), []
+            row, _ = acquire.measure_point(None, None, smile, 7, 9, 15, -2.6, 1e-3,
+                                           8, 8, cfg, 0.0, said.append, restore=False)
+            assert row["LEAK_REF_TRIES"] == want_tries, \
+                f"{who}: {row['LEAK_REF_TRIES']} tries, wanted {want_tries}"
+            # one bitval-0 frame write per attempt, and no more
+            zeros = [w for w in smile.writes if w == (7, 9, 0)]
+            assert len(zeros) == want_tries, f"{who}: {len(zeros)} writes of bitval 0"
+            warned = [m for m in said if "still\ncarries" in m or "still carries" in m]
+            assert bool(warned) == want_warn, f"{who}: warned={bool(warned)}"
+            # the accepted reference is the LAST one taken, not the first
+            assert row["PM400_POWER_REF"] == refs[want_tries - 1], who
+            assert abs(row["LEAK_REF_FRAC"] - refs[want_tries - 1] / LIT) < 1e-9, who
+
+        # and it must be switchable off, to reproduce runs taken before it existed
+        acquire.acquire_point = _stub([BAD, OK])
+        acquire._ref_warned.clear()
+        cfg = IQEConfig(**dict(FAST, leak_reference=True, perpoint_range=False,
+                               save_raw_samples=False, leak_ref_tries=1))
+        row, _ = acquire.measure_point(None, None, _Smile(), 7, 9, 15, -2.6, 1e-3,
+                                       8, 8, cfg, 0.0, lambda m: None, restore=False)
+        assert row["LEAK_REF_TRIES"] == 1 and row["PM400_POWER_REF"] == BAD
     finally:
         acquire.acquire_point = real
         acquire._ref_warned.clear()

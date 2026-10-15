@@ -1,7 +1,7 @@
 {
   "settings": {
     "sample_name": "FixtureArray",
-    "base_dir": "C:/Users/vergin/AppData/Local/Temp/claude/C---D-programs-SMILE-Characterization/ffcdff3c-7028-47c5-8c6b-5a805bd25174/scratchpad/fixgen",
+    "base_dir": "C:/Users/vergin/AppData/Local/Temp/fx",
     "roi": [
       0,
       0,
@@ -125,6 +125,8 @@
     "fastscan_limit_a": 0.001,
     "leak_reference": true,
     "leak_ref_bitval": 0,
+    "leak_ref_tries": 3,
+    "leak_ref_max_frac": 0.25,
     "leak_ref_settle_s": 2.0,
     "nvled_v_fastscan": -1.35,
     "dead_threshold_frac": 0.2,
@@ -133,25 +135,21 @@
     "smu_display_off": false
   },
   "provenance": {
-    "commit": "0f624d83f779bf4464e0b5e6e9c6a2dc42ff56ea",
-    "commit_short": "0f624d8",
+    "commit": "bcea91694c1f24f9492897e293d94528b8430780",
+    "commit_short": "bcea916",
     "branch": "main",
-    "committed": "2026-10-15T14:03:22+02:00",
-    "describe": "v0.2-70-g0f624d8-dirty",
+    "committed": "2026-10-15T17:08:56+02:00",
+    "describe": "v0.2-74-gbcea916-dirty",
     "dirty": true,
     "changed": [
-      "ROADMAP.md",
-      "UN_FORMAT.md",
-      "measure_iqe/__init__.py",
+      "characterize_capacitance.py",
       "measure_iqe/acquire.py",
-      "measure_iqe/cli.py",
       "measure_iqe/config.py",
-      "measure_iqe/provenance.py",
       "test_measure_iqe.py",
       "test_run_format.py"
     ],
-    "diff_sha256": "6c78e6c356ed7038",
-    "started": "2026-10-15T15:08:35+02:00",
+    "diff_sha256": "bfca8424f74bc237",
+    "started": "2026-10-15T20:37:36+02:00",
     "host": "IHT-RE316",
     "python": "3.10.5",
     "platform": "Windows-10-10.0.26100-SP0"

@@ -425,7 +425,11 @@ _AGG_COLS_FULL = _AGG_COLS + [
 # the rising side meaningful at all -- at -0.80 V the reference is 58% of the reading.
 # Appended, never inserted, so a reader that does not know these columns still works.
 _AGG_COLS_REF = ["NVLED_CURR_REF", "NVLED_CURR_REF_STD", "VLED_CURR_REF",
-                 "PM400_POWER_REF", "PM400_POWER_REF_STD", "LEAK_REF_BITVAL"]
+                 "PM400_POWER_REF", "PM400_POWER_REF_STD", "LEAK_REF_BITVAL",
+                 # how many frame writes it took, and the optical ratio that was
+                 # accepted. TRIES > 1 means a write failed and was re-sent; FRAC
+                 # above leak_ref_max_frac means it never landed.
+                 "LEAK_REF_TRIES", "LEAK_REF_FRAC"]
 # The compliance actually in force at each point, and whether the point hit it. Written
 # for the voltage ramp, where the limit tracks the measured current (see pick_limit).
 _AGG_COLS_LIMIT = ["NVLED_LIMIT_A", "NVLED_AT_COMPLIANCE"]
@@ -1068,15 +1072,35 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
     # nA across four), and at -0.80 V the reference IS 58% of the reading, so 10% of it
     # is a 6% error on I_LED. bias_major amortises the DWELL; the reference is not a dwell.
     ref = None
+    tries = 0
+    frac = float("nan")
     if cfg.leak_reference:
-        smile.set_pixel(x, y, cfg.leak_ref_bitval)
-        time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
-        # FULL n_pm, not a quarter of it. The reference current is stable to ~0.2 nA and
-        # needs almost no averaging, but the reference POWER is the dark level being
-        # subtracted from a ~250 pW signal, so at the dim end it is the dominant error.
-        # Run 261014-0035 with n_pm//4: the reference SEM was 30 pW against the lit
-        # reading's 14 pW -- the term that mattered most was averaged the least.
-        ref = acquire_point(pm, smu, n_smu, n_pm)
+        # The frame write sometimes does not land, so the reference is VERIFIED rather
+        # than assumed, and re-written when it fails. Section 19.
+        #
+        # The gate is the OPTICAL ratio, and it has to be: a healthy backplane
+        # legitimately conducts 58% of the reading at -0.80 V (section 6), so the
+        # current cannot discriminate -- but it does not EMIT. Across the 100 pixels of
+        # run 261015-0015 a healthy pixel references at 2e-4 of its own light and the
+        # failures sit at 0.38-1.03, with no clean point above the gate at ANY bias.
+        for tries in range(1, max(1, cfg.leak_ref_tries) + 1):
+            smile.set_pixel(x, y, cfg.leak_ref_bitval)
+            time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
+            # FULL n_pm, not a quarter of it. The reference current is stable to ~0.2 nA
+            # and needs almost no averaging, but the reference POWER is the dark level
+            # being subtracted from a ~250 pW signal, so at the dim end it is the
+            # dominant error. Run 261014-0035 with n_pm//4: the reference SEM was 30 pW
+            # against the lit reading's 14 pW -- the term that mattered most was
+            # averaged the least.
+            ref = acquire_point(pm, smu, n_smu, n_pm)
+            frac = abs(ref[0] / p) if p else float("nan")
+            if not (frac > cfg.leak_ref_max_frac):   # NaN must not trigger a retry
+                break
+            if tries < max(1, cfg.leak_ref_tries):
+                log(f"      ({x},{y}) at {v:+.2f} V: bitval {cfg.leak_ref_bitval} "
+                    f"reference carries {100 * frac:.0f}% of the lit light -- the frame "
+                    f"write did not land. Re-writing it (try {tries + 1} of "
+                    f"{cfg.leak_ref_tries}).")
         if restore:
             smile.set_pixel(x, y, bitval)
             time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
@@ -1095,25 +1119,18 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
         row.update(NVLED_CURR_REF=rinv, NVLED_CURR_REF_STD=rinvs,
                    VLED_CURR_REF=riv, PM400_POWER_REF=rp,
                    PM400_POWER_REF_STD=rps, LEAK_REF_BITVAL=cfg.leak_ref_bitval)
-        # Say it at the bench, not three days later in the analysis. 3 of the 100 pixels
-        # in run 261015-0015 never went dark at bitval 0, and the operator found out
-        # from a CSV. Section 19, open question 9.
-        #
-        # Only on the pixel's FIRST point, which is its brightest: the sweep runs high
-        # current to low current, and at the faint end even a healthy pixel's reference
-        # is legitimately 58% of the reading (section 6), so the same gate there would
-        # fire on everything. At the bright end the separation is 38x -- 1.5% healthy
-        # against 57% contaminated -- and needs no threshold tuning.
-        if (x, y) not in _ref_warned:
+        row.update(LEAK_REF_TRIES=tries, LEAK_REF_FRAC=frac)
+        # Say it at the bench, not three days later in the analysis. Only once per
+        # pixel, because a pixel whose writes keep failing would otherwise print on
+        # every one of its 30 biases.
+        if frac > cfg.leak_ref_max_frac and (x, y) not in _ref_warned:
             _ref_warned.add((x, y))
-            frac = abs(rp / p) if p else float("nan")
-            if frac > 0.25:
-                log(f"  !! ({x},{y}) does not go dark at bitval "
-                    f"{cfg.leak_ref_bitval}: its reference carries {100*frac:.0f}% of "
-                    f"its own light at {v:+.2f} V. The subtraction removes most of the "
-                    f"signal, so this pixel's EQE is not usable. Retrying the frame "
-                    f"write does NOT help -- it is the pixel, not the write (section "
-                    f"19). The analysis flags it REF_CONTAMINATED.")
+            log(f"  !! ({x},{y}): the bitval {cfg.leak_ref_bitval} reference still "
+                f"carries {100 * frac:.0f}% of the lit light after "
+                f"{cfg.leak_ref_tries} write(s), at {v:+.2f} V. The subtraction removes "
+                f"most of the signal, so these points are not usable. Intermittent in "
+                f"both directions -- see section 19. The analysis flags it "
+                f"REF_CONTAMINATED.")
     if raw_s is not None:
         # honest per-burst stats. _MEAN = true mean, _MEDIAN = median, _SAMPSTD =
         # population std, _STD = SEM (sigma/sqrt(N)) -- kept as _STD because that is the

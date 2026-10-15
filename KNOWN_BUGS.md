@@ -5,10 +5,20 @@ repo, which is where the evidence for every "fixed" line below lives.
 
 ## Open
 
-* **Some pixels do not go dark at bitval 0.** Their leakage reference carries 55–61 % of
-  their own light at every bias, so the subtraction removes most of the signal. Four in
-  116 swept pixels so far. The analysis flags them (`REF_CONTAMINATED`, a 500× bimodal
-  gap, no fitted threshold) but the cause is unknown. §15, §16, open question 9.
+* ~~Some pixels do not go dark at bitval 0.~~ **Cause found: the FPGA does not always
+  write the frame.** It is intermittent in both directions — (56,51) referenced clean in
+  two runs and contaminated in four, and single biases flip inside one sweep. The sweep
+  now verifies the reference optically and re-writes the frame up to `leak_ref_tries = 3`
+  times. §19, open question 9. **Every run taken before 16 October 2026 carries the
+  uncorrected rate**, so `REF_CONTAMINATED` stays in the analysis.
+* **The per-write frame failure rate is unknown.** Order a few percent, from the runs
+  above, but nothing has measured it properly or asked whether it depends on the pixel,
+  the bitval or the array position. `LEAK_REF_TRIES` now records it on every point.
+* **The backplane leakage has never been recorded as a time series.** Every leakage
+  number in the report is a settled burst. Flat from 10 min to 7 h when reconstructed
+  from run 261015-0015, unmeasured from one burst to 10 min, and the within-burst SEM is
+  1.6 % of the reference — which at −0.80 V is 0.9 % on `I_LED`. `--switch-to-bitval 0`
+  records it. §19 Q5, open question 15.
 * **A blanked frame conducts ~4× more than an addressed pixel at bitval 0.** Reproducible
   across 12 pixels and two experiments, worked around (the reference is the *addressed*
   pixel, never a blank frame) but not understood. §6, open question 2.

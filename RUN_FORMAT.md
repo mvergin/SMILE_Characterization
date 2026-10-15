@@ -136,6 +136,18 @@ back to back with the lit point at the same bias.
 | `PM400_POWER_REF` | W | optical power in the same state: the true local dark |
 | `PM400_POWER_REF_STD` | W | SEM of that |
 | `LEAK_REF_BITVAL` | - | the drive level used as the reference |
+| `LEAK_REF_TRIES` | - | frame writes it took to get the pixel off (1 = first one landed) |
+| `LEAK_REF_FRAC` | - | `PM400_POWER_REF / PM400_POWER_MEAN`, the ratio the retry gated on |
+
+`LEAK_REF_TRIES > 1` means a frame write did not land and was re-sent. The FPGA does
+not always write the frame correctly, at a rate of order a few percent per write, so
+the reference is verified optically rather than assumed -- see §19 of the investigation
+report. `LEAK_REF_FRAC` above `leak_ref_max_frac` (0.25) means it never landed and the
+point is **not usable**: the subtraction removes most of the signal.
+
+**Runs before 16 October 2026 have neither column and carry the uncorrected failure
+rate.** A reader must treat their absence as "unknown", not as "the write succeeded",
+and keep whatever contamination gate it already has.
 
 **This is not optional precision, it is the measurement.** Channel B reads the
 *total* cathode current. Measured over 12 pixels in 4 quadrants on 261013:

@@ -548,6 +548,27 @@ class IQEConfig:
     # current. Measured both ways, twice.
     leak_reference: bool = True  # measure each sweep point lit and at LEAK_REF_BITVAL
     leak_ref_bitval: int = 0  # the reference drive level: addressed, but off
+    leak_ref_tries: int = 3  # frame writes allowed for the bitval-0 reference.
+                             # The FPGA does not always write the frame correctly, so
+                             # the reference is verified optically and re-written when
+                             # it fails. Evidence that it is the WRITE and not the
+                             # pixel: (56,51) referenced clean in runs 261014-1616 and
+                             # 261015-0958 and contaminated in four others, and single
+                             # points flip inside one sweep -- one clean bias in an
+                             # otherwise contaminated run, and a contiguous block of
+                             # four bad biases in an otherwise clean one. A stuck
+                             # transistor cannot do that. Section 19.
+                             #
+                             # Cost is nil: ~1% of points fail, and only those retry.
+                             # Set to 1 to reproduce runs taken before this existed.
+    leak_ref_max_frac: float = 0.25  # retry while PM400_POWER_REF / PM400_POWER_MEAN
+                             # exceeds this. The gate is OPTICAL on purpose: a healthy
+                             # backplane conducts 58% of the reading at -0.80 V but does
+                             # not emit, so the current cannot tell a failed write from
+                             # ordinary leakage and the light can. Over the 3000 points
+                             # of run 261015-0015 the healthy pixels sit at 2e-4 and the
+                             # failures at 0.38-1.03, with nothing clean above this gate
+                             # at any bias -- a 250x margin, so it needs no tuning.
     leak_ref_settle_s: float = 2.0  # after switching drive level. Shorter than the sweep
                                     # settle: the bias does not move, only the drive, and
                                     # the point of measuring back to back is a shared history.

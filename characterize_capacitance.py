@@ -938,9 +938,12 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
         smile.blank_frame()
         smile.set_pixel(fx, fy, cfg.bitvals[0])
 
-        def _switch(_x=x, _y=y):
+        to_bv = cfg.bitvals[0] if args.switch_to_bitval is None \
+            else args.switch_to_bitval
+
+        def _switch(_x=x, _y=y, _b=to_bv):
             smile.blank_frame()
-            smile.set_pixel(_x, _y, cfg.bitvals[0])
+            smile.set_pixel(_x, _y, _b)
 
         # v_from == v_to: the bias never moves, so the pre-settle is the only wait and
         # the trigger is the frame change.
@@ -956,7 +959,8 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
                                  trigger=_switch)
         met = settling_metrics(t, np.abs(ib))
         spec = keep_trace(f"switch_hc{int(cfg.highc_b)}_v{v:+.3f}"
-                          f"_{fx}-{fy}to{x}-{y}", t, ia, ib, args.trace_points)
+                          f"_{fx}-{fy}to{x}-{y}_b{to_bv}",
+                          t, ia, ib, args.trace_points)
         nan = float("nan")
         p_lit, p_std = read_power(pm, args.step_n_pm) if args.step_n_pm else (nan, nan)
 
@@ -984,6 +988,7 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
         sigma = (first - later) / res if res else nan
 
         rows.append(dict(v=v, from_x=fx, from_y=fy, to_x=x, to_y=y,
+                         to_bitval=to_bv,
                          hold_s=args.switch_hold_s, **met, power_W=p_lit,
                          power_std=p_std, first_s_a=first, later_s_a=later,
                          switch_dev_pct=dev, resolution_pct=res_pct,
@@ -1211,6 +1216,12 @@ def build_parser():
                     help="switch: the pixel lit while the bias settles, before the "
                          "frame changes to the target (default: the target itself, "
                          "which tests re-addressing only)")
+    ap.add_argument("--switch-to-bitval", type=int, default=None,
+                    help="drive level the frame change writes (default: bitvals[0], "
+                         "i.e. lit). Pass 0 to record a LEAKAGE time trace: the pixel "
+                         "is held lit and settled, then driven to bitval 0 and the "
+                         "cathode current recorded. Nothing else measures whether the "
+                         "backplane leak is steady or wanders.")
     ap.add_argument("--switch-hold-s", type=float, default=300.0,
                     help="switch: how long to hold the bias before the frame change. "
                          "Default 300 s because the bias itself needs ~240 s to reach "
