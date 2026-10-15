@@ -2626,6 +2626,21 @@ def anomaly_report(
         }
         return bad, pos, meds
 
+    # ---- 2b. lines that are not dim but DEAD-HEAVY ----
+    # _lines() judges a line by its median, so it cannot see a row that is 9 % dead and
+    # otherwise healthy. Run 261015-0015 had five: rows 127/255/256/384/511 held 211 of
+    # the array's 715 dead pixels at 42x the rate of any other row, with normal medians
+    # and clean immediate neighbours. The median test flagged one line in the whole
+    # array and none of these. Counting the holes is the orthogonal test, and it is the
+    # one that sees a row driver.
+    def _dead_lines(axis: int) -> dict[int, int]:
+        n = np.isnan(G).sum(axis=1 - axis)
+        typical = max(1.0, float(np.median(n)))
+        return {int(p): int(n[p]) for p in np.where(n >= max(10, 10 * typical))[0]}
+
+    dead_rows = {k + ylo: v for k, v in _dead_lines(0).items()}
+    dead_cols = {k + xlo: v for k, v in _dead_lines(1).items()}
+
     quads = {
         "TL": (0, quad, 0, quad),
         "TR": (quad, xhi + 1, 0, quad),
@@ -2728,7 +2743,8 @@ def anomaly_report(
     fig.savefig(out, dpi=300, bbox_inches="tight")
     plt.close(fig)
     return dict(
-        noise=noise, blobs=blobs, bad_cols=bad_cols, bad_rows=bad_rows, grads=grads
+        noise=noise, blobs=blobs, bad_cols=bad_cols, bad_rows=bad_rows, grads=grads,
+        dead_rows=dead_rows, dead_cols=dead_cols
     )
 
 
@@ -2832,6 +2848,16 @@ def analyse_run(run_dir, log):
                         f"{ {q: f'{c}c/{rr}r' for q, (c, rr) in lines.items()} }; "
                         f"quadrant gradients { {q: f'{g:.0f}%' for q, g in r['grads'].items()} }"
                     )
+                    for lbl, dd in (("rows", r.get("dead_rows", {})),
+                                    ("cols", r.get("dead_cols", {}))):
+                        if dd:
+                            log(
+                                f"    dead-heavy {lbl}: {len(dd)} holding "
+                                f"{sum(dd.values())} dead pixels — "
+                                + ", ".join(f"{p}:{n}" for p, n in
+                                            sorted(dd.items(), key=lambda kv: -kv[1])[:8])
+                                + " (normal medians; a driver signature, not dimness)"
+                            )
             else:
                 log(
                     "  (fast scan is off the EQE plateau — no peak-IQE proxy; set NVLED fast-scan "
