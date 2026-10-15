@@ -1224,8 +1224,28 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
         log(f"  resuming: {len(done_v)} bias(es) already complete on every pixel")
 
     live = [(int(r["X"]), int(r["Y"])) for r in selected]
-    # Say it every run, because it is a known systematic and not a guess: see
-    # config.pixel_switch_settle_s. Measured, not modelled, on 261015-0822.
+
+    # One conditioning pass over every pixel, before the first bias. See
+    # config.bias_major_precondition for why this is once-per-run and not per point.
+    if cfg.bias_major_precondition and cfg.warmup_ms:
+        # Explicit limit: the soak is only a soak if the pixel can draw its current.
+        configure_voltage_source_b(
+            smu, dataclasses.replace(cfg, nvled_compliance=cfg.vramp_highv_limit_a), log)
+        cur_limit = cfg.vramp_highv_limit_a
+        smu.set_voltage("b", float(cfg.warmup_nvled_v))
+        t_pre = time.perf_counter()
+        for (x, y) in live:
+            smile.blank_frame()
+            smile.set_pixel(x, y, cfg.bitvals[0])
+            time.sleep(cfg.warmup_ms / 1000.0)
+        smile.blank_frame()
+        log(f"  preconditioned {len(live)} pixel(s) at {cfg.warmup_nvled_v:+.2f} V, "
+            f"{cfg.warmup_ms / 1000.0:g}s each, limit {cfg.vramp_highv_limit_a:g} A "
+            f"({time.perf_counter() - t_pre:.0f}s). Tests whether the conditioning "
+            f"persists -- section 17.")
+    else:
+        cur_limit = None
+
     # Say it every run, because an operator who sees a 3% deficit will reach for this
     # knob, and 261015-0958 already paid 2 hours to prove it is the wrong one.
     sw = cfg.pixel_switch_settle_s * cfg.settle_scale
@@ -1240,7 +1260,7 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
         log(f"  !! pixel_switch_settle_s={sw:g}s costs n_px x n_points x {sw:g}s and buys "
             f"nothing measurable. 2s is the measured-correct value.")
     n_dead = 0
-    cur_limit = cur_nplc = cur_range = None
+    cur_nplc = cur_range = None      # cur_limit is set by the preconditioning block
     i_last = None
     for bitval in cfg.bitvals:
         for jpt, (v, _i_target) in enumerate(fine):

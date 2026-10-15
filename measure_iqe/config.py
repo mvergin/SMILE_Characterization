@@ -72,6 +72,26 @@ class IQEConfig:
     # between nearby pixels is a physical question, so it is a knob); 1 disables the
     # guard. A block too dead or too small to honour it falls back and says so in the log.
     min_pixel_separation: int = 2
+    bias_major_precondition: bool = False
+    # Hold every selected pixel at warmup_nvled_v for warmup_ms ONCE, before the first
+    # bias. Costs warmup_ms per pixel (~24 s for 16) and nothing per point.
+    #
+    # Why: pixel_major conditions every pixel immediately before that pixel's own ramp
+    # and _sweep_bias_major conditions none, which is the last standing explanation for
+    # the 3.2 % current deficit bias_major shows on the rising side (see
+    # pixel_switch_settle_s). Conditioning per pixel per BIAS is not an option -- that
+    # is a 1.65 V step into 42.8 uF at every point, i.e. pixel_major with extra steps.
+    # Once per run is the only affordable version, and it tests the open half of the
+    # question: does the conditioning persist?
+    #
+    # Two things to know before reading a result from this:
+    #   * it drives at vramp_highv_limit_a, not at whatever limit happens to be set.
+    #     pixel_major's own warm-up inherits the limit left by the previous pixel's
+    #     FAINTEST point, so under high_to_low it is probably current-clamped well
+    #     below what -2.6 V would draw. This one is not. They are not identical soaks.
+    #   * bias_major already drives every pixel at -2.6 V for ~6 s at its first bias,
+    #     harder than that clamped warm-up does. If recency rather than magnitude is
+    #     what matters, this flag will not help and the hypothesis is wrong.
     sweep_rotate: int = 0  # rotate the MEASUREMENT ORDER by N, same pixels. Under
                            # bias_major the pixel in slot 0 holds the frame through the
                            # whole bias dwell and reads ~3% higher in current than the

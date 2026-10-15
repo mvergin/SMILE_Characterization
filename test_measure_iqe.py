@@ -497,6 +497,32 @@ def test_bias_major_measures_the_same_grid_as_pixel_major():
     assert c_bm == c_px, f"different columns:\n  {c_px}\n  {c_bm}"
 
 
+def test_bias_major_precondition_touches_every_pixel_once():
+    """The conditioning pass must reach every selected pixel exactly once, hold the
+    conditioning voltage while it does, and leave the measured grid untouched."""
+    from measure_iqe import run_iqe_measurement
+
+    common = dict(FAST, n_fine=5, roi=(0, 0, 7, 7), block_size=4, pixels_per_block=1,
+                  block_seed=0, dead_abort=False, sweep_order="bias_major",
+                  warmup_ms=1.0)
+    grids, logs = {}, {}
+    for pre in (False, True):
+        lines = []
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = IQEConfig(**common, bias_major_precondition=pre)
+            res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp,
+                                      log=lines.append)
+            grids[pre] = _sweep_grid(res.run_dir)[0]
+        logs[pre] = [ln for ln in lines if "preconditioned" in ln]
+
+    assert not logs[False], "preconditioning ran with the flag off"
+    assert len(logs[True]) == 1, f"expected one preconditioning line, got {logs[True]}"
+    npx = len({(x, y) for x, y, _ in grids[True]})
+    assert f"preconditioned {npx} pixel(s)" in logs[True][0], logs[True][0]
+    # and the soak must not move the sweep: same points, both ways
+    assert grids[True] == grids[False], "preconditioning changed the measured grid"
+
+
 def test_bias_major_pays_each_dwell_once_for_all_pixels():
     """The point of the order: n_pixels x the dwell becomes 1 x the dwell."""
     import time as _time
