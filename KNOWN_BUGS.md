@@ -20,11 +20,17 @@ repo, which is where the evidence for every "fixed" line below lives.
   While the Keithley measures into its buffer the voltage cannot be changed freely. There
   are several ways to do this with minimal downtime; it was implemented separately and
   never merged.
-* **`bias_major` reads up to 3 % low in current** against `pixel_major` on the rising
-  side. Five runs failed to move it (the switch wait, the loop order, a conditioning
-  pass), **but every one of them is compared to a single reference run from the previous
-  day**, so elapsed time and loop order are confounded. Treat 3 % as an upper bound until
-  the back-to-back A/B exists. §17, open question 12. Report EQE(J), not EQE(V).
+* **Cross-run drift of ~2 % per day, unmeasured.** This is the project's largest known
+  error. It is bigger than the loop-order effect below, it contaminated five runs' worth
+  of conclusions in §15–§17, and nobody knows whether it is the array, the PM400 or the
+  collection geometry. Any absolute number needs a same-day `pixel_major` anchor.
+  §18, open question 14.
+* **`bias_major` reads ~1 % low in current** against `pixel_major`, on the faint side
+  only — zero above −1.8 V. Measured back to back (runs 261015-1421 / -1529), worth
+  1.05 mV. Not worth chasing at that size, but it is real: three pixels agree to 0.3 pp.
+  Report EQE(J), not EQE(V). §18, open question 12 (closed).
+
+  *Earlier this entry read "up to 3 %". Two thirds of that was the drift above.*
 
 ## Fixed
 

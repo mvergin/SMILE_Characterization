@@ -1259,16 +1259,16 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
     else:
         cur_limit = None
 
-    # Say it every run, because an operator who sees a 3% deficit will reach for this
+    # Say it every run, because an operator who sees a deficit will reach for this
     # knob, and 261015-0958 already paid 2 hours to prove it is the wrong one.
     sw = cfg.pixel_switch_settle_s * cfg.settle_scale
-    log(f"  !! bias_major reads up to ~3% low in current on the rising side vs the "
-        f"pixel_major run of 261014-1616. Five runs failed to move it: the switch wait "
-        f"(0958), the loop order (1225), a conditioning pass (1321). But all five are "
-        f"compared to ONE reference from the day before, so elapsed time and loop order "
-        f"are confounded -- treat 3% as an upper bound until a back-to-back A/B exists. "
-        f"Report against J: at matched CURRENT the orders agree to within 1.9%. Leave "
-        f"pixel_switch_settle_s={sw:g}s alone -- see config.pixel_switch_settle_s.")
+    log(f"  !! bias_major reads ~1% low in current on the FAINT side vs pixel_major, and "
+        f"nothing above -1.8V (back-to-back runs 261015-1421/-1529, 1.05mV). It reads ~3% "
+        f"against a reference from the day BEFORE: two thirds of that is CROSS-RUN DRIFT, "
+        f"~2%/day, which is now the project's largest error. Anchor any absolute number "
+        f"with a SAME-DAY pixel_major run. Report against J: at matched CURRENT the "
+        f"orders agree to 0.84%. Leave pixel_switch_settle_s={sw:g}s alone -- see "
+        f"config.pixel_switch_settle_s.")
     if sw > 5.0:
         log(f"  !! pixel_switch_settle_s={sw:g}s costs n_px x n_points x {sw:g}s and buys "
             f"nothing measurable. 2s is the measured-correct value.")
@@ -1325,13 +1325,15 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
             #                the PIXEL to slot 15 (-0.22%), and the pixel moved into
             #                slot 0 came out worst in the run (-3.84%).
             #
-            # So there is no privileged slot and nothing here to wait out. What is left
-            # is a flat 4-6 mV offset that does not decay. The one live candidate is
-            # that _sweep_pixel_major conditions EVERY pixel at warmup_nvled_v before
-            # sweeping it (line ~1480) and this loop conditions NONE -- not even
-            # selected[0]. Conditioning is bought with current, not with waiting.
+            # So there is no privileged slot and nothing here to wait out. The
+            # conditioning candidate died too (bias_major_precondition, run 261015-1321).
             #
-            # See config.pixel_switch_settle_s and section 17.
+            # And then the back-to-back A/B (261015-1421 / -1529, 68 min apart) showed
+            # two thirds of the deficit was never this loop: -3.0% against a day-old
+            # reference, -1.04% against a same-day one. What this loop really costs is
+            # ~1% on the faint side and nothing above -1.8V.
+            #
+            # See config.pixel_switch_settle_s and sections 17-18.
             smile.blank_frame()
             smile.set_pixel(live[0][0], live[0][1], bitval)
             smu.set_voltage("b", float(v))

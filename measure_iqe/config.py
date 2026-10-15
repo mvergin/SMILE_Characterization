@@ -453,15 +453,22 @@ class IQEConfig:
                                        # !! DO NOT RAISE THIS. It was measured, twice,
                                        # and it is not the knob it looks like.
                                        #
-                                       # bias_major reads up to ~3 % low in current on
-                                       # the rising side against pixel_major on the same
-                                       # pixels, flat across every pixel. !! That is an
-                                       # UPPER BOUND: every bias_major run is compared
-                                       # to one pixel_major run from the day before, so
-                                       # elapsed time and loop order are confounded and
-                                       # the optical channel visibly drifts across the
-                                       # window. A back-to-back A/B (~1.3 h, 6 pixels)
-                                       # is what settles it.
+                                       # bias_major reads ~1 % low in current on the
+                                       # FAINT side against pixel_major on the same
+                                       # pixels, and nothing above -1.8 V. Runs
+                                       # 261015-1421 / -1529, back to back, 68 min
+                                       # apart:
+                                       #
+                                       #   order 0    +0.05 % I
+                                       #   order >0   -1.04 % I,  -0.84 % at matched I
+                                       #   offset     1.05 mV
+                                       #
+                                       # It reads ~3 % against a reference from the day
+                                       # BEFORE. Two thirds of that was elapsed time,
+                                       # not loop order -- see section 18. Cross-run
+                                       # drift (~2 %/day) is now the project's largest
+                                       # error, so any absolute number needs a SAME-DAY
+                                       # pixel_major anchor. Four pixels, 1.8 h.
                                        #
                                        # The deficit looked like an unfinished switch
                                        # transient, so
@@ -485,11 +492,14 @@ class IQEConfig:
                                        # into slot 0 came out worst in the run
                                        # (-3.84 %). There is no privileged position.
                                        #
-                                       # What is left is a 4-6 mV offset on the voltage
-                                       # axis that does not decay. At matched CURRENT the
-                                       # two orders agree to 1.9 %, so EQE(J), the ABC
-                                       # fit and IQE are fine and it is EQE(V) that is
-                                       # 5 % low. Report against J.
+                                       # What is left, back to back, is ~1 mV and it
+                                       # does not decay. It grows as the bias falls
+                                       # (-0.2 % at -2.6 V, -1.0 % at -1.0 V, -2.3 % at
+                                       # -0.80 V where the leakage floor takes over), so
+                                       # it is additive rather than a shifted axis. At
+                                       # matched CURRENT the orders agree to 0.84 %, so
+                                       # EQE(J), the ABC fit and IQE are fine and EQE(V)
+                                       # is ~1 % low on the faint side. Report against J.
                                        #
                                        # Cost of getting this wrong: at 100 px x 30
                                        # points, one second here is 50 min of run time,
