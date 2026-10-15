@@ -1220,14 +1220,18 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
     live = [(int(r["X"]), int(r["Y"])) for r in selected]
     # Say it every run, because it is a known systematic and not a guess: see
     # config.pixel_switch_settle_s. Measured, not modelled, on 261015-0822.
+    # Say it every run, because an operator who sees a 3% deficit will reach for this
+    # knob, and 261015-0958 already paid 2 hours to prove it is the wrong one.
     sw = cfg.pixel_switch_settle_s * cfg.settle_scale
-    if sw < 10.0:
-        log(f"  !! pixel_switch_settle_s={sw:g}s. Measured on 261015-0822 at 2s: every "
-            f"pixel except the one holding the frame through the dwell reads ~3.0% low "
-            f"in current and ~1.9% low in EQE on the rising side, growing toward the "
-            f"faint end. The deficit is uniform across pixels, so relative work is "
-            f"intact and the absolute rising side is not. Peak IQE was unaffected "
-            f"(77% both ways).")
+    log(f"  !! bias_major reads ~3.0% low in current and ~5% low in power on the rising "
+        f"side vs pixel_major, for every pixel but the one holding the frame through "
+        f"the dwell. This is NOT the switch wait: 261015-0958 ran at 20s and the "
+        f"deficit did not move. At matched CURRENT the two orders agree to 1.9%, so "
+        f"EQE(J)/IQE are fine and EQE(V) is 5% low. Report against J, and leave "
+        f"pixel_switch_settle_s={sw:g}s alone -- see config.pixel_switch_settle_s.")
+    if sw > 5.0:
+        log(f"  !! pixel_switch_settle_s={sw:g}s costs n_px x n_points x {sw:g}s and buys "
+            f"nothing measurable. 2s is the measured-correct value.")
     n_dead = 0
     cur_limit = cur_nplc = cur_range = None
     i_last = None
@@ -1272,12 +1276,16 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
             #     order >0 (switch)  -2.42% I            -2.99% I     <- untouched
             #
             # So the blanked dwell was real and is fixed, and the 2.5% the first run
-            # showed was mostly the OTHER thing: pixel_switch_settle_s = 2 s is too
-            # short for a newly lit pixel. That deficit is flat from loop position 1 to
-            # 15, so it is a per-switch transient, not drift.
+            # showed was mostly something else -- which is NOT the switch wait either:
+            # run 261015-0958 ran this loop at pixel_switch_settle_s=20 and order >0
+            # went -2.99% -> -3.25%, no reduction at ten times the wait.
             #
-            # See config.pixel_switch_settle_s, and section 15 for why the dedicated
-            # switch experiment bounded the same quantity at 0.5% and was wrong by 6x.
+            # What is left is a 4-6 mV offset that does not decay, and at matched
+            # current the two orders agree to 1.9%. The candidate cause is a few lines
+            # down in _sweep_pixel_major: it conditions EVERY pixel at warmup_nvled_v
+            # before sweeping it, and this loop conditions only selected[0].
+            #
+            # See config.pixel_switch_settle_s and section 17.
             smile.blank_frame()
             smile.set_pixel(live[0][0], live[0][1], bitval)
             smu.set_voltage("b", float(v))

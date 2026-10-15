@@ -409,28 +409,44 @@ class IQEConfig:
                                        # This is the ONLY per-point wait in bias_major,
                                        # so it sets the run time: n_px x n_points x this.
                                        #
-                                       # !! 2.0 s IS NOT ENOUGH, and the switch test that
-                                       # said "<1 s" could not see it. Runs 261014-2308
-                                       # and 261015-0822 against the pixel-major run on
-                                       # the same 16 pixels, median over -1.25..-0.80 V:
-                                       # the one pixel that holds the frame through the
-                                       # 54.47 s bias dwell lands at -0.70 % in current
-                                       # and -0.24 % in EQE, and every pixel that gets
-                                       # only this 2 s wait lands at -3.0 % in current,
-                                       # -5.1 % in power, -1.9 % in EQE -- flat in loop
-                                       # position, growing toward the faint end. A newly
-                                       # lit pixel has its own approach to steady state,
-                                       # and it is longer than 2 s.
+                                       # !! DO NOT RAISE THIS. It was measured, twice,
+                                       # and it is not the knob it looks like.
                                        #
-                                       # The true value is bounded by that run and
-                                       # nothing else: > 2 s, and <= 54.47 s. The switch
-                                       # test (261014-2223) reported <0.5 % because it
-                                       # watched the TOTAL cathode current -- 58 %
-                                       # backplane leakage at the faint end -- over a
-                                       # 20 s record referenced to its own tail, so a
-                                       # transient longer than the record is invisible to
-                                       # it by construction. Measure it with a record
-                                       # long enough to flatten before raising this.
+                                       # bias_major reads ~3.0 % low in current on the
+                                       # rising side against pixel_major on the same
+                                       # pixels, for every pixel except the one holding
+                                       # the frame through the 54.47 s bias dwell. That
+                                       # looked like an unfinished switch transient, so
+                                       # run 261015-0958 repeated it at 20 s -- ten times
+                                       # the wait, 3.5x the run time:
+                                       #
+                                       #              2 s (261015-0822)  20 s (0958)
+                                       #   order 0      -0.70 % I          -0.21 % I
+                                       #   order >0     -2.99 % I          -3.25 % I
+                                       #
+                                       # No reduction. Three checks agree there is no
+                                       # transient: flat against loop position once each
+                                       # pixel's own mean is removed, +0.001 %/100 s
+                                       # against time-since-the-bias-step over a 15x
+                                       # lever, 0.00 %/h against elapsed run time.
+                                       #
+                                       # What is left is a 4-6 mV offset on the voltage
+                                       # axis that does not decay. At matched CURRENT the
+                                       # two orders agree to 1.9 %, so EQE(J), the ABC
+                                       # fit and IQE are fine and it is EQE(V) that is
+                                       # 5 % low. Report against J.
+                                       #
+                                       # Cost of getting this wrong: at 100 px x 30
+                                       # points, one second here is 50 min of run time,
+                                       # so 2 -> 20 s is 15 hours for nothing.
+                                       #
+                                       # The leading candidate for the offset is in this
+                                       # file: warmup_ms/warmup_nvled_v condition every
+                                       # pixel at -2.6 V in pixel_major, and bias_major
+                                       # conditions only selected[0]. Conditioning is
+                                       # bought with current, not with waiting -- which
+                                       # is exactly why 20 s changed nothing. See
+                                       # section 17.
     vramp_perseg_effort: bool = True
     vramp_lowv_nplc: float = 2.0  # integer NPLC, so the mains line is nulled by integration
     vramp_lowv_n_pm: int = 32

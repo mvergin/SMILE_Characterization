@@ -886,6 +886,13 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
     switch wait lands at -3.0 % in current and -5.1 % in optical power. Six times this
     experiment's bound.
 
+    -- and then run 261015-0958 repeated that at a 20 s switch wait, and the deficit did
+    NOT shrink (-2.99 % -> -3.25 % in current). So the 3 % is real but it is not a
+    switch transient at all, and this experiment's "a switch is free" verdict is, by
+    accident, closer to the truth than the 3 % reading of it was. What the 3 % is
+    instead: a 4-6 mV offset on the voltage axis that does not decay with waiting.
+    At matched CURRENT the two loop orders agree to 1.9 %. See section 17.
+
     Two reasons it could not see that, and both are design, not noise:
 
       * it watches the TOTAL channel-B current. At the faint end 58 % of that is
@@ -898,14 +905,20 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
         of the offset. This is the record-limited artifact of section 3, in a test
         written to avoid the tolerance-band version of the same mistake.
 
-    To answer it properly the record has to flatten inside itself. At nplc 1.0 one
-    sample is 40 ms, so 3000 samples is 120 s:
+    Both lessons stand even though the conclusion they were written to support fell
+    over: this experiment cannot resolve what the sweep depends on, and a record read
+    against its own tail cannot see a transient longer than itself.
+
+    If this is ever run again, give it a record that flattens inside itself. At nplc 1.0
+    one sample is 40 ms, so 3000 samples is 120 s:
 
         --what switch --highc --pixels 35,36 --switch-from 39 40
         --voltages -0.80 -1.05 -1.35 --switch-hold-s 300 --samples 3000 --nplc 1.0
 
     Then read the trace against its last 20 s, not its last 2 s, and confirm the tail
-    is flat before believing any number taken from the head of it.
+    is flat before believing any number taken from the head of it. It is NOT the next
+    experiment to run -- section 17 names two sweep runs that are, and both measure the
+    LED's own current and light rather than the total cathode current.
     """
     rows = []
     x, y = pixel
