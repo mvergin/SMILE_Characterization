@@ -450,9 +450,11 @@ class IQEConfig:
                                        # so 2 -> 20 s is 15 hours for nothing.
                                        #
                                        # The leading candidate for the offset is in this
-                                       # file: warmup_ms/warmup_nvled_v condition every
-                                       # pixel at -2.6 V in pixel_major, and bias_major
-                                       # conditions only selected[0]. Conditioning is
+                                       # file: warmup_ms/warmup_nvled_v hold every pixel
+                                       # at -2.6 V for 1.5 s in pixel_major, and
+                                       # bias_major does it only for selected[0] --
+                                       # which is the pixel that reads clean.
+                                       # Conditioning is
                                        # bought with current, not with waiting -- which
                                        # is exactly why 20 s changed nothing. See
                                        # section 17.
