@@ -541,8 +541,8 @@ def split_branch_iqe(med, min_pts=4):
 def _load_aggregated(folder):
     """Return aggregated per-(pixel,voltage) DataFrame for a sweep/fastscan dir."""
     folder = Path(folder)
-    files = sorted(folder.glob("aggregated_bitval=*.csv")) or sorted(
-        folder.glob("**/aggregated_bitval=*.csv")
+    files = sorted(folder.glob("*aggregated_bitval=*.csv")) or sorted(
+        folder.glob("**/*aggregated_bitval=*.csv")
     )
     if files:
         return pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
@@ -1184,7 +1184,8 @@ def plot_burst_scatter(sweep_dir, out, plt, n_pixels=20):
     each point (EQE=P/I mixes two independent bursts, so there are no true per-sample EQE points).
     A tight cloud → the curve shape is real; a wide cloud → that point is measurement-noise-limited.
     Returns True if drawn, False if no samples file."""
-    samp = Path(sweep_dir) / "raw_data" / "Sweep_samples.csv"
+    samp = next(iter(sorted((Path(sweep_dir) / "raw_data").glob("*Sweep_samples.csv"))),
+                Path(sweep_dir) / "raw_data" / "Sweep_samples.csv")
     if not samp.exists():
         return False
     s = pd.read_csv(samp)

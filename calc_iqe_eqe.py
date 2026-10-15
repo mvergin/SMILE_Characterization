@@ -375,10 +375,10 @@ def analyse_sweep_data(sweep_dir, label, log):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Find aggregated CSVs
-    agg_files = sorted(sweep_dir.glob("aggregated_bitval=*.csv"))
+    agg_files = sorted(sweep_dir.glob("*aggregated_bitval=*.csv"))
     if not agg_files:
         # Maybe post-processing put them in the root
-        agg_files = sorted(sweep_dir.glob("**/aggregated_bitval=*.csv"))
+        agg_files = sorted(sweep_dir.glob("**/*aggregated_bitval=*.csv"))
     if not agg_files:
         # Fall back: read raw CSV and aggregate ourselves
         raw_csvs = list((sweep_dir / "raw_data").glob("*.csv"))

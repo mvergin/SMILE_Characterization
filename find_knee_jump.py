@@ -20,7 +20,7 @@ import pandas as pd
 
 
 def _load(run_dir):
-    ag = list((Path(run_dir) / "NVLEDSweep").rglob("aggregated_bitval=*_mean_std.csv"))
+    ag = list((Path(run_dir) / "NVLEDSweep").rglob("*aggregated_bitval=*_mean_std.csv"))
     if not ag:
         raise SystemExit(f"no sweep aggregate under {run_dir}")
     df = pd.read_csv(ag[0])

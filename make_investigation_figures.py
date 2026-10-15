@@ -34,7 +34,7 @@ def find(pat):
 
 
 def sweep_csv(folder):
-    g = [x for x in glob.glob(folder + "/**/aggregated_bitval=15_mean_std.csv", recursive=True)
+    g = [x for x in glob.glob(folder + "/**/*aggregated_bitval=15_mean_std.csv", recursive=True)
          if "FastScan" not in x]
     return g[0] if g else None
 

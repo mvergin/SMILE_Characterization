@@ -40,7 +40,7 @@ from measure_iqe.calibrate import settle_time      # noqa: E402
 
 def traces(run: Path):
     """Yield (key, t, I, P) for every dwell trace under a run directory."""
-    for npz in sorted(run.glob("**/settling_traces.npz")):
+    for npz in sorted(run.glob("**/*settling_traces.npz")):
         z = np.load(npz)
         for key in z.files:
             a = np.asarray(z[key], float)

@@ -34,7 +34,7 @@ def test_fixture_is_present():
 
 def test_aggregated_csv_has_the_promised_columns():
     for folder in (FIXTURE / "FastScan", SWEEP):
-        files = sorted(folder.glob("aggregated_bitval=*_mean_std.csv"))
+        files = sorted(folder.glob("*aggregated_bitval=*_mean_std.csv"))
         assert files, f"no aggregated CSV in {folder}"
         df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
         missing = [c for c in REQUIRED if c not in df.columns]
@@ -43,7 +43,7 @@ def test_aggregated_csv_has_the_promised_columns():
 
 
 def test_raw_csv_carries_the_dark_rows():
-    raw = pd.read_csv(SWEEP / "raw_data" / "Sweep.csv")
+    raw = pd.read_csv(next(iter(sorted((SWEEP / "raw_data").glob("*Sweep.csv")))))
     assert list(raw.columns) == ["X", "Y", "BITVAL", "NVLED_V", "TIME", "TYPE",
                                  "MEAS_VALUE", "MEAS_STD"]
     types = set(raw["TYPE"])

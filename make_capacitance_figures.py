@@ -54,7 +54,7 @@ def num(r: dict, key: str) -> float:
 
 def sweep_rows(name: str) -> list[dict]:
     d = run(name)
-    return rows(next(d.glob("NVLEDSweep/Sweep/aggregated_bitval=*_mean_std.csv")))
+    return rows(next(d.glob("NVLEDSweep/Sweep/*aggregated_bitval=*_mean_std.csv")))
 
 
 def led(r: dict) -> tuple[float, float, float]:

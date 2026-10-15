@@ -39,7 +39,7 @@ PEAK_J_LO, PEAK_J_HI = 6.0, 25.0                            # EQE-plateau window
 
 
 def _load(run_dir, name):
-    p = list((run_dir / name).rglob("aggregated_bitval=*_mean_std.csv"))
+    p = list((run_dir / name).rglob("*aggregated_bitval=*_mean_std.csv"))
     return pd.read_csv(p[0]) if p else None
 
 

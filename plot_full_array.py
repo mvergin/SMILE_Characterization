@@ -62,7 +62,8 @@ REF_SWALLOWED = 0.2  # ...and the net fell below this fraction of its bias cohor
 
 def load_fastscan(run: Path) -> pd.DataFrame:
     """One row per pixel: X, Y, P (W), I (A, magnitude), E = P/I."""
-    raw = run / "FastScan" / "raw_data" / "FastScan.csv"
+    raw = next(iter(sorted((run / "FastScan" / "raw_data").glob("*FastScan.csv"))),
+               run / "FastScan" / "raw_data" / "FastScan.csv")
     if not raw.is_file():
         sys.exit(f"{run} has no FastScan/raw_data/FastScan.csv")
     d = pd.read_csv(raw)
@@ -76,7 +77,7 @@ def load_fastscan(run: Path) -> pd.DataFrame:
 
 def load_sweep(run: Path) -> pd.DataFrame:
     """Aggregated sweep with the reference subtracted and REF_SWALLOWED points dropped."""
-    agg = sorted((run / "NVLEDSweep").glob("*/aggregated_bitval=*_mean_std.csv"))
+    agg = sorted((run / "NVLEDSweep").glob("*/*aggregated_bitval=*_mean_std.csv"))
     if not agg:
         sys.exit(f"{run} has no aggregated NVLEDSweep CSV")
     a = pd.read_csv(agg[0])

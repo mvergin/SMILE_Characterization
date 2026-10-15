@@ -64,7 +64,7 @@ def started(run: Path) -> dt.datetime | None:
 
 
 def load(run: Path) -> pd.DataFrame:
-    agg = sorted((run / "NVLEDSweep").glob("*/aggregated_bitval=*_mean_std.csv"))
+    agg = sorted((run / "NVLEDSweep").glob("*/*aggregated_bitval=*_mean_std.csv"))
     if not agg:
         sys.exit(f"{run} has no aggregated NVLEDSweep CSV")
     a = pd.read_csv(agg[0])

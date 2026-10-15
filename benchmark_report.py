@@ -38,7 +38,7 @@ def peak_iqe(run_dir: Path) -> tuple[float, float]:
     not captured — a variation that loses the peak is exactly what we want to see.
     """
     sweep = Path(run_dir) / "NVLEDSweep" / "Sweep"
-    files = sorted(sweep.glob("aggregated_bitval=*_mean_std.csv"))
+    files = sorted(sweep.glob("*aggregated_bitval=*_mean_std.csv"))
     if not files:
         return float("nan"), float("nan")
     df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
