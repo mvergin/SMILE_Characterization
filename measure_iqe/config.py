@@ -406,10 +406,31 @@ class IQEConfig:
     #     first bias visited IS the brightest, so every pixel is conditioned there anyway.
     pixel_switch_settle_s: float = 2.0  # bias_major: the wait after a frame change,
                                        # before measuring the next pixel at a held bias.
-                                       # Measured need is <1 s (above); 2 s is the
-                                       # comfortable default. This is the ONLY per-point
-                                       # wait in bias_major, so it sets the run time:
-                                       # n_pixels x n_points x this.
+                                       # This is the ONLY per-point wait in bias_major,
+                                       # so it sets the run time: n_px x n_points x this.
+                                       #
+                                       # !! 2.0 s IS NOT ENOUGH, and the switch test that
+                                       # said "<1 s" could not see it. Runs 261014-2308
+                                       # and 261015-0822 against the pixel-major run on
+                                       # the same 16 pixels, median over -1.25..-0.80 V:
+                                       # the one pixel that holds the frame through the
+                                       # 54.47 s bias dwell lands at -0.70 % in current
+                                       # and -0.24 % in EQE, and every pixel that gets
+                                       # only this 2 s wait lands at -3.0 % in current,
+                                       # -5.1 % in power, -1.9 % in EQE -- flat in loop
+                                       # position, growing toward the faint end. A newly
+                                       # lit pixel has its own approach to steady state,
+                                       # and it is longer than 2 s.
+                                       #
+                                       # The true value is bounded by that run and
+                                       # nothing else: > 2 s, and <= 54.47 s. The switch
+                                       # test (261014-2223) reported <0.5 % because it
+                                       # watched the TOTAL cathode current -- 58 %
+                                       # backplane leakage at the faint end -- over a
+                                       # 20 s record referenced to its own tail, so a
+                                       # transient longer than the record is invisible to
+                                       # it by construction. Measure it with a record
+                                       # long enough to flatten before raising this.
     vramp_perseg_effort: bool = True
     vramp_lowv_nplc: float = 2.0  # integer NPLC, so the mains line is nulled by integration
     vramp_lowv_n_pm: int = 32

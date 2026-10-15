@@ -876,8 +876,36 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
 
     Measured on Array42, 261014-2151, High-C off: the first second sits 0.3-0.9 %
     below the later ones at -0.85 and -1.00 V, and is lost in the noise at -0.80 V.
-    So the switch costs well under a percent and is done inside a second, against the
-    ~3.8 % the pixel-major sweep leaves after 54 s. Bias-major wins on both counts.
+    261014-2223 with High-C put the bound at 0.5 % with 0.13 % resolution.
+
+    !! THAT ANSWER IS WRONG, and the way it is wrong is the point of this note.
+
+    The sweep settled it directly. Run 261015-0822 (bias_major, 16 pixels) against the
+    pixel-major run on the same 16: the pixel that holds the frame through the 54.47 s
+    bias dwell lands at -0.70 % in current, and every pixel that gets only the 2 s
+    switch wait lands at -3.0 % in current and -5.1 % in optical power. Six times this
+    experiment's bound.
+
+    Two reasons it could not see that, and both are design, not noise:
+
+      * it watches the TOTAL channel-B current. At the faint end 58 % of that is
+        backplane leakage (section 6), so a 3.5 % error in the LED's own current
+        arrives here as 1.5 %, and the optical channel -- where the deficit is
+        largest at 5.1 % -- is not recorded at all.
+      * it references the early samples to its OWN TAIL. With `--samples 500 --nplc 1.0`
+        the record is 20 s. A transient still running at 20 s moves the reference with
+        the signal, and the comparison returns the curvature inside the record instead
+        of the offset. This is the record-limited artifact of section 3, in a test
+        written to avoid the tolerance-band version of the same mistake.
+
+    To answer it properly the record has to flatten inside itself. At nplc 1.0 one
+    sample is 40 ms, so 3000 samples is 120 s:
+
+        --what switch --highc --pixels 35,36 --switch-from 39 40
+        --voltages -0.80 -1.05 -1.35 --switch-hold-s 300 --samples 3000 --nplc 1.0
+
+    Then read the trace against its last 20 s, not its last 2 s, and confirm the tail
+    is flat before believing any number taken from the head of it.
     """
     rows = []
     x, y = pixel

@@ -1218,6 +1218,16 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
         log(f"  resuming: {len(done_v)} bias(es) already complete on every pixel")
 
     live = [(int(r["X"]), int(r["Y"])) for r in selected]
+    # Say it every run, because it is a known systematic and not a guess: see
+    # config.pixel_switch_settle_s. Measured, not modelled, on 261015-0822.
+    sw = cfg.pixel_switch_settle_s * cfg.settle_scale
+    if sw < 10.0:
+        log(f"  !! pixel_switch_settle_s={sw:g}s. Measured on 261015-0822 at 2s: every "
+            f"pixel except the one holding the frame through the dwell reads ~3.0% low "
+            f"in current and ~1.9% low in EQE on the rising side, growing toward the "
+            f"faint end. The deficit is uniform across pixels, so relative work is "
+            f"intact and the absolute rising side is not. Peak IQE was unaffected "
+            f"(77% both ways).")
     n_dead = 0
     cur_limit = cur_nplc = cur_range = None
     i_last = None
@@ -1248,18 +1258,26 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
 
             # --- the one dwell this bias costs, for all the pixels below it ---
             #
-            # Light a pixel FIRST. The previous bias ended with a blanked frame for its
-            # dark reading, and relaxing at the new bias in that state is not the state
-            # the measurements are taken in: a blanked frame conducts ~4x the bitval-0
-            # level (section 6), so the array settles to a different charge. Run
-            # 261014-2308 paid its dwell blanked and read 2.2-2.9% LOW at every bias
-            # from -1.25 to -0.90 V against the pixel-major run on the same 16 pixels --
-            # with the reference and the raw lit current both confirming the offset was
-            # in the lit reading, not the subtraction.
+            # Light a pixel FIRST, so the array relaxes at the new bias in the state the
+            # measurements are taken in rather than blanked -- a blanked frame conducts
+            # ~4x the bitval-0 level (section 6).
             #
-            # The switch test (261014-2223) held the bias with ANOTHER PIXEL LIT, which
-            # is why it measured 0.3% and this loop lost 2.5%: it was not reproducing
-            # the condition the test validated.
+            # This works, and it reaches exactly ONE pixel per bias -- which is why the
+            # run-level number barely moved when it landed. Splitting 261014-2308 and
+            # 261015-0822 by loop position, against pixel_major on the same 16 pixels,
+            # median over -1.25..-0.80 V:
+            #
+            #                        before this fix      after
+            #     order 0  (here)    -2.53% I            -0.70% I     <- the fix
+            #     order >0 (switch)  -2.42% I            -2.99% I     <- untouched
+            #
+            # So the blanked dwell was real and is fixed, and the 2.5% the first run
+            # showed was mostly the OTHER thing: pixel_switch_settle_s = 2 s is too
+            # short for a newly lit pixel. That deficit is flat from loop position 1 to
+            # 15, so it is a per-switch transient, not drift.
+            #
+            # See config.pixel_switch_settle_s, and section 15 for why the dedicated
+            # switch experiment bounded the same quantity at 0.5% and was wrong by 6x.
             smile.blank_frame()
             smile.set_pixel(live[0][0], live[0][1], bitval)
             smu.set_voltage("b", float(v))
