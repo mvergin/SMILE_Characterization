@@ -19,7 +19,6 @@ directory on disk is the whole interface, specified in
 | `measure_iqe/` | **the measurement: library + CLI** — fast scan, pixel selection, IQE sweep |
 | `smile/`, `instruments/` | SMILE FPGA driver and the PM400 / Keithley 2602B instrument drivers |
 | `measurement/`, `data/`, `smile_postprocess.py` | **reference only, unmaintained** — the transient / ultra-fast / hardware-paced-TSP techniques that predate `measure_iqe`. See [MEASUREMENT_MODES.md](MEASUREMENT_MODES.md) |
-| `benchmark_sweep.py`, `autozero_bench.py`, `sweep_variants.py` | parameter benchmarks built on the `measure_iqe` API |
 | `characterize_capacitance.py` | measures the array's ~50 µF capacitance and what it does to a low-current reading |
 
 ---
@@ -92,8 +91,7 @@ lines: list[str] = []
 result = run_iqe_measurement(cfg, simulate=True, log=lines.append)
 ```
 
-Drive the phases yourself when you want just one of them — this is what
-`benchmark_sweep.py` does:
+Drive the phases yourself when you want just one of them:
 
 ```python
 import measure_iqe as m
@@ -329,7 +327,7 @@ runs that pinned each value.
 | `perpoint_range` | `bool` | `False` | False = fixed NVLED_RANGE_I (10 mA): consistent (offsets and all) so the curve SHAPE comes through — what the old clean runs used. True = per-point software ranging (accurate value, but range offsets/settling corrupted the rising side; see 260630). Picking the range from the COARSE pre-sweep map failed both directions (260630): the coarse map (10 mA range, pre-conditioning) mis-predicts the fine-sweep current, so the range was too low at high bias (→ overflow, 104 pts) and too coarse on the rise (→ stuck 0.8 µA offset). Fix: PROBE the actual current on a safe wide range first, then narrow. |
 | `probe_range_i` | `float` | `0.001` | wide probe range: covers the device max (~175 µA), never overflows, gives the magnitude to pick the real range from |
 | `probe_n_smu` | `int` | `4` | quick samples for the magnitude probe |
-| `range_settle_ms` | `float` | `50.0` | settle after a measure-range change before reading 2602B High-C mode on ch B. The driver guards High-C on B (raises), so we enable it via TSP. High-C adds settling delays (slower) but damps a capacitive load that can make the low current ranges ring/never settle — the reason 10 mA was the safe range. Off by default; sweep_variants.py toggles it to test whether it makes low ranges usable. |
+| `range_settle_ms` | `float` | `50.0` | settle after a measure-range change before reading 2602B High-C mode on ch B. The driver guards High-C on B (raises), so we enable it via TSP. High-C adds settling delays (slower) but damps a capacitive load that can make the low current ranges ring/never settle — the reason 10 mA was the safe range. **Now mandatory** (`highc_b: true`): without it every reading below ~10 µA is a range artifact. See §1 of the investigation report. |
 | `highc_b` | `bool` | `True` | MANDATORY, measured 261013. Without High-C every reading below ~10 uA is a range artifact: it lands at 42-58% of whatever range is selected, independent of bias, wrong by up to 517x. With it, three different start voltages agree to 0.6%. |
 | `sweep_autozero` | `str` | `'AUTO'` | AUTO \| ONCE \| OFF |
 | `save_raw_samples` | `bool` | `True` |  |

@@ -59,8 +59,8 @@ pixels per 2 s capture at Δt = 200 µs.
 **Status: never fully worked — PM400 limited.** The on-board array buffer is
 10 000 samples, which bounds chunk size, and the slicing alignment depends on the
 ACK timestamps staying coherent with the PM400's sample clock across a chunk.
-`ULTRA_FAST_HW_TEST_PLAN.md` is the test plan that was being worked through when
-this was set aside.
+The test plan that was being worked through when this was set aside was removed in
+the 16 October 2026 cleanup; see `ATTIC.md` for how to read it back.
 
 Worth keeping as an idea: it is the only technique here that addresses
 full-array throughput directly, and 512×512 = 262 144 pixels is the standing
