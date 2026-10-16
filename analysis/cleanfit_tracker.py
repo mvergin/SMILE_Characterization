@@ -22,7 +22,10 @@ R2MIN, BETA_MAX, BETA_MIN = 0.70, 20.0, 0.05
 PEAK_J_REF = 12.0             # this device's population peak location (A/cm²)
 PEAK_J_WARN = 2.5             # warn if median J_peak > PEAK_J_WARN×PEAK_J_REF (=30) → runaway fit
 RESULTS = Path("results_georg/results")
-OUT = Path("investigation_report")
+# Beside the script, never beside the CWD: ROADMAP item 2 put these under
+# analysis/, and the measurement root has an investigation_report/ of its own, so
+# a CWD-relative OUT writes figures into the wrong one from the wrong directory.
+OUT = Path(__file__).resolve().parent / "investigation_report"
 
 
 def clean_stats(pf):

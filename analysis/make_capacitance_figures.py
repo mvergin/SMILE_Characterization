@@ -1,6 +1,6 @@
 """Generate the figures for INVESTIGATION_REPORT.md from the real run data.
 
-    python make_capacitance_figures.py [path-to-SMILE_Characterization]
+    python analysis/make_capacitance_figures.py [path-to-a-run-tree]
 
 Each function builds one figure from one run and RETURNS the numbers that drove a
 decision, so the report text and the plots cannot drift apart: the script prints the
@@ -24,10 +24,16 @@ import matplotlib.pyplot as plt
 OVERFLOW = 1e36                      # the 2600's over-range sentinel
 AREA_CM2 = 100.0 * 1e-8              # 10x10 um pixel
 EPH_EV = 1240.0 / 440.0              # 440 nm photon, in volts
-OUT = Path("investigation_report")
+# Beside the script, never beside the CWD: ROADMAP item 2 put these under
+# analysis/, and the measurement root has an investigation_report/ of its own, so
+# a CWD-relative OUT writes figures into the wrong one from the wrong directory.
+OUT = Path(__file__).resolve().parent / "investigation_report"
 DPI = 300
 
-ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else "../SMILE_Characterization")
+# Defaults to the parent directory, which IS the measurement repo since ROADMAP
+# item 2. Still takes an explicit path, for reading a run tree from elsewhere.
+ROOT = (Path(sys.argv[1]) if len(sys.argv) > 1
+        else Path(__file__).resolve().parent.parent)
 
 
 def run(name: str) -> Path:

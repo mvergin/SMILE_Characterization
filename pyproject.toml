@@ -37,3 +37,7 @@ dependencies = [
 [project.optional-dependencies]
 # HDF5 output in data/writer.py and the GUI — both fall back to CSV without it.
 hdf5 = ["h5py>=3.11"]
+# analysis/ needs one thing the measurement side does not. Every use is a LOCAL import
+# inside the function that needs it (curve_fit, ndimage, cKDTree), so a measurement-only
+# install still runs the sweep and only the four scripts that fit things break.
+analysis = ["scipy>=1.14"]

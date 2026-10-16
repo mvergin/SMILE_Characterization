@@ -17,7 +17,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 RESULTS = Path("results_georg/results")
-OUT = Path("investigation_report")
+# Beside the script, never beside the CWD: ROADMAP item 2 put these under
+# analysis/, and the measurement root has an investigation_report/ of its own, so
+# a CWD-relative OUT writes figures into the wrong one from the wrong directory.
+OUT = Path(__file__).resolve().parent / "investigation_report"
 OUT.mkdir(exist_ok=True)
 
 Q = 1.602176634e-19

@@ -20,7 +20,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-MEAS = Path(r"C:\_D\programs\SMILE_Characterization")
+# The measurement repo is this file's grandparent since ROADMAP item 2 merged the
+# two. It was an absolute path for as long as they were separate repos.
+MEAS = Path(__file__).resolve().parent.parent
 OVF = 1e30          # the SMU writes 9.91e37 for an over-range reading
 LEAK_GATE = 0.25    # P_REF/P above this is "did not go dark"
 
@@ -292,7 +294,9 @@ def demo() -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", type=Path, default=Path("investigation_report"))
+    ap.add_argument("--out", type=Path,
+                    default=Path(__file__).resolve().parent / "investigation_report",
+                    help="where the figures go (default: beside this script)")
     ap.add_argument("--demo", action="store_true")
     args = ap.parse_args()
     if args.demo:

@@ -7,9 +7,10 @@ Items 0 and 1 are done; the rest are proposals, not decisions.
 |---|---|---|---|---|
 | 0 | run provenance: commit SHA, calibration copy, names in filenames | do first | ~2 h | **done** |
 | 1 | repo cleanup | yes, but not via an untracked `_obsolete/` | ~1 h | **done** |
-| 2 | merge the analysis repo in; `characterize_capacitance` into `measure_iqe` | yes | ~3 h | open |
-| 3 | config: a local override for `base_dir` | yes — but **not** by auto-loading `standard.yaml` | ~1 h | open |
-| 4 | README | yes, after 1–3 | ~2 h | open |
+| 2 | merge the analysis repo in | yes | ~3 h | **done** |
+| 2b | `characterize_capacitance` into `measure_iqe` | **deferred, deliberately** | ~1 h | see below |
+| 3 | config: a local override for `base_dir` | yes — but **not** by auto-loading `standard.yaml` | ~1 h | **done** |
+| 4 | README | yes, after 1–3 | ~2 h | next |
 | 5 | cluster / strided scan | pursue — but not for the reason it was proposed | spike first | open |
 | 6 | GUI | last | 1–2 days | open |
 
@@ -62,6 +63,43 @@ python -m measure_iqe.analysis <run_dir>
 `IQEConfig`, and `--calibrate` is already in there. Its being outside is an accident of
 when it was written.
 
+### Done, 16 October 2026 — and the shape changed
+
+`git subtree add --prefix=analysis` rather than a file copy, so all **47** analysis
+commits are in the history and `3f4e3e2` is an ancestor of HEAD. The analysis repo was
+read-only throughout: it holds the only copy of §18–§23 and nothing was going to touch it.
+
+`analysis/`, **not** `measure_iqe/analysis/`. The scripts are scripts — they are run, not
+imported — so a subpackage would mean an `__init__.py`, a `__main__`, and rewriting every
+data path for the privilege of typing `python -m measure_iqe.analysis`. Top level solves
+both things the merge was for and nothing else needs to move.
+
+What the merge fixed, beyond one remote and one history:
+
+* `RUN_FORMAT.md` was byte-identical in two repos **by hand**, and the report audit
+  md5'd it every time. One copy now. The writer-side and reader-side contract tests both
+  survive, renamed apart (`test_run_format.py`, `analysis/test_reads_run_format.py`) —
+  they were never duplicates, they test opposite directions.
+* six scripts hardcoded `MEAS = Path(r"C:\_D\programs\SMILE_Characterization")`. It is
+  now `Path(__file__).resolve().parent.parent`, which the merge makes correct.
+* **a bug the merge created and the merge had to fix**: nine scripts wrote figures to a
+  CWD-relative `investigation_report/`, and the measurement root already had one of its
+  own. Run from the root, `plot_followup.py` put figure 35 in the wrong directory. All
+  nine now write beside the script.
+* duplicated infrastructure removed: `analysis/`'s own `LICENSE`, `pyproject.toml`,
+  `requirements.txt`, `uv.lock` and `.python-version`. The dependency delta was exactly
+  one package, so `scipy` became an `analysis` extra. `analysis/.gitignore` **stays** —
+  git honours nested ignores and it is what keeps 11 MB of figures out.
+
+### 2b. Moving `characterize_capacitance.py` — deferred, and this is the reason
+
+It is pure tidiness, and the bill is not. Every command in §20, §21, §22 and §23 reads
+`python characterize_capacitance.py --what switch ...`, the bench campaign is live, and
+the operator has those in shell history. Renaming the entry point invalidates all of it
+to move a file that already imports `measure_iqe` and already works.
+
+Revisit when the campaign stops, not during it.
+
 **Measurement data must not live under the repo root.** Gitignore is not a guard
 against `git add -A` — on 15 October that command swept in a 5.8 MB PDF from another
 agent's working directory without anyone noticing. Not being under the repo root is the
@@ -76,6 +114,22 @@ That is the same class of problem as item 0.
 Proposed instead: load `configs/local.yaml` if it exists — gitignored, and **logged
 loudly** at run start (`applied configs/local.yaml: base_dir, sample_name`).
 `standard.yaml` stays the documented reference.
+
+### Done, 16 October 2026
+
+Built as proposed, plus one decision the proposal did not make: `local.yaml` sits
+**above** `--config` and **below** `--set` and `--out`. It describes this machine, so a
+config file shared between machines must not put this one's runs on a disk that does not
+exist here — but anything typed per invocation still wins.
+
+Both stated defects are fixed, and the key check found more than the two it was written
+for. Adding the key-set assertion immediately failed on **five** absent fields:
+`sweep_rotate`, `bias_major_precondition`, `leak_ref_tries`, `leak_ref_max_frac` and
+`calibration_source`. All five are in the file now, with comments.
+
+The refuted switch comments are gone, replaced by what §20–§22 measured — including the
+part that inverts the sign: the fast component of a frame change is non-radiative, so
+EQE at the 2 s wait reads **+0.50 % HIGH**, not 0.5 % low.
 
 Two real defects in that file, independent of the above:
 
@@ -149,3 +203,7 @@ prints.
 The calibration check — *"warn them that no calibration is available"* — is the best
 part of that idea and needs no GUI. It belongs in the CLI now: `--array Array43_IQE`
 with no `calibrations/Array43_IQE.yaml` should say so loudly before spending 7 hours.
+
+> **Already shipped** (`cli.py`, the `--array` branch). A missing calibration prints
+> `NO CALIBRATION found. Looked in: ...` and names the `--calibrate` command that fixes
+> it, before any instrument is touched. The rest of item 6 is untouched.

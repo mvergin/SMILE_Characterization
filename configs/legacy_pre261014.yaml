@@ -7,7 +7,7 @@
 #
 # Same pixels, same ROI, same array: the only difference is the measurement method.
 # Expect the old run to be FASTER and WRONG on the rising side. See
-# SMILE_IQE_Analysis/INVESTIGATION_REPORT.md for what each line costs.
+# analysis/INVESTIGATION_REPORT.md for what each line costs.
 
 highc_b: false            # the SMU then reads a fixed fraction of its range (report 1)
 nvled_compliance: 0.5     # the old compliance: no range control at all

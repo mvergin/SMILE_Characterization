@@ -30,11 +30,10 @@ except Exception:
 
 # The one definition of "settled". Importing it, rather than copying it, is the whole
 # point: a third implementation would drift from the other two the way the second did.
-for cand in (Path(__file__).resolve().parent.parent / "SMILE_Characterization",
-             Path(r"C:\_D\programs\SMILE_Characterization")):
-    if (cand / "measure_iqe" / "calibrate.py").is_file():
-        sys.path.insert(0, str(cand))
-        break
+# One repo since ROADMAP item 2, so measure_iqe is simply the parent directory --
+# but this file is still run as a script, not as a package module, so the parent
+# has to go on sys.path explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from measure_iqe.calibrate import settle_time      # noqa: E402
 
 

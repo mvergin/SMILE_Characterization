@@ -17,8 +17,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-MEAS = Path(r"C:\_D\programs\SMILE_Characterization")
-OUT = Path("investigation_report")
+# The measurement repo is this file's grandparent since ROADMAP item 2 merged the
+# two. It was an absolute path for as long as they were separate repos.
+MEAS = Path(__file__).resolve().parent.parent
+# Beside the script, never beside the CWD: ROADMAP item 2 put these under
+# analysis/, and the measurement root has an investigation_report/ of its own, so
+# a CWD-relative OUT writes figures into the wrong one from the wrong directory.
+OUT = Path(__file__).resolve().parent / "investigation_report"
 OVF = 1e30
 EDGES = [0, 0.5, 1, 2, 5, 10, 20, 40, 60, 90, 122]
 PROD_SWITCH_S = 2.0      # config.pixel_switch_settle_s

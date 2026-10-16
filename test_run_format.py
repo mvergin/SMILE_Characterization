@@ -1,15 +1,17 @@
-"""Contract test: a run directory still has the shape SMILE_IQE_Analysis expects.
+"""Contract test: a run directory still has the shape ``analysis/`` expects.
 
-    python test_run_format.py        (no pytest needed; also collects under pytest)
+    python test_run_format.py                 (writer side -- this file)
+    python analysis/test_reads_run_format.py  (reader side)
 
 `tests/fixture/` is a real simulated run, committed as the executable form of
-RUN_FORMAT.md. SMILE_IQE_Analysis holds a byte-identical copy and asserts it can
-still *read* this shape; this file asserts a fresh run still *writes* it, and
-that the committed fixture has not drifted from what the code produces.
+RUN_FORMAT.md. This file asserts a fresh run still *writes* that shape, and that the
+committed fixture has not drifted from what the code produces.
+`analysis/test_reads_run_format.py` asserts the analysis side can still *read* it.
 
-If a format change is intentional: change RUN_FORMAT.md, copy it to the analysis
-repo, regenerate the fixture with the command at the bottom of that file, copy
-the fixture over too, and update both tests.
+Changing the format intentionally used to mean copying RUN_FORMAT.md and the fixture
+into a second repo by hand, and the report audit checked their md5 every time. ROADMAP
+item 2 merged the repos, so now: change RUN_FORMAT.md, regenerate the fixture with the
+command at the bottom of it, and update both tests. One copy of each, no sync step.
 """
 
 from __future__ import annotations

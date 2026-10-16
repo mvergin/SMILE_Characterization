@@ -61,7 +61,7 @@ Usage:
     python characterize_capacitance.py --what optfloor          # 2 minutes, no pixels needed
 
 Writes one CSV per experiment, every row tagged with its pixel. It fits and plots
-nothing; point SMILE_IQE_Analysis at the CSVs for that.
+nothing; point ``analysis/`` at the CSVs for that.
 
 NOTE: ``--simulate`` exercises the plumbing only. The built-in rig has no
 capacitance model, so it reports instant settling. The physics needs the bench.
