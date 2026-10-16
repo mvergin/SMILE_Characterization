@@ -429,7 +429,11 @@ _AGG_COLS_REF = ["NVLED_CURR_REF", "NVLED_CURR_REF_STD", "VLED_CURR_REF",
                  # how many frame writes it took, and the optical ratio that was
                  # accepted. TRIES > 1 means a write failed and was re-sent; FRAC
                  # above leak_ref_max_frac means it never landed.
-                 "LEAK_REF_TRIES", "LEAK_REF_FRAC"]
+                 "LEAK_REF_TRIES", "LEAK_REF_FRAC",
+                 # 1 = this point reused the per-pixel reference from the pre-pass
+                 # instead of measuring its own. TRIES is 0 on those points, because
+                 # no frame write happened. See config.leak_ref_per_point_above_v.
+                 "LEAK_REF_CACHED"]
 # The compliance actually in force at each point, and whether the point hit it. Written
 # for the voltage ramp, where the limit tracks the measured current (see pick_limit).
 _AGG_COLS_LIMIT = ["NVLED_LIMIT_A", "NVLED_AT_COMPLIANCE"]
@@ -919,32 +923,49 @@ def connect_sim(cfg: IQEConfig, log: Logger):
 
 def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
                   run_dir: Path, cfg: IQEConfig, log: Logger) -> list[Row]:
+    volts = cfg.fastscan_v_list()
+    npx = (x2 - x1 + 1) * (y2 - y1 + 1)
     log("=" * 56)
-    log(f"FAST SCAN @ NVLED={cfg.nvled_v_fastscan} V over {(x2-x1+1)*(y2-y1+1)} pixels")
+    log(f"FAST SCAN @ NVLED={', '.join(f'{v:g}' for v in volts)} V over {npx} pixels"
+        + (f" ({len(volts)} biases x {npx} = {len(volts) * npx} points)"
+           if len(volts) > 1 else ""))
     # The fast scan is a DIFFERENT operating point from the sweep and needs its own
     # compliance. The sweep's rising-side limit clamped every pixel in run 261014-0048.
+    # One limit for the whole list: 1e-3 A spans -0.8 to -2.6 V, so the biases share a
+    # range and nothing is reconfigured between them.
     configure_voltage_source_b(
         smu, dataclasses.replace(cfg, nvled_compliance=cfg.fastscan_limit_a), log)
     set_nplc(smu, cfg.fastscan_nplc)
-    smu.set_voltage("b", cfg.nvled_v_fastscan)     # fast scan always voltage-drives ch B
     fs_rows = []
     order = list(roi_pixels(x1, y1, x2, y2))
     if cfg.fastscan_random_order:
         np.random.default_rng(cfg.fastscan_order_seed).shuffle(order)
         log(f"  visiting {len(order)} pixels in randomized order (seed {cfg.fastscan_order_seed})")
     t0 = time.perf_counter()
-    for (x, y) in order:
-        if cfg.fastscan_blank_between:
-            smile.blank_frame()             # black frame → guarantee only this pixel emits
-        smile.set_pixel(x, y, cfg.fastscan_bitval)
-        if cfg.fastscan_settle_ms:
-            time.sleep(cfg.fastscan_settle_ms / 1000.0)
-        p, ps, iv, ivs, inv, invs, _, _ = acquire_point(pm, smu, cfg.fastscan_n_smu, 3)
-        fs_rows.append(dict(X=x, Y=y, BITVAL=cfg.fastscan_bitval, NVLED_V=cfg.nvled_v_fastscan,
-                            TIME_START=time.perf_counter() - t0, TIME_END=time.perf_counter() - t0,
-                            NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
-                            VLED_CURR_MEAN=iv, VLED_CURR_STD=ivs,
-                            PM400_POWER_MEAN=p, PM400_POWER_STD=ps))
+    # Bias on the outside, pixels on the inside: the bias is set once per pass instead
+    # of once per pixel, and each pass keeps the single-bias scan's exact sequence --
+    # same randomized order, same blank-then-light, same settle. volts[0] runs first,
+    # so a one-bias run is byte-for-byte what it was before this loop existed.
+    for v_fs in volts:
+        smu.set_voltage("b", float(v_fs))   # fast scan always voltage-drives ch B
+        if len(volts) > 1:
+            # The pass change moves the bias on a blanked array; give it the same
+            # settle a pixel switch gets before the first pixel is judged.
+            time.sleep(max(cfg.fastscan_settle_ms, cfg.thermal_settle_ms) / 1000.0)
+            log(f"  pass {volts.index(v_fs) + 1}/{len(volts)} @ {v_fs:g} V")
+        for (x, y) in order:
+            if cfg.fastscan_blank_between:
+                smile.blank_frame()         # black frame → guarantee only this pixel emits
+            smile.set_pixel(x, y, cfg.fastscan_bitval)
+            if cfg.fastscan_settle_ms:
+                time.sleep(cfg.fastscan_settle_ms / 1000.0)
+            p, ps, iv, ivs, inv, invs, _, _ = acquire_point(pm, smu, cfg.fastscan_n_smu, 3)
+            fs_rows.append(dict(X=x, Y=y, BITVAL=cfg.fastscan_bitval, NVLED_V=v_fs,
+                                TIME_START=time.perf_counter() - t0,
+                                TIME_END=time.perf_counter() - t0,
+                                NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
+                                VLED_CURR_MEAN=iv, VLED_CURR_STD=ivs,
+                                PM400_POWER_MEAN=p, PM400_POWER_STD=ps))
     # Every file a run writes carries <sample>_<stamp>_, so a CSV that is copied out of
     # its directory can still be traced back to the run that made it.
     pfx = run_slug(cfg.sample_name, run_dir) + "_"
@@ -957,14 +978,19 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
         json.dumps({"settings": cfg.to_dict(), "provenance": provenance()}, indent=2),
         encoding="utf-8")
 
-    P = np.array([abs(r["PM400_POWER_MEAN"]) for r in fs_rows])
+    # Classification and selection read volts[0] ONLY. Mixing passes would compare a
+    # pixel at -1.05 V against the -1.35 V population and call half the array dead, and
+    # it would make the swept pixel set depend on which extra biases were requested.
+    sel_rows = [r for r in fs_rows if r["NVLED_V"] == volts[0]]
+    P = np.array([abs(r["PM400_POWER_MEAN"]) for r in sel_rows])
     med = np.nanmedian(P)
     # "Typical lit" reference = a HIGH percentile, so the threshold survives a majority-dead ROI
     # (the median falls to the noise floor there → 20%×median ≈ noise → nearly everything passes).
     bright = float(np.nanpercentile(P, cfg.fastscan_alive_pctl))
     thr = cfg.dead_threshold_frac * bright
-    alive = [r for r, p in zip(fs_rows, P) if p >= thr]
-    log(f"  alive {len(alive)}/{len(fs_rows)} (lit~{bright*1e9:.1f} nW @ p{cfg.fastscan_alive_pctl}, "
+    alive = [r for r, p in zip(sel_rows, P) if p >= thr]
+    log(f"  alive {len(alive)}/{len(sel_rows)} @ {volts[0]:g} V "
+        f"(lit~{bright*1e9:.1f} nW @ p{cfg.fastscan_alive_pctl}, "
         f"thr {thr*1e9:.1f} nW, median {med*1e9:.2f} nW)")
     if med < thr:
         log(f"  NOTE: ROI is majority-dark (median {med*1e9:.2f} nW < threshold {thr*1e9:.1f} nW) — "
@@ -983,6 +1009,7 @@ def run_sweep_current(pm, smu, smile, selected: list[Row], run_dir: Path,
                       cfg: IQEConfig, log: Logger) -> int:
     """Current-source sweep: set log-spaced currents at bitval 15, measure V + P."""
     _ref_warned.clear()
+    _ref_cache.clear()
     setpoints = build_current_setpoints(cfg)
     log("=" * 56)
     log(f"CURRENT-SOURCE SWEEP — {len(selected)} pixels, bitval {cfg.current_sweep_bitval}, "
@@ -1036,6 +1063,122 @@ _ref_warned: set[tuple[int, int]] = set()
 # ponytail: one set per process, cleared by the sweep entry points. A process runs one
 # sweep, so this only matters to the tests, which is why they clear it.
 
+_ref_cache: dict[tuple[int, int], tuple] = {}
+# Per-pixel leakage reference, filled by prefill_reference_cache() and read by
+# measure_point() at every bias at or below cfg.leak_ref_per_point_above_v. Same
+# lifetime and the same reason as _ref_warned: one sweep per process.
+#
+# It is keyed on the PIXEL only. The reference is taken at leak_ref_bitval whatever the
+# lit bitval is, and the whole point of the cache is that it does not depend on the
+# bias, so (x, y) is the entire key.
+#
+# It must never outlive the run. The same 16 pixels at -0.80 V read 258.20, 267.20,
+# 277.67 and 280.32 nA across the four direction runs of 261016 -- 9.0 nA between two
+# runs in the same thermal position, which is 4.7% of I_LED at that bias. A reference
+# inherited from an earlier run is worse than no reference at all.
+
+
+def read_reference(pm, smu, smile, x, y, n_pm, n_smu, cfg: IQEConfig,
+                   p_lit: float | None, log: Logger, v: float | None = None):
+    """One leakage reference for ``(x, y)``: the same pixel at ``leak_ref_bitval``.
+
+    Returns ``(acquire_point tuple, tries, frac)``. ``frac`` is the optical gate's
+    ratio against ``p_lit`` and is NaN when the caller has no lit reading to gate on.
+
+    The caller owns the frame: this leaves the pixel at ``leak_ref_bitval`` and does
+    not restore it.
+    """
+    ref = None
+    tries = 0
+    frac = float("nan")
+    # The frame write sometimes does not land, so the reference is VERIFIED rather
+    # than assumed, and re-written when it fails. Section 19.
+    #
+    # The gate is the OPTICAL ratio, and it has to be: a healthy backplane
+    # legitimately conducts 58% of the reading at -0.80 V (section 6), so the
+    # current cannot discriminate -- but it does not EMIT. Across the 100 pixels of
+    # run 261015-0015 a healthy pixel references at 2e-4 of its own light and the
+    # failures sit at 0.38-1.03, with no clean point above the gate at ANY bias.
+    for tries in range(1, max(1, cfg.leak_ref_tries) + 1):
+        smile.set_pixel(x, y, cfg.leak_ref_bitval)
+        time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
+        # FULL n_pm, not a quarter of it. The reference current is stable to ~0.2 nA
+        # and needs almost no averaging, but the reference POWER is the dark level
+        # being subtracted from a ~250 pW signal, so at the dim end it is the
+        # dominant error. Run 261014-0035 with n_pm//4: the reference SEM was 30 pW
+        # against the lit reading's 14 pW -- the term that mattered most was
+        # averaged the least.
+        ref = acquire_point(pm, smu, n_smu, n_pm)
+        frac = abs(ref[0] / p_lit) if p_lit else float("nan")
+        if not (frac > cfg.leak_ref_max_frac):   # NaN must not trigger a retry
+            break
+        if tries < max(1, cfg.leak_ref_tries):
+            log(f"      ({x},{y})" + (f" at {v:+.2f} V" if v is not None else "")
+                + f": bitval {cfg.leak_ref_bitval} reference carries "
+                f"{100 * frac:.0f}% of the lit light -- the frame write did not land. "
+                f"Re-writing it (try {tries + 1} of {cfg.leak_ref_tries}).")
+    return ref, tries, frac
+
+
+def prefill_reference_cache(pm, smu, smile, pixels, cfg: IQEConfig, log: Logger) -> int:
+    """Measure one leakage reference per pixel, for every bias that reuses it.
+
+    Runs once, before the bias walk, at ``leak_ref_prepass_v``. Costs one pass over the
+    pixels (~3 s each) and removes the reference from every point at or below
+    ``leak_ref_per_point_above_v`` -- 2200 of 3000 points at the default grid, which is
+    1.69 h of a 4.82 h sweep. See ``config.leak_ref_per_point_above_v`` for the measured
+    cost, which is under 0.14% everywhere except -2.60 V.
+
+    There is no lit reading here, so the optical gate cannot run. The estimator is the
+    MINIMUM of ``leak_ref_tries`` reads instead, which is the right one on this failure
+    mode: a dropped frame write leaves the pixel emitting, and that only ever ADDS
+    current. Measured contamination runs 10 700-28 200 nA against a clean 256-280 nA, a
+    factor 40-110, so the minimum is clean unless every read failed.
+    """
+    if not cfg.leak_reference or cfg.leak_ref_per_point_above_v is None:
+        return 0
+    v = float(cfg.leak_ref_prepass_v)
+    log(f"  leakage reference pre-pass: {len(pixels)} pixel(s) at {v:+.2f} V, "
+        f"min of {max(1, cfg.leak_ref_tries)} read(s) each. Reused at every bias "
+        f"<= {cfg.leak_ref_per_point_above_v:+.2f} V, re-measured above it.")
+    # The pre-pass bias is on the faint side, so it takes the faint side's limit and
+    # NPLC. That is also where the reference is most precise -- burst sem 0.13 nA on
+    # the 1e-5 range against 9.06 nA on 1e-3 -- and that precision carries to every
+    # bias that reuses the value.
+    configure_voltage_source_b(
+        smu, dataclasses.replace(cfg, nvled_compliance=cfg.vramp_lowv_limit_a), log)
+    set_nplc(smu, cfg.vramp_lowv_nplc)
+    smu.set_voltage("b", v)
+    t_pre = time.perf_counter()
+    suspect = []
+    for (x, y) in pixels:
+        smile.blank_frame()
+        reads = []
+        for _ in range(max(1, cfg.leak_ref_tries)):
+            r, _t, _f = read_reference(pm, smu, smile, x, y, cfg.vramp_lowv_n_pm,
+                                       cfg.vramp_lowv_n_smu, cfg, None, log, v)
+            if r is not None:
+                reads.append(r)
+        if not reads:
+            continue
+        best = min(reads, key=lambda r: abs(r[4]))    # r[4] = NVLED current mean
+        _ref_cache[(int(x), int(y))] = best
+        hi = max(abs(r[4]) for r in reads)
+        if hi > 2.0 * abs(best[4]):
+            # Not a rejection -- the minimum already rejected it. This says the pixel
+            # drops frame writes, which is what section 19 is about and what makes a
+            # pixel worth watching in the analysis.
+            suspect.append((int(x), int(y), abs(best[4]) * 1e9, hi * 1e9))
+    smile.blank_frame()
+    for (x, y, lo, hi) in suspect:
+        log(f"    !! ({x},{y}): reference reads spanned {lo:.1f}-{hi:.0f} nA over "
+            f"{max(1, cfg.leak_ref_tries)} writes. The minimum is used and is clean, "
+            f"but this pixel drops frame writes -- section 19.")
+    log(f"  pre-pass done: {len(_ref_cache)} reference(s) cached in "
+        f"{time.perf_counter() - t_pre:.0f}s"
+        + (f", {len(suspect)} pixel(s) dropped a write" if suspect else ""))
+    return len(_ref_cache)
+
 
 def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
                   cfg: IQEConfig, t0: float, log: Logger,
@@ -1067,46 +1210,47 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
     # point so both carry the same relaxation history and the subtraction cancels most of
     # it. At -0.80 V this is 58% of the reading.
     #
-    # It stays per point even in bias_major, where one reference per bias looks tempting.
-    # The backplane leak varies ~10% between pixels (run 261014-1616 at -1.30 V: 159-192
-    # nA across four), and at -0.80 V the reference IS 58% of the reading, so 10% of it
-    # is a 6% error on I_LED. bias_major amortises the DWELL; the reference is not a dwell.
+    # One reference per BIAS, shared across pixels, is wrong and stays wrong: the
+    # backplane leak varies ~10% between pixels (run 261014-1616 at -1.30 V: 159-192 nA
+    # across four), and at -0.80 V the reference IS 58% of the reading, so 10% of it is
+    # a 6% error on I_LED. bias_major amortises the DWELL; the reference is not a dwell.
+    #
+    # One reference per PIXEL, shared across biases, is the other slice and it holds --
+    # below the faint end. Over all 3000 points of run 261015-0015 one fixed per-pixel
+    # value costs 0.03-0.13% from -0.83 V down and 0.20% at -2.60 V. So the reference is
+    # cached by pixel below leak_ref_per_point_above_v and measured per point above it.
     ref = None
     tries = 0
     frac = float("nan")
+    cached = False
     if cfg.leak_reference:
-        # The frame write sometimes does not land, so the reference is VERIFIED rather
-        # than assumed, and re-written when it fails. Section 19.
-        #
-        # The gate is the OPTICAL ratio, and it has to be: a healthy backplane
-        # legitimately conducts 58% of the reading at -0.80 V (section 6), so the
-        # current cannot discriminate -- but it does not EMIT. Across the 100 pixels of
-        # run 261015-0015 a healthy pixel references at 2e-4 of its own light and the
-        # failures sit at 0.38-1.03, with no clean point above the gate at ANY bias.
-        for tries in range(1, max(1, cfg.leak_ref_tries) + 1):
-            smile.set_pixel(x, y, cfg.leak_ref_bitval)
-            time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
-            # FULL n_pm, not a quarter of it. The reference current is stable to ~0.2 nA
-            # and needs almost no averaging, but the reference POWER is the dark level
-            # being subtracted from a ~250 pW signal, so at the dim end it is the
-            # dominant error. Run 261014-0035 with n_pm//4: the reference SEM was 30 pW
-            # against the lit reading's 14 pW -- the term that mattered most was
-            # averaged the least.
-            ref = acquire_point(pm, smu, n_smu, n_pm)
+        # Cached or measured? Cached at or below leak_ref_per_point_above_v, where the
+        # reference is a few percent of the reading and a fixed per-pixel value costs
+        # under 0.14%; measured per point above it, where it is 5-62% of the reading
+        # and the subtraction decides the answer. See config.leak_ref_per_point_above_v.
+        use_cache = (cfg.leak_ref_per_point_above_v is not None
+                     and v <= cfg.leak_ref_per_point_above_v
+                     and (int(x), int(y)) in _ref_cache)
+        if use_cache:
+            ref = _ref_cache[(int(x), int(y))]
+            cached = True
+            # The frame was never touched, so there is nothing to restore and no
+            # settle to pay -- the saving is the 2 s reference settle, its burst, and
+            # in pixel_major the 2 s restore settle on top.
+            #
+            # The gate still runs, against the CACHED dark power and THIS point's lit
+            # power. That is a real test: the cache holds a clean minimum, so a large
+            # frac here means the LIT reading collapsed, not that the reference failed.
             frac = abs(ref[0] / p) if p else float("nan")
-            if not (frac > cfg.leak_ref_max_frac):   # NaN must not trigger a retry
-                break
-            if tries < max(1, cfg.leak_ref_tries):
-                log(f"      ({x},{y}) at {v:+.2f} V: bitval {cfg.leak_ref_bitval} "
-                    f"reference carries {100 * frac:.0f}% of the lit light -- the frame "
-                    f"write did not land. Re-writing it (try {tries + 1} of "
-                    f"{cfg.leak_ref_tries}).")
-        if restore:
-            smile.set_pixel(x, y, bitval)
-            time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
-        # else: the caller blanks the frame next, so lighting this pixel again and
-        # waiting for it to settle would be two seconds spent on a state nothing reads.
-        # In bias_major that is half the per-point cost, on every point.
+        else:
+            ref, tries, frac = read_reference(pm, smu, smile, x, y, n_pm, n_smu,
+                                              cfg, p, log, v)
+            if restore:
+                smile.set_pixel(x, y, bitval)
+                time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
+            # else: the caller blanks the frame next, so lighting this pixel again and
+            # waiting for it to settle would be two seconds spent on a state nothing
+            # reads. In bias_major that is half the per-point cost, on every point.
 
     vr = round(float(v), 4)
     row = dict(X=x, Y=y, BITVAL=bitval, NVLED_V=vr,
@@ -1119,18 +1263,23 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
         row.update(NVLED_CURR_REF=rinv, NVLED_CURR_REF_STD=rinvs,
                    VLED_CURR_REF=riv, PM400_POWER_REF=rp,
                    PM400_POWER_REF_STD=rps, LEAK_REF_BITVAL=cfg.leak_ref_bitval)
-        row.update(LEAK_REF_TRIES=tries, LEAK_REF_FRAC=frac)
+        row.update(LEAK_REF_TRIES=tries, LEAK_REF_FRAC=frac,
+                   LEAK_REF_CACHED=int(cached))
         # Say it at the bench, not three days later in the analysis. Only once per
         # pixel, because a pixel whose writes keep failing would otherwise print on
         # every one of its 30 biases.
         if frac > cfg.leak_ref_max_frac and (x, y) not in _ref_warned:
             _ref_warned.add((x, y))
-            log(f"  !! ({x},{y}): the bitval {cfg.leak_ref_bitval} reference still "
-                f"carries {100 * frac:.0f}% of the lit light after "
-                f"{cfg.leak_ref_tries} write(s), at {v:+.2f} V. The subtraction removes "
-                f"most of the signal, so these points are not usable. Intermittent in "
-                f"both directions -- see section 19. The analysis flags it "
-                f"REF_CONTAMINATED.")
+            how = ("the CACHED reference carries" if cached else
+                   f"the bitval {cfg.leak_ref_bitval} reference still carries")
+            why = ("The cache holds a clean minimum from the pre-pass, so this is the "
+                   "LIT reading collapsing, not a failed write."
+                   if cached else
+                   f"The write did not land in {cfg.leak_ref_tries} tries, so the "
+                   f"subtraction removes most of the signal.")
+            log(f"  !! ({x},{y}): {how} {100 * frac:.0f}% of the lit light at "
+                f"{v:+.2f} V. {why} These points are not usable. Intermittent in both "
+                f"directions -- see section 19. The analysis flags it REF_CONTAMINATED.")
     if raw_s is not None:
         # honest per-burst stats. _MEAN = true mean, _MEDIAN = median, _SAMPSTD =
         # population std, _STD = SEM (sigma/sqrt(N)) -- kept as _STD because that is the
@@ -1444,6 +1593,7 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
     """Voltage-source adaptive sweep. Single bitval, low-J-weighted spacing, and
     longer integration on the low-current rising side (per-point NPLC)."""
     _ref_warned.clear()
+    _ref_cache.clear()
     log("=" * 56)
     if cfg.fine_sweep_mode == "voltage":
         eff = (f"low-V NPLC {cfg.vramp_lowv_nplc}/{cfg.vramp_lowv_n_pm} PM/"
@@ -1459,9 +1609,17 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
         log(f"VOLTAGE SWEEP — {len(selected)} pixels, {cfg.sweep_direction}, V ramp "
             f"{cfg.nvled_v_coarse_start}→{cfg.nvled_v_coarse_stop} V ({cfg.n_fine} pts, low-J-dense @ knee "
             f"{cfg.vramp_knee_v} V), {rng}, {eff}")
-        if cfg.leak_reference:
+        if cfg.leak_reference and cfg.leak_ref_per_point_above_v is None:
             log(f"  leakage reference: every point re-measured at bitval {cfg.leak_ref_bitval} "
                 f"(+{cfg.leak_ref_settle_s:g}s each) → NVLED_CURR_REF. I_LED = MEAN - REF.")
+        elif cfg.leak_reference:
+            log(f"  leakage reference: per point at bitval {cfg.leak_ref_bitval} above "
+                f"{cfg.leak_ref_per_point_above_v:+.2f} V (+{cfg.leak_ref_settle_s:g}s each), "
+                f"cached per pixel at or below it from one pre-pass at "
+                f"{cfg.leak_ref_prepass_v:+.2f} V. I_LED = MEAN - REF, and "
+                f"LEAK_REF_CACHED says which. The settle estimate below counts the "
+                f"reference on EVERY point, so it is an upper bound -- on the default "
+                f"30-point grid the cache removes it from 22 of them.")
         # Weight by the ACTUAL split, not the average of the two settles: with 18 slow
         # points and 12 fast ones the average under-reported by 16% (run 261014-1306).
         n_low = max(2, int(round(cfg.n_fine * cfg.vramp_low_frac))) if (
@@ -1509,6 +1667,14 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
             f"current-targeted (w={cfg.lowj_weight}); adaptive low-J NPLC {cfg.lowj_nplc}, high-J {cfg.highj_nplc}; "
             f"per-point range={cfg.perpoint_range}")
     configure_voltage_source_b(smu, cfg, log)
+    # Before either walk, and after the fast scan has lit every pixel once -- a pixel
+    # referenced stone cold reads 10-22 nA high (runs 261016-1113/-1221, where
+    # low_to_high anchors on a cold -0.80 V), and that is the one error this pass can
+    # avoid for free. It leaves the SMU on the faint-side limit and NPLC, which both
+    # walks reconfigure on their first point anyway.
+    prefill_reference_cache(pm, smu, smile,
+                            [(int(r["X"]), int(r["Y"])) for r in selected], cfg, log)
+    configure_voltage_source_b(smu, cfg, log)
     sweep_dir = run_dir / "NVLEDSweep" / "Sweep"
     pfx = run_slug(cfg.sample_name, run_dir) + "_"
     (sweep_dir / "raw_data").mkdir(parents=True, exist_ok=True)
@@ -1545,7 +1711,7 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
         log(f"  [{i}/{len(selected)}] pixel ({x},{y})")
         prows = []
         psamps = []                              # per-sample bursts for this pixel (raw file)
-        last_v = cfg.nvled_v_fastscan
+        last_v = cfg.fastscan_v_list()[0]
         dead_skip = False
         # First point is the brightest (high→low). Dead below an absolute floor OR below a
         # fraction of the running live-pixel median (bootstraps from the absolute floor).
@@ -1936,7 +2102,7 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
     try:
         configure_common(pm, smu, cfg, log)
         smu.set_voltage("a", cfg.vled_voltage)
-        smu.set_voltage("b", cfg.nvled_v_fastscan)   # voltage mode for the fast scan
+        smu.set_voltage("b", cfg.fastscan_v_list()[0])  # voltage mode for the fast scan
         smu.enable_output("a", True)
         smu.enable_output("b", True)
         time.sleep(0.05)

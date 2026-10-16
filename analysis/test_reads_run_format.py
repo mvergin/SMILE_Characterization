@@ -107,6 +107,48 @@ def test_leakage_reference_is_subtracted():
     assert old["LEAK_FRAC"].isna().all()
 
 
+def test_a_cached_reference_does_not_hide_a_contaminated_pixel():
+    """REF_CONTAMINATED must be judged on the points that MEASURED their reference.
+
+    Since 17 October 2026 the sweep caches one reference per pixel below
+    leak_ref_per_point_above_v (LEAK_REF_CACHED = 1), and that value is a clean
+    min-of-k by construction. On the default grid that is 22 of 30 points carrying
+    ~0, which would drag the per-pixel median under the gate and let a pixel
+    contaminated at every bias it actually read pass as reliable.
+    """
+    df = aa._load_aggregated(SWEEP)
+    if "PM400_POWER_REF" not in df.columns:
+        return                                   # nothing to gate on
+    px = (df["X"].iloc[0], df["Y"].iloc[0])
+    mine = (df["X"] == px[0]) & (df["Y"] == px[1])
+    assert mine.sum() >= 4, "need a few biases on one pixel for this to mean anything"
+
+    def flagged(frame):
+        return bool(aa.enrich(frame.copy(), dark_W=0.0)
+                    .loc[mine.values, "REF_CONTAMINATED"].any())
+
+    # Contaminate the two faintest biases of one pixel and cache the rest -- the shape
+    # the sweep now produces, where only the faint side measures its own reference.
+    # A MINORITY of the pixel's points on purpose: that is exactly the case the old
+    # all-points median misses and the measured-points median catches.
+    bad = df.copy()
+    faint_v = sorted(bad.loc[mine, "NVLED_V"].unique())[-2:]
+    faint = mine & bad["NVLED_V"].isin(faint_v)
+    assert 0 < faint.sum() < mine.sum() / 2,         f"need the contaminated points to be a minority: {faint.sum()}/{mine.sum()}"
+    bad.loc[faint, "PM400_POWER_REF"] = 0.6 * bad.loc[faint, "PM400_POWER_MEAN"].abs()
+    bad["LEAK_REF_CACHED"] = 0
+    bad.loc[mine & ~faint, "LEAK_REF_CACHED"] = 1
+    assert flagged(bad), (
+        "a pixel contaminated at every bias it measured was NOT flagged -- the cached "
+        "points diluted the per-pixel median")
+
+    # Same data with the column absent (an older run) must behave as it always did:
+    # there every point is a measured one, and the clean half pulls the median down.
+    assert not flagged(bad.drop(columns=["LEAK_REF_CACHED"])), (
+        "without the column the median runs over all points, so half-clean must pass "
+        "-- this is the behaviour the column exists to improve on")
+
+
 def test_trace_keys_decode():
     """traces.npz keys are part of the contract: the plotter must decode them."""
     import plot_transients as pt

@@ -138,6 +138,16 @@ back to back with the lit point at the same bias.
 | `LEAK_REF_BITVAL` | - | the drive level used as the reference |
 | `LEAK_REF_TRIES` | - | frame writes it took to get the pixel off (1 = first one landed) |
 | `LEAK_REF_FRAC` | - | `PM400_POWER_REF / PM400_POWER_MEAN`, the ratio the retry gated on |
+| `LEAK_REF_CACHED` | - | `1` = reused the per-pixel reference, `0` = measured at this point |
+
+`LEAK_REF_CACHED = 1` says the four `*_REF` values came from the pre-pass rather than
+from a read taken beside this point, so they are the same at every cached bias of that
+pixel and `LEAK_REF_TRIES` is 0. The sweep references per point above
+`leak_ref_per_point_above_v` (-1.0 V), where the reference is 5-62 % of the reading,
+and caches below it, where one fixed per-pixel value costs under 0.14 % on `I_LED`
+(0.20 % at -2.60 V). A reader that ignores the column still gets the right `I_LED`.
+**Runs before 17 October 2026 lack it and referenced every point**, which a reader
+must treat as `0`, not as unknown.
 
 `LEAK_REF_TRIES > 1` means a frame write did not land and was re-sent. The FPGA does
 not always write the frame correctly, at a rate of order a few percent per write, so

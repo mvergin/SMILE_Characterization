@@ -232,9 +232,35 @@ leak_ref_max_frac: 0.25   # retry while P_REF / P_lit exceeds this. The margin i
                           # 8.9% at -0.80 V, and that is P_lit falling to 0.22 nW rather
                           # than P_REF rising. A sweep extended fainter trips this gate
                           # on physics (section 21).
+leak_ref_per_point_above_v: -1.0   # measure the reference PER POINT above this bias,
+                          # reuse one cached per-pixel value at or below it. Per-point
+                          # references cost 2.4 h of run 261015-0015's 4.82 h. The leak
+                          # is NOT constant -- it rises 256.5 -> 286.1 nA from -0.80 to
+                          # -2.36 V -- but the signal rises 728x over the same span, so
+                          # one fixed per-pixel value costs 0.03-0.13% from -0.83 V down
+                          # and 0.20% at -2.60 V, where the array starts to conduct.
+                          # Above -1.0 V the reference is 5-62% of the reading, so those
+                          # eight biases keep their own. Saves 2100 of 3000 reads = 35%
+                          # of the sweep. null = reference every point, as before.
+leak_ref_prepass_v: -0.9  # the one bias the per-pixel cache is measured at, in a pass
+                          # before the sweep. Faint side on purpose: the burst sem there
+                          # is 0.13 nA against 9.06 nA on the 1e-3 range, and that
+                          # precision carries to all 22 biases that reuse it. It cannot
+                          # piggyback on the first bias -- under high_to_low that is
+                          # -2.60 V, whose reference is the 495-745 nA outlier, and
+                          # anchoring there costs 0.16-0.41% instead of 0.14%.
 
 # ---- Dead-pixel threshold (fast scan) ----
 nvled_v_fastscan: -1.35   # single fast-scan bias — does DOUBLE duty. At −1.35 V the pixels sit at J≈25 A/cm², ...
+fastscan_voltages: []     # EXTRA fast-scan biases; nvled_v_fastscan is always first and
+                          # is the only one alive/dead and pixel selection are judged on,
+                          # so adding biases cannot change which pixels get swept. Each
+                          # extra bias is another full pass over the ROI, sharing the one
+                          # fastscan_limit_a. Worth setting because -1.35 V is 0.30 V off
+                          # the measured peak: over the 100 pixels of 261015-0015 peak EQE
+                          # sits at -1.05 V and the proxy ranks pixels at Spearman 0.890
+                          # against the sweep, where -1.05 V gives 0.989. For example:
+                          # [-1.05, -1.65] measures the peak and both shoulders in one run.
 dead_threshold_frac: 0.2   # a pixel is alive if P ≥ this × the "typical lit" level
 fastscan_alive_pctl: 90   # "typical lit" level = this percentile of the fast-scan power. NOT the median: the ...
 pixel_area_um2: 100.0

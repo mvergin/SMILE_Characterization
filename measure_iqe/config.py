@@ -585,6 +585,46 @@ class IQEConfig:
                                     # settle: the bias does not move, only the drive, and
                                     # the point of measuring back to back is a shared history.
 
+    # Per-point references are the single largest avoidable cost in a sweep: 2 s of
+    # settle plus a burst, on every point. Run 261015-0015 spent 2.4 h of its 4.82 h
+    # there. Below the threshold the reference is cached PER PIXEL instead, measured
+    # once by the pre-pass and reused at every bias.
+    #
+    # What makes that safe is NOT that the leak is constant -- it is not. It rises
+    # smoothly from 256.5 nA at -0.80 V to 286.1 nA at -2.36 V, about 12%, and the
+    # range boundaries add no step above that trend (+3.87 and +3.93 nA, inside the
+    # ordinary per-step scatter of the ranges they join). What makes it safe is that
+    # the signal rises 728x over the same span. One fixed per-pixel value, tested
+    # against all 3000 points of 261015-0015, costs:
+    #
+    #     -0.83 V  0.13%     -1.05 V  0.12%     -1.89 V  0.03%
+    #     -0.99 V  0.08%     -1.30 V  0.05%     -2.60 V  0.20%
+    #
+    # -2.60 V is the worst because the reference jumps to 495-745 nA there in all four
+    # direction runs, both directions, same range as its neighbours: the array starting
+    # to conduct, not an instrument artifact.
+    #
+    # Set to None to reference every point, which reproduces every run before this.
+    leak_ref_per_point_above_v: float | None = -1.0  # measure per point when v > this
+                             # (i.e. on the FAINT side, where the reference is 5-62% of
+                             # the reading and the subtraction decides the answer); use
+                             # the cached per-pixel value at or below it. Same sign
+                             # convention as vramp_knee_v. The default keeps the eight
+                             # biases -0.99..-0.80 V per-point and caches the other 22.
+    leak_ref_prepass_v: float = -0.90  # bias for the one pre-pass that fills the cache.
+                             # It has to be its own pass, not a by-product of the first
+                             # bias: under high_to_low the first bias is -2.60 V, whose
+                             # reference is the 495-745 nA outlier above, and anchoring
+                             # there costs 0.16-0.41% instead of 0.14%. Under
+                             # low_to_high the faint end comes first and the pre-pass is
+                             # redundant, but it costs 100 points x ~3 s = 5 min against
+                             # the 1.69 h it saves, so it is not worth a special case.
+                             #
+                             # Faint side on purpose: the reference is most precise there
+                             # (burst sem 0.13 nA on the 1e-5 range against 9.06 nA on
+                             # 1e-3) and that precision carries to every bias that reuses
+                             # it.
+
     # ── Dead-pixel threshold (fast scan) ────────────────────────────────
     nvled_v_fastscan: float = -1.35  # single fast-scan bias — does DOUBLE duty. At −1.35 V the pixels
                                      # sit at J≈25 A/cm², which is dead on the (broad, flat) EQE peak
@@ -598,6 +638,28 @@ class IQEConfig:
                                      # J≈25 keeps ~5 A/cm² of margin before the droop starts (~J30). The
                                      # current there (~25 µA) is high enough for a fast (NPLC 0.01) read.
                                      # (Was −2.6 V / J≈95 — the droop side at only ~78% of peak.)
+    fastscan_voltages: tuple[float, ...] = ()  # EXTRA fast-scan biases. Empty = just
+                                     # nvled_v_fastscan, which is the historical behaviour and
+                                     # stays the FIRST entry either way -- alive/dead
+                                     # classification and sweep-pixel selection are judged on
+                                     # that bias alone, so adding biases cannot change which
+                                     # pixels get swept. The others are measured on every pixel
+                                     # and written to the same CSV, distinguished by NVLED_V.
+                                     #
+                                     # Why more than one: -1.35 V was chosen as a peak-IQE proxy
+                                     # on the assumption that it sits on the flat EQE plateau.
+                                     # Over the 100 pixels of run 261015-0015 the peak is at
+                                     # -1.05 V (81/100 within -0.99..-1.11), and -1.30 V -- the
+                                     # nearest grid bias -- reads 93.6% of peak and ranks pixels
+                                     # at Spearman 0.890 against the sweep. -1.05 V gives 0.989.
+                                     # A list lets one scan carry both and the analysis compare
+                                     # them, instead of re-running the array to move one number.
+                                     #
+                                     # Cost is linear: each extra bias is another full pass over
+                                     # the ROI. fastscan_limit_a (1e-3 A) covers the whole usable
+                                     # span -- -2.6 V draws ~175 uA -- so the list shares one
+                                     # compliance and one range. At -1.05 V that is ~7 uA read on
+                                     # the 1e-3 range, where the range offset is a few nA = 0.05%.
     dead_threshold_frac: float = 0.20  # a pixel is alive if P ≥ this × the "typical lit" level
     fastscan_alive_pctl: int = 90  # "typical lit" level = this percentile of the fast-scan power.
                                      # NOT the median: the median collapses to the noise floor on a
@@ -615,6 +677,16 @@ class IQEConfig:
     def photon_energy_j(self) -> float:
         """Energy of one emitted photon (J), from ``pm_wavelength``."""
         return H_PLANCK * C_LIGHT / (self.pm_wavelength * 1e-9)
+
+    def fastscan_v_list(self) -> tuple[float, ...]:
+        """Every fast-scan bias, ``nvled_v_fastscan`` first.
+
+        First is load-bearing: alive/dead classification and sweep-pixel selection read
+        only that bias, so the extra entries cannot change which pixels get swept.
+        """
+        extra = tuple(float(v) for v in self.fastscan_voltages
+                      if float(v) != float(self.nvled_v_fastscan))
+        return (float(self.nvled_v_fastscan),) + extra
 
     def resolve_roi(self) -> tuple[int, int, int, int]:
         """``roi`` as (x1, y1, x2, y2), resolving a named preset."""
@@ -639,6 +711,17 @@ class IQEConfig:
                 raise ValueError(f"{name}={getattr(self, name)!r}; expected one of {sorted(allowed)}")
         if not self.bitvals or not all(0 <= b <= 15 for b in self.bitvals):
             raise ValueError(f"bitvals={self.bitvals!r}; expected a non-empty tuple of 0..15")
+        if any(v > 0 for v in self.fastscan_v_list()):
+            # The NVLED cathode is driven negative. A positive entry is a typo, and it
+            # would forward-bias into the compliance instead of measuring anything.
+            raise ValueError(f"fastscan_voltages={self.fastscan_voltages!r}: every "
+                             f"fast-scan bias must be <= 0 V")
+        if (self.leak_ref_per_point_above_v is not None
+                and self.leak_ref_per_point_above_v > 0):
+            raise ValueError(
+                f"leak_ref_per_point_above_v={self.leak_ref_per_point_above_v}: this is "
+                f"a bias in volts and the sweep is negative, so a positive value would "
+                f"cache the reference at EVERY point, faint side included.")
         for name in ("nvled_range_i", "probe_range_i", "current_source_range_i"):
             if getattr(self, name) not in SMU_I_RANGES:
                 raise ValueError(f"{name}={getattr(self, name)}; the 2602B only has "

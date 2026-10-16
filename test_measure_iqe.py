@@ -677,6 +677,105 @@ def test_bias_major_precondition_touches_every_pixel_once():
     assert grids[True] == grids[False], "preconditioning changed the measured grid"
 
 
+def _agg_rows(run_dir, phase="NVLEDSweep/Sweep"):
+    """Every aggregated row of a phase, as dicts."""
+    import csv as _csv
+    out = []
+    for agg in sorted((Path(run_dir).joinpath(*phase.split("/"))).glob(
+            "*aggregated_bitval=*.csv")):
+        with agg.open() as f:
+            out += list(_csv.DictReader(f))
+    return out
+
+
+def test_the_leakage_reference_is_cached_below_the_threshold():
+    """One reference per pixel below ``leak_ref_per_point_above_v``, per point above it.
+
+    The saving is 2100 of 3000 reference reads on the default grid. What makes it safe
+    is not that the leak is constant -- it rises 256.5 -> 286.1 nA from -0.80 to
+    -2.36 V -- but that the signal rises 728x over the same span, so one fixed
+    per-pixel value costs under 0.14 % everywhere it is used.
+
+    This checks the mechanism, which is what can silently invert: that the faint side
+    keeps its own reference, that the deep side shares ONE value per pixel, and that
+    the column says which.
+    """
+    from measure_iqe import run_iqe_measurement
+
+    common = dict(FAST, n_fine=8, roi=(0, 0, 7, 7), block_size=4, pixels_per_block=1,
+                  block_seed=0, dead_abort=False, leak_reference=True,
+                  trace_settling=False)
+    for order in ("pixel_major", "bias_major"):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = IQEConfig(**common, sweep_order=order,
+                            leak_ref_per_point_above_v=-1.0)
+            res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
+            rows = _agg_rows(res.run_dir)
+        assert rows, f"{order}: no sweep rows"
+        per_point = [r for r in rows if r["LEAK_REF_CACHED"] == "0"]
+        cached = [r for r in rows if r["LEAK_REF_CACHED"] == "1"]
+        assert per_point and cached, (
+            f"{order}: expected both kinds, got {len(per_point)} per-point and "
+            f"{len(cached)} cached over {len(rows)} points")
+        # The split is exactly the threshold, in the sweep's sign convention.
+        for r in per_point:
+            assert float(r["NVLED_V"]) > -1.0,                 f"{order}: {r['NVLED_V']} V measured per point but is below -1.0 V"
+        for r in cached:
+            assert float(r["NVLED_V"]) <= -1.0,                 f"{order}: {r['NVLED_V']} V cached but is above -1.0 V"
+            assert int(r["LEAK_REF_TRIES"]) == 0,                 "a cached point writes no frame, so TRIES must be 0"
+        # One value per pixel, not one per point: the whole saving rests on this.
+        by_px = {}
+        for r in cached:
+            by_px.setdefault((r["X"], r["Y"]), set()).add(r["NVLED_CURR_REF"])
+        for px, vals in by_px.items():
+            assert len(vals) == 1,                 f"{order}: pixel {px} has {len(vals)} cached reference values, want 1"
+        # And the faint side did NOT share: those are separate reads.
+        assert len({r["NVLED_CURR_REF"] for r in per_point}) > 1,             f"{order}: every per-point reference is identical -- the cache leaked"
+
+    # Off switch: None reproduces every run made before the cache existed.
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = IQEConfig(**common, sweep_order="bias_major",
+                        leak_ref_per_point_above_v=None)
+        res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
+        rows = _agg_rows(res.run_dir)
+    assert rows and all(r["LEAK_REF_CACHED"] == "0" for r in rows),         "leak_ref_per_point_above_v=None must reference every point"
+
+
+def test_the_fast_scan_measures_every_bias_and_judges_on_the_first():
+    """``fastscan_voltages`` adds passes; it must not change which pixels get swept.
+
+    -1.35 V was picked as a peak-IQE proxy and the measured peak is at -1.05 V, so a
+    scan wants both. The risk in adding biases is that the alive/dead test starts
+    comparing a pixel at one bias against the population at another, which would
+    change the swept set -- so selection reads nvled_v_fastscan ONLY.
+    """
+    from measure_iqe import run_iqe_measurement
+
+    common = dict(FAST, n_fine=4, roi=(0, 0, 7, 7), block_size=4, pixels_per_block=1,
+                  block_seed=0, dead_abort=False, trace_settling=False)
+    picked = {}
+    for name, extra in (("one", ()), ("three", (-1.05, -1.65))):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = IQEConfig(**common, fastscan_voltages=extra)
+            res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
+            fs = _agg_rows(res.run_dir, "FastScan")
+            picked[name] = {(r[0], r[1]) for r in _sweep_grid(res.run_dir)[0]}
+        want = cfg.fastscan_v_list()
+        got = {round(float(r["NVLED_V"]), 4) for r in fs}
+        assert got == {round(v, 4) for v in want},             f"{name}: fast scan wrote biases {sorted(got)}, expected {sorted(want)}"
+        assert len(fs) == 64 * len(want),             f"{name}: {len(fs)} rows for {len(want)} biases x 64 pixels"
+        # Every bias covers every pixel, so the passes are comparable.
+        for v in want:
+            n = sum(1 for r in fs if round(float(r["NVLED_V"]), 4) == round(v, 4))
+            assert n == 64, f"{name}: bias {v} covered {n}/64 pixels"
+    assert picked["one"] == picked["three"], (
+        f"adding fast-scan biases changed the swept pixels: "
+        f"{sorted(picked['one'] ^ picked['three'])}")
+    # First entry stays first, whatever order the extras are given in.
+    assert IQEConfig(nvled_v_fastscan=-1.35,
+                     fastscan_voltages=(-1.65, -1.35, -1.05)).fastscan_v_list() ==         (-1.35, -1.65, -1.05), "nvled_v_fastscan must lead, and must not repeat"
+
+
 def test_bias_major_pays_each_dwell_once_for_all_pixels():
     """The point of the order: n_pixels x the dwell becomes 1 x the dwell."""
     import time as _time
@@ -687,7 +786,13 @@ def test_bias_major_pays_each_dwell_once_for_all_pixels():
                   block_seed=0, dead_abort=False, settle_scale=1.0,
                   vramp_lowv_settle_s=0.011, vramp_highv_settle_s=0.013,
                   leak_ref_settle_s=0.017, pixel_switch_settle_s=0.019,
-                  leak_reference=True, trace_settling=False, warmup_ms=0.0)
+                  leak_reference=True, trace_settling=False, warmup_ms=0.0,
+                  # This test counts reference settles to prove bias_major does not
+                  # restore the pixel. The per-pixel cache adds a pre-pass and removes
+                  # the reference from the biases below its threshold, so it is turned
+                  # off here to keep the count about the restore. The cache has its own
+                  # test: test_the_leakage_reference_is_cached_below_the_threshold.
+                  leak_ref_per_point_above_v=None)
     seen = {}
     real_sleep = _time.sleep
     for order in ("pixel_major", "bias_major"):

@@ -740,7 +740,22 @@ def enrich(df, dark_W=0.0):
             # to 0.001. That is a 500x gap with nothing in it, so flagging the pixel
             # needs no threshold fitted to anecdotes, unlike the 0.46-vs-0.88 single
             # point the net-power test was introduced for.
-            per_px = carried.groupby([df["X"], df["Y"]]).transform("median")
+            # Median over the points that MEASURED their own reference. Since
+            # 17 October 2026 the sweep caches one reference per pixel below
+            # leak_ref_per_point_above_v (LEAK_REF_CACHED = 1), and the cache holds a
+            # min-of-k clean value by construction. Those points carry ~0 by
+            # definition, so including them would dilute the median with 22 of 30
+            # rows and stop this gate firing on a pixel contaminated at every bias it
+            # actually read. Older runs have no column and are all measured.
+            if "LEAK_REF_CACHED" in df.columns:
+                carried_meas = carried.where(
+                    df["LEAK_REF_CACHED"].astype(float).fillna(0.0) == 0)
+            else:
+                carried_meas = carried
+            per_px = carried_meas.groupby([df["X"], df["Y"]]).transform("median")
+            # A pixel with no measured reference at all yields NaN here, which fails
+            # the comparison and leaves it unflagged -- the same fail-open the
+            # .fillna(False) below gives every other missing input.
             df["REF_CONTAMINATED"] = per_px > REF_POWER_SUSPECT
             df["REF_SWALLOWED"] = swallowed
             reliable &= ~(swallowed | df["REF_CONTAMINATED"]).fillna(False)
