@@ -172,10 +172,20 @@ class IQEConfig:
     # segment [START, KNEE] (rising side + peak, dense) and the rest in [KNEE, STOP] (droop).
     vramp_knee_v: float | None = -1.3  # split voltage between the dense (rising) and sparse (droop) halves
     vramp_low_frac: float = 0.6  # fraction of points placed in the rising-side segment
-    # Sweep direction (thermal A/B test). "low_to_high" measures the rising side first
-    # (coolest, recommended); "high_to_low" starts hot. Run both on the same pixels and
-    # compare the low-J EQE to gauge self-heating: if high_to_low reads lower IQE at low
-    # J, self-heating is biasing you and low_to_high is the better number.
+    # Sweep direction. "high_to_low" visits the brightest bias first and is the default;
+    # "low_to_high" visits the faintest first.
+    #
+    # The old comment here called low_to_high "recommended" while the default said the
+    # opposite, and section 4 said the opposite again. Section 4 wins on evidence: the
+    # 200 mV step from the HIGH-current side gave the flattest approach, and a point
+    # approached from below overshoots and decays for a whole record without arriving.
+    #
+    # Two things to know before running the A/B:
+    #   * dead_abort has to be off. Both dead-pixel tests judge at bias index 0, which
+    #     low_to_high makes the faintest, and validate() refuses the combination.
+    #   * no low_to_high sweep exists on disk since June 2026 (Array38, before the
+    #     leakage reference and before the settle times were measured). The direction has
+    #     never been compared under the current method. Section 22.
     sweep_direction: str = "high_to_low"  # "low_to_high" | "high_to_low"
 
     # ── Pixel warm-up / conditioning ────────────────────────────────────
@@ -674,6 +684,18 @@ class IQEConfig:
                 f"{self.leak_ref_bitval}: the retry gate is optical and a non-zero "
                 "reference bitval EMITS, so every point would retry to the limit. Set "
                 "leak_ref_tries=1, or reference at bitval 0.")
+        # Both dead-abort sites in acquire.py judge the pixel at bias index 0 and say
+        # "the first (brightest) point". Under low_to_high index 0 is the FAINTEST.
+        # Array42 reads 0.21 nW at -0.80 V against dead_abort_nw = 2.0 (runs 261016-0855
+        # and -0911), so the absolute floor would drop every pixel at the first bias and
+        # the run would return nothing. This is why no low_to_high sweep exists on disk
+        # since June 2026. Section 22.
+        if self.sweep_direction == "low_to_high" and self.dead_abort:
+            raise ValueError(
+                "sweep_direction=low_to_high with dead_abort=True: the dead-pixel test "
+                "runs at the FIRST bias, which is the faintest in this direction "
+                "(0.21 nW at -0.80 V on Array42 against a 2.0 nW floor), so every pixel "
+                "would be dropped. Set dead_abort=false for the direction A/B test.")
         if not 0.0 <= self.vramp_low_frac <= 1.0:
             raise ValueError(f"vramp_low_frac={self.vramp_low_frac} must be in [0, 1]")
         # Measured 261013: in High-C the LIMIT selects the current measure range, so a

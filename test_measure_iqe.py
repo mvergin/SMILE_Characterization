@@ -60,7 +60,10 @@ def test_config_rejects_bad_input():
                 dict(roi=(0, 0, 999, 3)), dict(bitvals=(99,)), dict(nvled_range_i=0.003),
                 # the retry gate is optical, and a non-zero reference bitval emits:
                 # bitval 1 is 11.6% of bitval 15 at -2.60 V (run 261015-2326, section 20)
-                dict(leak_ref_bitval=1, leak_ref_tries=3)):
+                dict(leak_ref_bitval=1, leak_ref_tries=3),
+                # the dead-pixel test runs at bias index 0, which low_to_high makes the
+                # FAINTEST: 0.21 nW against a 2.0 nW floor drops every pixel (section 22)
+                dict(sweep_direction="low_to_high", dead_abort=True)):
         try:
             IQEConfig(**bad).validate()
         except ValueError:
@@ -68,6 +71,8 @@ def test_config_rejects_bad_input():
         raise AssertionError(f"{bad} should not validate")
     # ... but a non-zero reference bitval is fine as long as nothing retries on it
     IQEConfig(leak_ref_bitval=1, leak_ref_tries=1).validate()
+    # ... and the direction A/B is allowed once the dead-pixel test is off
+    IQEConfig(sweep_direction="low_to_high", dead_abort=False).validate()
     try:
         IQEConfig.from_dict({"not_a_field": 1})
     except ValueError as exc:
@@ -77,7 +82,8 @@ def test_config_rejects_bad_input():
 
 
 def test_config_roundtrips_through_a_file():
-    cfg = IQEConfig(n_fine=17, sweep_direction="low_to_high", roi=(1, 2, 3, 4))
+    cfg = IQEConfig(n_fine=17, sweep_direction="low_to_high", dead_abort=False,
+                    roi=(1, 2, 3, 4))
     with tempfile.TemporaryDirectory() as tmp:
         for name in ("c.json", "c.yaml"):
             try:
@@ -225,7 +231,7 @@ def test_every_acquisition_mode_runs():
              dict(sweep_select="spatial", min_sweep_pixels=2, max_sweep_pixels=2),
              dict(sweep_select="stride", max_sweep_pixels=2),
              dict(vramp_perseg_effort=False),
-             dict(sweep_direction="low_to_high")]
+             dict(sweep_direction="low_to_high", dead_abort=False)]
     with tempfile.TemporaryDirectory() as tmp:
         for over in modes:
             result = _run(tmp, **over)
