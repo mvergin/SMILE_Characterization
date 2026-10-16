@@ -1,14 +1,18 @@
-# SMILE_IQE_Analysis
+# Analysis
 
-Fit and report IQE/EQE from micro-LED array measurement runs produced by
-[SMILE_Characterization](../SMILE_Characterization). This repo touches no
-hardware and imports nothing from the measurement side — it reads run
-directories off disk.
+Fit and report IQE/EQE from the micro-LED array measurement runs that
+[`measure_iqe`](../README.md) writes. Nothing here touches hardware and nothing
+imports the measurement side — these scripts read run directories off disk.
 
 ```
-SMILE_Characterization  ──writes──▶  <run_dir>/  ──reads──▶  SMILE_IQE_Analysis
-     (instruments, CLI)                 CSV + JSON              (fits, reports)
+measure_iqe/  ──writes──▶  <run_dir>/  ──reads──▶  analysis/
+ (instruments, CLI)         CSV + JSON             (fits, figures)
 ```
+
+This was its own repo, `SMILE_IQE_Analysis`, until 16 October 2026. It was merged
+in with `git subtree`, so its 47 commits are in this repository's history. Run the
+scripts from either the repo root or from inside this directory — they resolve
+their paths from the file, not the working directory.
 
 That handoff is specified in **[RUN_FORMAT.md](RUN_FORMAT.md)**, which is kept
 byte-identical in both repos. Read it before changing anything that parses a run.

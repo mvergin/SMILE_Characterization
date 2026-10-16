@@ -1,25 +1,32 @@
 # SMILE_Characterization
 
 Measure the micro-LED array of the SMILE platform, developed in the EU project
-*Scalable Structured Micro Illumination Light Engines*. This repo talks to the
-instruments and writes measurement data. **It does not analyse it.**
+*Scalable Structured Micro Illumination Light Engines*. This repo drives the
+instruments, writes the measurement data, and fits it.
 
 ```
-SMILE_Characterization  ──writes──▶  <run_dir>/  ──reads──▶  SMILE_IQE_Analysis
-     (instruments, CLI)                CSV + JSON             (fits, reports)
+measure_iqe/  ──writes──▶  <run_dir>/  ──reads──▶  analysis/
+ (instruments, CLI)         CSV + JSON             (fits, figures)
 ```
 
-Fitting, plotting and reporting live in the separate
-[SMILE_IQE_Analysis](../SMILE_IQE_Analysis) repo. The two share no code — a run
-directory on disk is the whole interface, specified in
-**[RUN_FORMAT.md](RUN_FORMAT.md)** and kept byte-identical in both repos.
+The interface between the two halves is a **run directory on disk**, not a shared
+import: `analysis/` touches no hardware and imports nothing from the measurement
+side. That contract is specified in **[RUN_FORMAT.md](RUN_FORMAT.md)** and both
+sides have their own test for it (`test_run_format.py` for the writer,
+`analysis/test_reads_run_format.py` for the reader).
+
+> `analysis/` was its own repo until 16 October 2026. It was merged in with
+> `git subtree`, so its 47 commits are in this history — the measurement and the
+> analysis of it move together now, because the analysis depends on how the
+> measurement was taken. See ROADMAP.md item 2.
 
 | piece | what it is |
 |---|---|
 | `measure_iqe/` | **the measurement: library + CLI** — fast scan, pixel selection, IQE sweep |
 | `smile/`, `instruments/` | SMILE FPGA driver and the PM400 / Keithley 2602B instrument drivers |
 | `measurement/`, `data/`, `smile_postprocess.py` | **reference only, unmaintained** — the transient / ultra-fast / hardware-paced-TSP techniques that predate `measure_iqe`. See [MEASUREMENT_MODES.md](MEASUREMENT_MODES.md) |
-| `characterize_capacitance.py` | measures the array's ~50 µF capacitance and what it does to a low-current reading |
+| `analysis/` | **the analysis: fits, figures, reports** — reads a run directory, needs no hardware. `python analysis/analyze_array.py "<run_dir>"` |
+| `characterize_capacitance.py` | the investigation tool: the array's ~50 µF capacitance, step transients, the leakage as a time series, and what each does to a low-current reading |
 
 ---
 
@@ -126,7 +133,7 @@ finally:
 Everything writes CSVs only. Fit and plot them from the analysis repo:
 
 ```bash
-python analyze_array.py "<run_dir>"        # SMILE_IQE_Analysis
+python analysis/analyze_array.py "<run_dir>"   # fits, figures, REPORT.md
 ```
 
 ---
@@ -213,7 +220,8 @@ runs that pinned each value.
 | parameter | type | default | meaning |
 |---|---|---|---|
 | `sample_name` | `str` | `'Array42_IQE'` | override per array with --array NAME |
-| `base_dir` | `str` | `'results'` | output root; a timestamped run dir is created inside |
+| `base_dir` | `str` | `'results'` | output root; a timestamped run dir is created inside. Set it **outside this repo** — gitignore is not a guard against `git add -A`. `configs/local.yaml` is the place to set it per machine. |
+| `calibration_source` | `str` | `''` | filled in automatically with the calibration file a run applied, so the run directory records it. Leave empty. |
 
 #### ROI & pixel selection
 
@@ -266,7 +274,16 @@ runs that pinned each value.
 | `lowj_weight` | `float` | `1.5` | >1 concentrates fine points toward LOW current (the SRH rising side J≈1–5 that pins peak IQE). 1.0 = uniform log. Voltage-ramp densification (FINE_SWEEP_MODE="voltage"). The rising side + peak that pin the fit live in a narrow voltage window around turn-on (~−0.85 to −1.3 V), while the droop spans the rest. So split the ramp: put VRAMP_LOW_FRAC of the points in the less-negative segment [START, KNEE] (rising side + peak, dense) and the rest in [KNEE, STOP] (droop). |
 | `vramp_knee_v` | `float \| None` | `-1.3` | split voltage between the dense (rising) and sparse (droop) halves |
 | `vramp_low_frac` | `float` | `0.6` | fraction of points placed in the rising-side segment Sweep direction (thermal A/B test). "low_to_high" measures the rising side first (coolest, recommended); "high_to_low" starts hot. Run both on the same pixels and compare the low-J EQE to gauge self-heating: if high_to_low reads lower IQE at low J, self-heating is biasing you and low_to_high is the better number. |
-| `sweep_direction` | `str` | `'high_to_low'` | "low_to_high" \| "high_to_low" |
+| `sweep_direction` | `str` | `'high_to_low'` | `"low_to_high"` \| `"high_to_low"`. **Measured, sections 23-24**: direction does **not** change the current (-0.03 %) but `low_to_high` reads **0.52 % lower EQE**, reproducibly, because the light lags the current through a bias change and the approach sets the sign. The two directions bracket the truth, so a single-direction sweep carries ~±0.26 %. `low_to_high` additionally **cannot run with `dead_abort` on** — the dead-pixel test judges at bias index 0, which that direction makes the faintest (0.21 nW against a 2.0 nW floor), so every pixel would be dropped. `validate()` refuses the combination. |
+
+#### Sweep order — the single largest method change
+
+| parameter | type | default | meaning |
+|---|---|---|---|
+| `sweep_order` | `str` | `'pixel_major'` | `"pixel_major"` walks every bias of one pixel, then moves on. `"bias_major"` holds a bias and visits every pixel, then steps the bias. **bias_major pays the long low-V settle once per bias instead of once per pixel**, which is what makes a 100-pixel sweep affordable: 40 min against ~10 min *per pixel*. Sections 15-18 are the measurement of what that costs. |
+| `pixel_switch_settle_s` | `float` | `2.0` | `bias_major` only: the wait after the frame changes to the next pixel at a held bias. **Measured, sections 20-22**: the current is still ~0.5 % low at 2 s and needs ~106 s to fully settle, but the fast part of that deficit is **non-radiative** — the light does not follow it — so EQE at the 2 s wait reads **+0.50 % HIGH**, not low. Raising this to 20 s changed nothing measurable (section 17). |
+| `sweep_rotate` | `int` | `0` | `bias_major` only: rotate the pixel visiting order by this many slots each bias. Written to test whether the first pixel of each bias is special. **It is not** (section 17) — the result followed the pixel, not the slot, which withdrew every loop-position claim before it. |
+| `bias_major_precondition` | `bool` | `False` | `bias_major` only: drive every pixel at `warmup_nvled_v` before the first bias. **Measured and it changes nothing** (section 17): -3.02 % against -2.99 %. Kept because it is the one conditioning hypothesis that was testable, and the negative result is worth being able to reproduce. |
 
 #### Pixel warm-up / conditioning
 
@@ -386,13 +403,28 @@ runs that pinned each value.
 | `fastscan_limit_a` | `float` | `0.001` | compliance for the FAST SCAN, which is a separate operating point from the sweep. At nvled_v_fastscan (-1.35 V) a pixel draws ~30 uA, so the sweep's 10 uA rising-side limit clamps EVERY pixel -- measured in run 261014-0048, where all 1024 pixels read exactly 10.00 uA and the light came out 2.8x low. |
 | `leak_reference` | `bool` | `True` | measure each sweep point lit and at LEAK_REF_BITVAL |
 | `leak_ref_bitval` | `int` | `0` | the reference drive level: addressed, but off |
-| `leak_ref_settle_s` | `float` | `2.0` | after switching drive level. Shorter than the sweep settle: the bias does not move, only the drive, and the point of measuring back to back is a shared history. |
+| `leak_ref_settle_s` | `float` | `2.0` | after switching drive level. Shorter than the sweep settle: the bias does not move, only the drive, and the point of measuring back to back is a shared history. **Confirmed ample three times** (sections 20, 21, 25): the transient after a frame change to bitval 0 is over before 1 s. |
+| `leak_ref_tries` | `int` | `3` | re-reads allowed when the reference looks wrong, i.e. when it is too bright to be an off pixel. **Measured: 0 retries in 128 writes** (section 21), a 2.3 % upper bound by the rule of three, so the gate costs nothing in practice. |
+| `leak_ref_max_frac` | `float` | `0.25` | the gate itself: reject a reference whose light exceeds this fraction of the lit reading. The margin shrinks at the faint end — at -0.80 V the lit power is only 0.22 nW, so the ratio runs at 8.9 % rather than near zero. It is the signal falling, not the reference rising. |
 
-Channel B reads the **total** cathode current. Measured over 12 pixels in 4
-quadrants on 261013, the reference is 8% of the reading at −0.95 V and **58% at
-−0.80 V**. Without subtracting it the EQE appears to collapse ~20× below J ≈ 0.4.
-A *blanked* frame is not a valid reference — it draws ~4× **more** than the
-addressed pixel at bitval 0, so lit-minus-blanked is negative.
+Channel B reads the **total** cathode current, so `I_LED = NVLED_CURR_MEAN -
+NVLED_CURR_REF`. Measured over 12 pixels in 4 quadrants on 261013, the reference is
+8% of the reading at −0.95 V and **58% at −0.80 V**. Without subtracting it the EQE
+appears to collapse ~20× below J ≈ 0.4. A *blanked* frame is not a valid reference —
+it draws ~4× **more** than the addressed pixel at bitval 0, so lit-minus-blanked is
+negative.
+
+Two later results matter for anyone using the corrected number:
+
+* **The leakage is a fixed ~270 nA offset, not a diode** (section 21). It moves ~4 %
+  over 0.95 V of bias. The apparent bias slope in a sweep's reference column is the
+  **adaptive measure range**, not physics: on the 1e-5 range it reads 270.7 ± 1.6 nA,
+  on the 1e-3 range 373 ± 168 nA.
+* **The 2 s reference reads ~1.6 % low** against a dedicated 122 s trace at the same
+  bias and range, same sign on all four pixels (section 25). Amplified by the
+  reference's share of the raw reading, that is -0.01 % on `I_LED` above -1.0 V,
+  -0.27 % at -0.90 V and **-2.16 % at -0.80 V**. It is the largest known systematic
+  at the faintest bias and it is not settling.
 
 #### Calibration, resume and safety
 
@@ -446,14 +478,22 @@ Physical limits the validator does *not* police, because the hardware does:
 compliance, and `nvled_range_i` / `probe_range_i` must be one of
 `SMU_I_RANGES` (1e-7 … 1e-2 A) for the 2602B to accept them.
 
-### The three knobs that matter most
+### The four knobs that matter most
 
+* **`sweep_order`** — `"bias_major"` is what makes a many-pixel sweep affordable,
+  because the long low-V settle is paid once per bias instead of once per pixel.
+  It is also the knob with the most measurement behind it: sections 15-18 chased a
+  ~3 % deficit it appeared to introduce and found that two thirds of it was the gap
+  between the runs being compared, leaving ~1 % on the faint side.
 * **`source_mode`** — keep `"voltage"`. `"current"` does not work on this
   device: the +1.8 V anode bypasses channel B through a leakage path, so the
   cathode current setpoint never becomes the LED current.
-* **`sweep_direction`** — `"high_to_low"` starts hot and conditioned;
-  `"low_to_high"` measures the rising side coolest. Run both on the same pixels
-  to gauge self-heating.
+* **`sweep_direction`** — keep `"high_to_low"`. Not for the reason originally
+  given: **both** directions are still settling at the end of the dwell, and
+  `high_to_low` is the further from settled. It stays because `low_to_high` cannot
+  run with the dead-pixel test at all (see the table above), and because the 0.52 %
+  EQE spread between the two is settling that **neither** escapes. Running both and
+  taking the mid-point removes it, at twice the cost.
 * **`vramp_lowv_n_pm` / `vramp_lowv_nplc`** — the low-J precision budget. The
   light is the limiting channel at low current, so spend on `*_n_pm` before
   `*_nplc`.
@@ -490,16 +530,25 @@ spacing: nearest-neighbour min 2 px, median 3 px (target >= 2); 0 touching pixel
 
 ## Tests
 
+Four suites, no pytest needed. Each is a plain script of `assert`s that also
+collects under pytest if you have it.
+
 ```bash
-python test_measure_iqe.py       # no pytest needed; also collects under pytest
+python test_measure_iqe.py              # the config, the CLI, the sweep plumbing
+python test_run_format.py               # the WRITER side of RUN_FORMAT.md
+python test_characterize_capacitance.py # the switch metric and the optical poller
+python analysis/test_reads_run_format.py   # the READER side of the same contract
 ```
+
+The two `run_format` suites are not duplicates — they test opposite directions of
+one contract, which is why both survived the repo merge.
 
 The checks run the whole acquisition against the simulation rig: every source
 mode, every pixel-selection mode, the warm-up diagnostic, the dead-pixel abort,
 the blocks-mode spacing guarantees, the CLI, and the config round trip.
 
 ```bash
-python test_run_format.py        # the contract with SMILE_IQE_Analysis
+python test_run_format.py        # the run-directory contract, writer side
 ```
 
 This one asserts a fresh run still writes the layout and columns that
@@ -523,8 +572,10 @@ rising-side span (−0.8 → −1.3 V) moves `C·ΔV ≈ 25 µC` of charge. At L
 microseconds. Which of those supplies the charge decides whether a low-J current
 reading is right, and it is the likely cause of:
 
-* the direction hysteresis between `low_to_high` and `high_to_low` (charging vs
-  discharging the cap adds to or subtracts from the LED current);
+* ~~the direction hysteresis between `low_to_high` and `high_to_low`~~ — **refuted**
+  (sections 23-24). With High-C the current is path-independent to 0.03 %. What does
+  depend on direction is the **light**, by 0.52 % in EQE, and a capacitor cannot do
+  that;
 * the fine current ranges reading low J *wrong*, not merely noisily;
 * the current oscillating in the SMU buffer at low NPLC (loop instability into a
   capacitive load — which is what High-C mode exists to fix);
@@ -635,7 +686,11 @@ range is selected, independent of bias** — a range artifact, not a measurement
 
 With High-C the current is physical, monotonic, and **path-independent**: −0.70 V
 reads 0.680 µA arriving from −2.6 V and 0.662 µA arriving from −0.9 V, agreeing to
-2.7%. The direction hysteresis that motivated `sweep_direction` is gone.
+2.7%. The direction hysteresis that motivated `sweep_direction` is gone — and
+sections 23-24 confirmed it on a full sweep, twice, in both sequences: direction
+moves the current by **-0.027 %**. It does move the **light** by 0.55 %, which is a
+settling lag rather than a hysteresis, and it is why the EQE still differs by 0.52 %
+between the two directions.
 
 ### The limit sets the resolution: measured
 
@@ -820,10 +875,14 @@ on an array that has not been characterised says so in the log and uses the defa
 rather than silently inheriting another array's numbers.
 
 `calibrations/` is **gitignored on purpose**: those files are measured facts about one
-physical array, and re-copying the repo (the share export runs `git archive`) must
-never overwrite them. Anything you edit inside a checkout of the repo *will* be
-overwritten by the next copy — keep per-array settings in `calibrations/`, not in
+physical array, and updating the repo must never overwrite them. Keep per-array
+settings in `calibrations/` and machine settings in `configs/local.yaml`, never in
 `configs/standard.yaml`.
+
+On a bench machine the whole update is `git pull`. A clone brings the code, the
+configs and the tests; what it does **not** bring is `calibrations/` (per-array,
+measured), the run data, or the investigation report — copy the calibration in once
+and the bench is ready.
 
 `--calibrate` steps a few pixels at three biases spanning the sweep, polls the current
 until it stops changing (`settle_time`, the criterion documented in the investigation
@@ -832,8 +891,19 @@ records the raw measurements beside the recommendation, and says so explicitly i
 capture never settled within `calibrate_seconds` -- in which case the recommendation
 is a lower bound and the run should be repeated with a longer window.
 
-Precedence: defaults, then `--config`, then `--calibration`, then `--set`. An explicit
-`--set` always wins, so a deliberate override is never silently replaced.
+Precedence, lowest first: defaults, `--config`, **`configs/local.yaml`**,
+`--calibration`, `--set`, `--out`. An explicit `--set` always wins, so a deliberate
+override is never silently replaced.
+
+`configs/local.yaml` is for what is true of **this machine** and nothing else,
+`base_dir` above all. It is gitignored, it sits *above* `--config` on purpose — a
+config shared between machines must not put this one's runs on a disk that does not
+exist here — and every key it applies is logged as the first line of the run:
+
+```
+[12:34:10] applied configs/local.yaml: base_dir, n_fine
+[12:34:10]   base_dir = 'D:/iqe_runs'
+```
 
 ### The old-vs-new demonstration
 
@@ -878,10 +948,11 @@ Full key-by-key reference: **Configuration reference** below.
 
 ### What the sweep now does, and why (261013)
 
-> The full write-up, with figures, is **`INVESTIGATION_REPORT.md` in the analysis
-> repo** (`SMILE_IQE_Analysis`). Regenerate it with
-> `python make_capacitance_figures.py ../SMILE_Characterization`. What follows is
-> the summary.
+> The full write-up, with figures, is **`INVESTIGATION_REPORT.md` on the
+> measurement machine** — it is confidential and deliberately not in this repo or
+> its history, and the root `.gitignore` blocks the filename at any depth. Its
+> figures are rebuilt with `python analysis/make_capacitance_figures.py`, which
+> reads the run data off that machine's disk. What follows is the summary.
 
 
 The investigation rewrote the sweep's settings. The short version:
@@ -989,7 +1060,13 @@ parking at −1.00 V and jumping. A monotone sweep in 0.05 V steps should cost ~
 per point, and the relaxation current that contaminates it is 6× smaller. Sweep
 monotonically in small steps and never jump back to a park voltage.
 
-### The open question: is the low-J current actually LED current?
+### The open question: is the low-J current actually LED current? — answered
+
+> **Answered.** The leakage reference below is the correction, and it has since been
+> measured directly as a time series rather than inferred: a flat, white ~270 nA
+> offset that the bias barely moves, settled within 1 s of a frame change
+> (sections 20, 21, 25). What is left is a ~1.6 % error on the reference itself,
+> which costs `I_LED` 2.16 % at -0.80 V and under 0.1 % above -1.0 V.
 
 Both source modes measure the *total* cathode current, so neither separates LED
 injection from leakage. The first attempt used a blanked frame as the reference and
@@ -1092,4 +1169,32 @@ range must skip the call under High-C.
   things by hand, and the scripts replaced it. A thin wrapper that shells out to
   `python -m measure_iqe` would be the way to bring that convenience back —
   nothing in this repo needs to change for that. The old GUI is still in git
-  history if you want it as a starting point.
+  history if you want it as a starting point. ROADMAP.md item 6 has the shape.
+* **A `--switch-hold-s` longer than the sample count can cover is silently
+  truncated.** `characterize_capacitance.py --what switch` holds for the time asked
+  but captures only `--samples` points, and at NPLC 1.0 a sample costs 40.7 ms — so
+  3000 samples is 122 s regardless of a 1200 s hold. Three run lists have specified
+  a hold the capture could not reach. See KNOWN_BUGS.md.
+* **A fixed `block_seed` does not pin the pixel set.** The selection starts from the
+  fast scan's alive mask, so one pixel crossing the alive threshold between runs
+  changes the picks: two identical commands 16 min apart shared 3 of 4 pixels. No
+  measurement is wrong, but a re-run that looks like a repeat may be comparing a
+  different pixel.
+
+## What the numbers carry
+
+Anyone quoting an absolute EQE from this rig should know the error budget, because
+most of it is systematic rather than noise:
+
+| source | size | cancels in EQE? |
+|---|---|---|
+| the optical floor at the faint end | 8.5–8.9 % below ~1 nW | no — it is the limit |
+| cross-day drift | ~2 %/day | no |
+| the leakage reference gap | -2.16 % at -0.80 V, <0.1 % above -1.0 V | no |
+| which run of a session it is | 0.37 % on current **and** light | **yes**, to 0.006 % |
+| the sweep direction | ±0.26 % | no — run both to remove it |
+| the frame-switch wait at 2 s | +0.50 % high | no |
+| the same command repeated, 16 min apart | 0.14 % current, 0.25 % light | — |
+
+The full derivation of every row is in the investigation report, which is
+confidential and lives on the measurement machine only.

@@ -79,14 +79,47 @@ def dwell_slopes(tag):
     return out
 
 
-def merged():
-    lo, hi = sweep("dir_lo2hi"), sweep("dir_hi2lo")
+def merged(lo_tag="dir_lo2hi", hi_tag="dir_hi2lo", hi_starts_later_min=16.0):
+    """``low_to_high`` minus ``high_to_low``, matched on pixel and bias.
+
+    ``hi_starts_later_min`` is signed: +16 when high_to_low ran second (pair A,
+    11:13 then 11:29), -16 when it ran first (pair B, 12:21 then 12:37). It only
+    feeds ``gap_min``, and that sign is the whole point of the control -- the
+    elapsed-time axis reverses while the direction axis does not.
+    """
+    lo, hi = sweep(lo_tag), sweep(hi_tag)
     m = lo.merge(hi, on=["X", "Y", "NVLED_V"], suffixes=("_lo", "_hi"))
     for a, b in (("I", "dI"), ("P", "dP"), ("EQE", "dE")):
         m[b] = 100 * (m[f"{a}_lo"] / m[f"{a}_hi"] - 1)
-    # 16 min between the two run starts; TIME_START is per-run seconds
-    m["gap_min"] = (m.TIME_START_hi + 16 * 60.0 - m.TIME_START_lo) / 60.0
+    # TIME_START is per-run seconds, so the run-start offset has to be added back
+    m["gap_min"] = (m.TIME_START_hi + hi_starts_later_min * 60.0
+                    - m.TIME_START_lo) / 60.0
     return lo, hi, m
+
+
+def band_means(m):
+    """``{channel: mean % over the band}``, one number per channel."""
+    b = m[(m.NVLED_V >= BAND[0]) & (m.NVLED_V <= BAND[1])]
+    g = b.groupby(b.NVLED_V.round(3))[["dI", "dP", "dE"]].mean()
+    return {c: float(g[c].mean()) for c in ("dI", "dP", "dE")}, g
+
+
+def decompose(a, b):
+    """Split pair A and pair B into direction D and run-order T, per channel.
+
+    Each pair measures ``D + s*T`` with ``s = +1`` when low_to_high ran first and
+    ``s = -1`` when it ran second. Two equations, two unknowns:
+
+        D = (A + B) / 2     the part that does NOT care which run came first
+        T = (A - B) / 2     the part that does, and it is what section 23 could
+                            not separate from D
+
+    Nothing here is a fit. It is the only linear split two sequences allow, and
+    its one free prediction -- ``D_P - D_I`` must equal ``D_EQE``, because
+    EQE = P/I -- is checked in ``demo()``.
+    """
+    return {c: {"A": a[c], "B": b[c], "D": (a[c] + b[c]) / 2,
+                "T": (a[c] - b[c]) / 2} for c in ("dI", "dP", "dE")}
 
 
 def panel_ab(ax, m):
@@ -188,17 +221,20 @@ def panel_dwell(ax):
             label="high_to_low")
     ax.axhline(0, color="k", lw=0.8)
     ax.set_yscale("symlog", linthresh=0.1, linscale=0.8)
-    ax.annotate("low_to_high's FIRST bias of the whole sweep:\n"
-                "+4.0 % per dwell, 3x any other point.\n"
-                "Its faintest point is also its coldest.",
-                xy=(-0.80, DWELL_S * lo[-0.8]), xytext=(-1.27, 2.3), fontsize=6.5,
-                color="C0", arrowprops=dict(arrowstyle="->", color="C0", lw=0.9))
+    # WITHDRAWN by the reverse-sequence control (section 24). This single point
+    # reads +4.0 %/dwell here and -1.0 %/dwell in pair B, so it is noise on one
+    # 0.21 nW trace, not an asymmetry. The ten-bias median does reproduce.
+    ax.annotate("low_to_high's FIRST bias: +4.0 % per dwell.\n"
+                "WITHDRAWN -- pair B reads -1.0 % here (section 24).",
+                xy=(-0.80, DWELL_S * lo[-0.8]), xytext=(-1.47, 2.3), fontsize=6.5,
+                color="0.35", arrowprops=dict(arrowstyle="->", color="0.6", lw=0.9))
     ax.set_ylim(-0.3, 7)
     ax.set_xlabel("NVLED bias [V]")
     ax.set_ylabel("residual drift over one 54.47 s dwell [%]")
     ax.set_title("D. section 4's premise is wrong: nothing approaches from above\n"
                  "both directions are STILL CLIMBING at the end of the dwell,\n"
-                 "and high_to_low climbs twice as fast", fontsize=9)
+                 "high_to_low 2.1x faster by median -- and that one reproduces",
+                 fontsize=9)
     ax.legend(fontsize=7, loc="lower left")
     ax.grid(alpha=0.3, which="both")
 

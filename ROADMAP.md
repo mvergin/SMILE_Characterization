@@ -10,8 +10,8 @@ Items 0 and 1 are done; the rest are proposals, not decisions.
 | 2 | merge the analysis repo in | yes | ~3 h | **done** |
 | 2b | `characterize_capacitance` into `measure_iqe` | **deferred, deliberately** | ~1 h | see below |
 | 3 | config: a local override for `base_dir` | yes — but **not** by auto-loading `standard.yaml` | ~1 h | **done** |
-| 4 | README | yes, after 1–3 | ~2 h | next |
-| 5 | cluster / strided scan | pursue — but not for the reason it was proposed | spike first | open |
+| 4 | README | yes, after 1–3 | ~2 h | **done** |
+| 5 | cluster / strided scan | pursue — but not for the reason it was proposed | spike first | next |
 | 6 | GUI | last | 1–2 days | open |
 
 ---
@@ -181,12 +181,51 @@ Two real defects in that file, independent of the above:
   bias costs under 0.5 %"*, *"measured need is under 1 s"*. This is the file a
   colleague is handed.
 
-## 4. README
+## 4. README — done, 16 October 2026
 
 1097 lines, and **zero mentions of `sweep_order` or `bias_major`** — the largest change
 of the last two days. `TODO.md` is 1071 lines. `RUN_PLAN.md`,
 `ULTRA_FAST_HW_TEST_PLAN.md` and `MEASUREMENT_MODES.md` all predate §13–§17. Stale docs
 are worse than missing ones. Do this after 1–3, so it is written once.
+
+### Done — and the audit was both better and worse than the item claimed
+
+**Better**: the config reference was not missing `sweep_order` alone. Checked against
+`IQEConfig` by field name, it documented **119 of 126** fields. The seven absent were
+exactly the ones §15–§21 added: `sweep_order`, `pixel_switch_settle_s`, `sweep_rotate`,
+`bias_major_precondition`, `leak_ref_tries`, `leak_ref_max_frac`, `calibration_source`.
+All seven are in now, with the measurement behind each, and the check is one line of
+Python rather than reading.
+
+**Worse**: `TODO.md`, `RUN_PLAN.md` and `ULTRA_FAST_HW_TEST_PLAN.md` had already gone in
+item 1, so the stale-docs problem was smaller than stated — but several statements in
+the README were not merely stale, they were **refuted**:
+
+* the two-repo diagram, the `../SMILE_IQE_Analysis` link and *"the two share no code"*,
+  all dead as of item 2, plus `python analyze_array.py` with the wrong path
+* *"`sweep_direction` — run both on the same pixels to gauge self-heating"*, written
+  before §23–§24 measured what the knob does, and before `validate()` made one of its
+  two values unusable with `dead_abort`
+* the 50 µF suspect list still blamed the capacitor for direction hysteresis, which
+  §24 refuted: direction moves the current by **-0.027 %**
+* *"is the low-J current actually LED current?"* still headed as an open question
+* `--calibration` precedence quoted without `configs/local.yaml`, which item 3 added
+  one commit earlier, and the gitignore rationale still described the `git archive`
+  share export instead of `git pull`
+
+**Not cut**: the ~550 lines of investigation narrative. The original plan was to delete
+it as superseded by the report — but the report left the repo the same day, so those
+sections are now the **only** account of the physics a reader of this repo gets. They
+were corrected and annotated instead of removed.
+
+**Added**: a `What the numbers carry` table, which is the thing a colleague actually
+needs — every known systematic, its size, and whether it cancels in EQE. The
+report had the derivations and nothing had the summary.
+
+Also updated in the same pass: `analysis/README.md` (still titled
+`# SMILE_IQE_Analysis`), and `KNOWN_BUGS.md`, where two open defects are now closed by
+§21 and §25 and one new one is recorded — `--switch-hold-s` is silently truncated by
+`--samples`, which has now cost three run lists.
 
 ## 5. The cluster / strided scan — right idea, wrong reason
 

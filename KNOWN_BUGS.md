@@ -1,7 +1,8 @@
 # Known bugs and open defects
 
-Last reviewed 16 October 2026. `§N` refers to `INVESTIGATION_REPORT.md` in the analysis
-repo, which is where the evidence for every "fixed" line below lives.
+Last reviewed 16 October 2026. `§N` refers to `INVESTIGATION_REPORT.md`, which holds the
+evidence for every "fixed" line below. That file is confidential and lives on the
+measurement machine only, not in this repo.
 
 ## Open
 
@@ -11,14 +12,27 @@ repo, which is where the evidence for every "fixed" line below lives.
   now verifies the reference optically and re-writes the frame up to `leak_ref_tries = 3`
   times. §19, open question 9. **Every run taken before 16 October 2026 carries the
   uncorrected rate**, so `REF_CONTAMINATED` stays in the analysis.
-* **The per-write frame failure rate is unknown.** Order a few percent, from the runs
-  above, but nothing has measured it properly or asked whether it depends on the pixel,
-  the bitval or the array position. `LEAK_REF_TRIES` now records it on every point.
-* **The backplane leakage has never been recorded as a time series.** Every leakage
-  number in the report is a settled burst. Flat from 10 min to 7 h when reconstructed
-  from run 261015-0015, unmeasured from one burst to 10 min, and the within-burst SEM is
-  1.6 % of the reference — which at −0.80 V is 0.9 % on `I_LED`. `--switch-to-bitval 0`
-  records it. §19 Q5, open question 15.
+* ~~**The per-write frame failure rate is unknown.**~~ **Bounded** (§21, runs 261016-0855
+  and -0911): **0 retries in 128 bitval-0 writes**, which is a 2.3 % upper bound by the
+  rule of three. Still unknown is whether it depends on the pixel, the bitval or the
+  array position — a 2.3 % ceiling on an unconditional rate does not rule out a bad
+  pixel. `LEAK_REF_TRIES` records it on every point, so the answer accumulates for free.
+* ~~**The backplane leakage has never been recorded as a time series.**~~ **Recorded, and
+  it is uneventful** (§20, §21, §25). `--switch-to-bitval 0` gives it directly: settled
+  within 1 s of the frame change, then flat and white out to 122 s with no oscillation,
+  at 270.7 ± 1.6 nA on the 1e-5 range. What the records found instead is the item below —
+  the 2 s reference the sweep actually uses reads ~1.6 % below a long trace at the same
+  bias, which costs `I_LED` 2.16 % at −0.80 V. §19 Q5, open questions 15 and 16.
+* **A `--switch-hold-s` longer than the sample count can cover is silently truncated.**
+  `characterize_capacitance.py --what switch` holds for the time asked but captures only
+  `--samples` points, and at NPLC 1.0 a sample costs 40.7 ms — so `--samples 3000` stops
+  at 122 s whatever the hold says. Run 261016-1253 asked for 1200 s and got 122 s, and
+  this is the **third** run list to specify a hold the capture could not reach (§20, §21,
+  §25). The tool should refuse the combination, or size the capture from the hold. Until
+  it does, size the capture from the measured per-sample cost rather than from NPLC
+  alone: 40.7 ms at NPLC 1.0 and 1.06 ms at NPLC 0.01, which is not a linear scaling
+  because of fixed per-sample overhead. A 1200 s record at NPLC 1.0 needs ~29500
+  samples.
 * **A blanked frame conducts ~4× more than an addressed pixel at bitval 0.** Reproducible
   across 12 pixels and two experiments, worked around (the reference is the *addressed*
   pixel, never a blank frame) but not understood. §6, open question 2.
