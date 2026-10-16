@@ -239,3 +239,10 @@ configs/local.yaml
 # every commit with git filter-branch. No leading slash, so this matches the file
 # at any depth -- analysis/, the root, anywhere.
 INVESTIGATION_REPORT.md
+
+# Real run data from the bench. caprun/ was tracked from 14 to 16 October 2026 and
+# is still in this repo's public history by decision -- it is NOT purged. From here
+# on it is untracked: new runs never enter git. make_capacitance_figures.py reads it
+# from disk, so a fresh clone cannot rebuild the investigation figures. That is the
+# intended trade: see ROADMAP.md, "Measurement data must not live under the repo root".
+caprun/

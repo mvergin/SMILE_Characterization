@@ -116,10 +116,20 @@ Fixed:
 Treat the content as disclosed: GitHub keeps unreachable objects fetchable by SHA until
 its own GC, and forks or crawlers are not rewritten at all.
 
-**Still exposed and not part of this fix: `caprun/` is tracked** — real Array38 run
-data, 24 files, CSVs plus `REPORT.md` plus eight PNGs, committed `b68295e` on
-14 October, before any of this. If measured device data is confidential then this is the
-same leak with an older date. It needs a decision, not a guess (open question below).
+`caprun/` was raised at the same time — real Array38 run data, 24 files, CSVs plus
+`REPORT.md` plus eight PNGs, committed `b68295e` on 14 October, before any of this.
+
+**Decided, 16 October 2026: leave the history, stop tracking it.** The old commits stay
+public on purpose. `git rm -r --cached caprun` plus a `.gitignore` rule means no further
+run ever enters git, which is the rule this file already states two paragraphs down.
+
+The cost is real and accepted: `make_capacitance_figures.py` reads `caprun/` off disk,
+so **a fresh clone cannot rebuild the investigation figures**. Only the bench machine
+can. The `tests/fixture/` data stays tracked — it is synthetic `FixtureArray` output the
+contract tests generate and compare, not device data.
+
+The old report blobs also stay fetchable on GitHub by commit SHA, verified: `main`
+returns 404, `072202d` returns 200. Accepted as well. The repo stays public.
 
 ### 2b. Moving `characterize_capacitance.py` — deferred, and this is the reason
 
