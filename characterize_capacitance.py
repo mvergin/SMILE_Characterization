@@ -483,6 +483,43 @@ def settling_metrics(t, i):
 #  per-pixel experiments
 # ----------------------------------------------------------------------
 
+def switch_deviation(t, i):
+    """``(worst_early_1s, tail, resolution)`` in amps, for the frame-switch question.
+
+    Both choices here were forced by run 261016-0726, and the old version got both
+    wrong (section 21):
+
+      * The reference is the record's TAIL, not the mean of every window after 2 s.
+        That trace still sits -0.11 % low at 60-90 s, so a "later" spanning the whole
+        record contains most of the transient and divides it out.
+      * The early number is the WORST one-second window of the first five, never their
+        average. At -0.80 V the trace spikes +0.49 % for half a second and then sits
+        at -0.56 % for seconds. Averaging across that sign change gives -0.02 % for
+        second one, and the old metric called a 16-sigma deficit FREE.
+
+    Returns ``(nan, nan, nan)`` when the record is too short to hold five early
+    seconds, a gap, and a tail that do not overlap.
+    """
+    nan = float("nan")
+    y = np.abs(np.asarray(i, float))
+    y = y[np.isfinite(y) & (y < OVERFLOW)]
+    if t.size < 9 or y.size < 9:
+        return nan, nan, nan
+    dt = float(np.median(np.diff(t))) or 1e-3
+    w = max(2, int(round(1.0 / dt)))
+    if y.size <= 12 * w:
+        return nan, nan, nan
+    n_tail = min(max(2 * w, y.size // 10), y.size - 6 * w)
+    tw = [y[k:k + w].mean() for k in range(y.size - n_tail, y.size - w + 1, w)]
+    if len(tw) < 3:
+        return nan, nan, nan
+    later = float(np.mean(tw))
+    res = float(np.std(tw, ddof=1))              # 1 s resolution, measured
+    early = [y[k:k + w].mean() for k in range(0, 5 * w, w)]
+    return float(max(early, key=lambda a: abs(a - later))), later, res
+
+
+
 def drain_errors(smu):
     """The SMU error queue as one string, empty when clean.
 
@@ -915,8 +952,9 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
         --what switch --highc --pixels 35,36 --switch-from 39 40
         --voltages -0.80 -1.05 -1.35 --switch-hold-s 300 --samples 3000 --nplc 1.0
 
-    Then read the trace against its last 20 s, not its last 2 s, and confirm the tail
-    is flat before believing any number taken from the head of it. It is NOT the next
+    ``switch_dev_pct`` is the worst of the first five seconds against the tail, which
+    is what run 261016-0726 showed the old "first second vs later" could not see.
+    Still confirm ``tail_drift_frac`` is small before believing it. It is NOT the next
     experiment to run -- section 17 names two sweep runs that are, and both measure the
     LED's own current and light rather than the total cathode current.
     """
@@ -972,17 +1010,7 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
         # the FIRST second against the spread of every later second. That spread
         # already contains the correlated low-frequency noise an N**-0.5 estimate
         # throws away, so it is the error bar this question has to clear.
-        first = later = res = nan
-        ib_a = np.abs(np.asarray(ib, float))
-        if t.size > 8:
-            dt = float(np.median(np.diff(t))) or 1e-3
-            w = max(2, int(round(1.0 / dt)))
-            if ib_a.size > 3 * w:
-                wins = [ib_a[k:k + w].mean() for k in range(2 * w, ib_a.size - w, w)]
-                if len(wins) > 2:
-                    first = float(ib_a[:w].mean())
-                    later = float(np.mean(wins))
-                    res = float(np.std(wins, ddof=1))        # 1 s resolution, measured
+        first, later, res = switch_deviation(t, ib)
         dev = 100.0 * (first / later - 1.0) if later else nan
         res_pct = 100.0 * res / later if later else nan
         sigma = (first - later) / res if res else nan
@@ -1001,12 +1029,12 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
             verdict = (f"FREE to within what this can see "
                        f"(<{max(abs(dev), 2 * res_pct):.1f}%)")
         elif abs(dev) < 1.0:
-            verdict = f"real but small: {dev:+.2f}% in the first second"
+            verdict = f"real but small: {dev:+.2f}% in the worst early second"
         else:
             verdict = f"COSTS {abs(dev):.1f}% -- the pixel owns part of the dwell"
         log(f"    {v:+.3f} V  ({fx},{fy}) -> ({x},{y})  "
             f"I={met['settled']*1e9:+9.1f} nA  "
-            f"first 1s {dev:+.2f}% vs later ({res_pct:.2f}% resolution, "
+            f"worst early 1s {dev:+.2f}% vs tail ({res_pct:.2f}% resolution, "
             f"{sigma:+.1f} sigma)  rec={t[-1] if t.size else 0:.1f}s")
         log(f"            << {verdict}")
         if not cfg.highc_b:
