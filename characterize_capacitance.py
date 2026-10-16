@@ -73,6 +73,7 @@ import csv
 import dataclasses
 import datetime
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -319,6 +320,51 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
             np.asarray(ia[:n], float), np.asarray(ib[:n], float))
 
 
+class PowerTrace:
+    """``P(t)`` on a background thread, started at the perturbation instant.
+
+    The SMU burst is one blocking VISA read — ``capture_step`` cannot poll anything
+    while it runs — so a second thread on the power meter is the only way to get
+    ``P(t)`` beside ``I(t)``. The two instruments are separate VISA resources, which is
+    the case PyVISA is thread-safe for.
+
+    Host time, not the instrument clock. The two clocks cannot be aligned better than
+    the poll period in any case, and both records start at the same event: ``start()``
+    is called from inside the trigger, so t = 0 is the frame change for both.
+
+    Expect ~30-80 Hz against the SMU's 24.6 Hz at NPLC 1.0, so the optical record is
+    the denser of the two. It is not synchronous with it: do not divide them
+    sample-by-sample, bin both onto a common grid first.
+    """
+
+    def __init__(self, pm, n=1):
+        self.pm, self.n, self.rows = pm, int(n), []
+        self._stop = threading.Event()
+        self._th = None
+
+    def start(self):
+        t0 = time.perf_counter()
+
+        def run():
+            while not self._stop.is_set():
+                try:
+                    power, _ = read_power(self.pm, self.n)
+                except Exception:
+                    return          # a dead meter must not take the current trace too
+                self.rows.append((time.perf_counter() - t0, power))
+
+        self._th = threading.Thread(target=run, daemon=True)
+        self._th.start()
+
+    def stop(self):
+        """``(t, P)``. Empty arrays if it never started or the meter failed."""
+        self._stop.set()
+        if self._th is not None:
+            self._th.join(timeout=2.0)
+        return (np.array([r[0] for r in self.rows], float),
+                np.array([r[1] for r in self.rows], float))
+
+
 def keep_trace(tag, t, ia, ib, n_max):
     """Stash one trace for the run's traces.npz, and return its spectrum summary."""
     spec = spectrum_summary(t, np.abs(ib))
@@ -335,6 +381,16 @@ def keep_trace(tag, t, ia, ib, n_max):
 # unchanged; this is a script, not a library.
 # ponytail: global collector, pass a sink explicitly if this ever grows a second caller.
 _TRACES: list = []
+# P(t) records, kept apart from _TRACES because they are on the host clock at their own
+# rate. They land in the same traces.npz under a "pm_" prefix so one file still holds
+# everything a run measured.
+_PTRACES: list = []
+
+
+def keep_power_trace(tag, t, p):
+    """Stash one ``P(t)`` beside the current trace of the same tag."""
+    if t.size:
+        _PTRACES.append((tag, t.astype(np.float32), p.astype(np.float32)))
 
 
 def spectrum_summary(t, i, mains_hz=50.0, tail_frac=0.5):
@@ -979,9 +1035,17 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
         to_bv = cfg.bitvals[0] if args.switch_to_bitval is None \
             else args.switch_to_bitval
 
+        # The optical channel, if asked for. §19's Q4 could not answer "does the light
+        # follow the current through a frame change" because only the dwell had P(t).
+        # Starting the poller from inside the trigger puts both records' t = 0 on the
+        # same event.
+        ptrace = PowerTrace(pm, args.switch_n_pm) if args.switch_n_pm else None
+
         def _switch(_x=x, _y=y, _b=to_bv):
             smile.blank_frame()
             smile.set_pixel(_x, _y, _b)
+            if ptrace is not None:
+                ptrace.start()
 
         # v_from == v_to: the bias never moves, so the pre-settle is the only wait and
         # the trigger is the frame change.
@@ -996,9 +1060,17 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
                                  switch_settle_s=args.switch_settle_s,
                                  trigger=_switch)
         met = settling_metrics(t, np.abs(ib))
-        spec = keep_trace(f"switch_hc{int(cfg.highc_b)}_v{v:+.3f}"
-                          f"_{fx}-{fy}to{x}-{y}_b{to_bv}",
-                          t, ia, ib, args.trace_points)
+        tag = (f"switch_hc{int(cfg.highc_b)}_v{v:+.3f}"
+               f"_{fx}-{fy}to{x}-{y}_b{to_bv}")
+        spec = keep_trace(tag, t, ia, ib, args.trace_points)
+        p_t = p_p = np.array([])
+        if ptrace is not None:
+            p_t, p_p = ptrace.stop()
+            keep_power_trace(tag, p_t, p_p)
+            if p_t.size > 2 and log:
+                log(f"      P(t): {p_t.size} samples over {p_t[-1]:.1f}s "
+                    f"({p_t.size / max(p_t[-1], 1e-9):.1f} Hz vs the SMU's "
+                    f"{t.size / max(t[-1], 1e-9) if t.size else 0:.1f} Hz)")
         nan = float("nan")
         p_lit, p_std = read_power(pm, args.step_n_pm) if args.step_n_pm else (nan, nan)
 
@@ -1256,6 +1328,15 @@ def build_parser():
                          "1%% at -0.80 V: hold less and the capture times the BIAS "
                          "settling, which is the thing being controlled for. At 300 s "
                          "the residual bias drift is ~0.1%% over a 20 s record.")
+    ap.add_argument("--switch-n-pm", type=int, default=0,
+                    help="switch: PM reads per optical sample, ON A BACKGROUND THREAD, "
+                         "starting at the frame change. 0 (default) records current "
+                         "only, which is every switch run before 16 October 2026. Pass "
+                         "1 for the fastest P(t) (~30-80 Hz, denser than the SMU at "
+                         "NPLC 1.0) or 4 to trade rate for a lower optical floor. The "
+                         "records are NOT synchronous: bin both onto a common grid "
+                         "before dividing them. Answers whether the light follows the "
+                         "current through a frame change (section 19, Q4).")
     ap.add_argument("--stepdir-target", type=float, default=-0.85)
     ap.add_argument("--stepdir-from", nargs="+", type=float, default=[-0.8, -1.0, -1.3, -2.6])
     ap.add_argument("--decay-from", type=float, default=-1.3,
@@ -1406,13 +1487,20 @@ def main(argv=None):
         # Writing in the finally is the point: previously an exception here skipped
         # the writes entirely and a run that died partway lost every completed row.
         log("=" * 56)
-        if _TRACES:
+        if _TRACES or _PTRACES:
             npz = out_dir / "traces.npz"
+            # Current traces are (t, I_A, I_B) on the instrument clock. Power traces are
+            # (t, P) on the host clock at their own rate, so they cannot share a key:
+            # the "pm_" prefix keeps one file per run without pretending they align.
             np.savez_compressed(npz, **{
                 f"{i:03d}_{tag}_{k}": np.vstack([t, ia, ib])
-                for i, (tag, t, ia, ib, k) in enumerate(_TRACES)})
-            log(f"wrote {npz} ({len(_TRACES)} traces, "
-                f"{npz.stat().st_size / 1e6:.1f} MB)")
+                for i, (tag, t, ia, ib, k) in enumerate(_TRACES)
+            }, **{
+                f"pm_{i:03d}_{tag}": np.vstack([t, p])
+                for i, (tag, t, p) in enumerate(_PTRACES)})
+            log(f"wrote {npz} ({len(_TRACES)} traces"
+                + (f" + {len(_PTRACES)} P(t)" if _PTRACES else "")
+                + f", {npz.stat().st_size / 1e6:.1f} MB)")
         wrote = [p for p in (write_csv(out_dir, n, r) for n, r in collected.items()) if p]
         for p in wrote:
             log(f"wrote {p}")

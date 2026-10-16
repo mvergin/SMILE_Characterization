@@ -94,6 +94,47 @@ def test_real_run_reproduces_section_21():
         assert abs(dev) > 5 * 100 * res / later, f"{k}: {dev:+.3f}% inside the noise"
 
 
+def test_power_trace_starts_at_the_trigger_and_survives_a_dead_meter():
+    """PowerTrace runs while the SMU burst blocks the main thread. Two promises:
+    t = 0 is the start() call, and a meter that throws kills the thread, not the run.
+    """
+    import time
+
+    from characterize_capacitance import PowerTrace
+
+    class FakePM:
+        def __init__(self, fail_after=None):
+            self.n, self.fail_after = 0, fail_after
+
+        def measure(self):
+            self.n += 1
+            if self.fail_after is not None and self.n > self.fail_after:
+                raise RuntimeError("meter went away")
+            return 5e-8
+
+    pt = PowerTrace(FakePM(), n=1)
+    pt.start()
+    time.sleep(0.25)                       # stands in for the blocking burst
+    t, pw = pt.stop()
+    assert t.size > 10, f"only {t.size} optical samples in 0.25 s"
+    assert t.size == pw.size, "t and P must come back the same length"
+    # Windows rounds a short sleep to the ~15.6 ms timer tick, so the bound is loose:
+    # it only has to prove t=0 is start() and not the top of the record.
+    assert t[0] < 0.05, f"first sample at t={t[0]:.4f}s: start() must be t=0"
+    assert np.allclose(pw, 5e-8), "the readings must come through untouched"
+    assert np.all(np.diff(t) > 0), "the host clock must be monotone"
+
+    # a meter that dies mid-record returns what it had, and raises nothing
+    pt = PowerTrace(FakePM(fail_after=5), n=1)
+    pt.start()
+    time.sleep(0.15)
+    t, pw = pt.stop()
+    assert t.size == 5, f"kept {t.size} samples, expected the 5 before the failure"
+
+    # never started: empty, not an exception
+    assert PowerTrace(FakePM()).stop()[0].size == 0
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
