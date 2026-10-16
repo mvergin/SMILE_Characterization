@@ -152,7 +152,16 @@ Builds all twelve figures for **`INVESTIGATION_REPORT.md`**, which is
 **confidential and deliberately not in this repo** -- it lives only on the
 measurement machine, at `C:\_D\programs\SMILE_IQE_Analysis\`. The root
 `.gitignore` blocks the filename at any depth so it cannot be committed again.
-The figures are gitignored too (`*_report/`).
+
+The figures are gitignored too (`*_report/`), and on the bench machine
+`analysis/investigation_report/` is a **directory junction** to the report's own
+folder, so a script run from the repo writes its figure straight to where the
+report links it. Recreate it after a fresh clone, or the report loses new figures
+without saying so:
+
+```
+mklink /J analysis\investigation_report C:\_D\programs\SMILE_IQE_Analysis\investigation_report
+```
 
 This script reads the `charatests/` and `caprun/` runs **off the bench machine's
 disk**. Neither is tracked, so this script only runs where the data was measured. It
