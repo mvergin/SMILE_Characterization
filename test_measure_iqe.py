@@ -62,7 +62,7 @@ def test_config_rejects_bad_input():
                 # bitval 1 is 11.6% of bitval 15 at -2.60 V (run 261015-2326, section 20)
                 dict(leak_ref_bitval=1, leak_ref_tries=3),
                 # the dead-pixel test runs at bias index 0, which low_to_high makes the
-                # FAINTEST: 0.21 nW against a 2.0 nW floor drops every pixel (section 22)
+                # FAINTEST: 0.21 nW against a 2.0 nW floor drops every pixel (section 23)
                 dict(sweep_direction="low_to_high", dead_abort=True)):
         try:
             IQEConfig(**bad).validate()

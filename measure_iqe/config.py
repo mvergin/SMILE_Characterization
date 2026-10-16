@@ -185,7 +185,7 @@ class IQEConfig:
     #     low_to_high makes the faintest, and validate() refuses the combination.
     #   * no low_to_high sweep exists on disk since June 2026 (Array38, before the
     #     leakage reference and before the settle times were measured). The direction has
-    #     never been compared under the current method. Section 22.
+    #     never been compared under the current method. Section 23.
     sweep_direction: str = "high_to_low"  # "low_to_high" | "high_to_low"
 
     # ── Pixel warm-up / conditioning ────────────────────────────────────
@@ -689,7 +689,7 @@ class IQEConfig:
         # Array42 reads 0.21 nW at -0.80 V against dead_abort_nw = 2.0 (runs 261016-0855
         # and -0911), so the absolute floor would drop every pixel at the first bias and
         # the run would return nothing. This is why no low_to_high sweep exists on disk
-        # since June 2026. Section 22.
+        # since June 2026. Section 23.
         if self.sweep_direction == "low_to_high" and self.dead_abort:
             raise ValueError(
                 "sweep_direction=low_to_high with dead_abort=True: the dead-pixel test "
