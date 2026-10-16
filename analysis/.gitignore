@@ -1,0 +1,31 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[codz]
+*$py.class
+
+# Environments
+.venv/
+venv/
+.env
+
+# Measurement data: runs live outside the repo. tests/fixture/ is the ONE
+# committed run (the format contract) and is deliberately not ignored.
+results/
+results_georg/
+runs/
+*.zip
+
+# Generated reports
+REPORT_assets/
+benchmark_report/
+investigation_report/
+*_report/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+*.stackdump
+
+# presentation slides (local only)
+slides/
