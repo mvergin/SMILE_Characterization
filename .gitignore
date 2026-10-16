@@ -232,3 +232,10 @@ caprun/
 # ROADMAP item 3: per-machine overrides, above all base_dir. Deliberately untracked:
 # a run must never depend on an uncommitted edit to a file git thinks is clean.
 configs/local.yaml
+
+# The investigation report is confidential and stays OUT of this repo, on the
+# measurement machine only (C:\_D\programs\SMILE_IQE_Analysis). It was pushed by
+# accident on 16 October 2026 by the analysis-repo subtree merge and purged from
+# every commit with git filter-branch. No leading slash, so this matches the file
+# at any depth -- analysis/, the root, anywhere.
+INVESTIGATION_REPORT.md

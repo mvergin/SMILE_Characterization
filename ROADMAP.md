@@ -49,6 +49,7 @@ It is already biting us:
 * `RUN_FORMAT.md` exists in both repos and is kept byte-identical **by hand** — the
   report audit checks its md5 every time.
 * The analysis repo has **no git remote**. The entire investigation lives on one disk.
+  **This second reason was wrong, and acting on it caused an incident — see below.**
 
 Proposed shape:
 
@@ -90,6 +91,35 @@ What the merge fixed, beyond one remote and one history:
   `requirements.txt`, `uv.lock` and `.python-version`. The dependency delta was exactly
   one package, so `scipy` became an `analysis` extra. `analysis/.gitignore` **stays** —
   git honours nested ignores and it is what keeps 11 MB of figures out.
+
+### The incident, 16 October 2026 — the report is confidential and was pushed
+
+The merge put `INVESTIGATION_REPORT.md` on a **public** GitHub repo. It was never
+supposed to leave the measurement machine. The commit message that shipped it reads
+*"one repo, with the analysis history intact"* — the history was exactly the problem,
+because the subtree carried **15 revisions** of the report, not one.
+
+What the second bullet above got wrong: *"the entire investigation lives on one disk"*
+was read as a backup problem to solve with a remote. For the report it is not a
+problem, it is the **requirement**. Only the scripts needed the remote.
+
+Fixed:
+
+* `git filter-branch --index-filter` over `--all`, removing both paths the file ever
+  had (`INVESTIGATION_REPORT.md` in the 47 imported commits, `analysis/` after the
+  merge). 134 commits rewritten, every SHA from the subtree add onward changed.
+* the root `.gitignore` blocks the bare filename, so it matches at **any** depth. One
+  rule, not one per directory.
+* `analysis/README.md` now says where the report actually lives instead of linking it.
+
+**A rewrite is not an un-publish.** The repo was public while the report was on it.
+Treat the content as disclosed: GitHub keeps unreachable objects fetchable by SHA until
+its own GC, and forks or crawlers are not rewritten at all.
+
+**Still exposed and not part of this fix: `caprun/` is tracked** — real Array38 run
+data, 24 files, CSVs plus `REPORT.md` plus eight PNGs, committed `b68295e` on
+14 October, before any of this. If measured device data is confidential then this is the
+same leak with an older date. It needs a decision, not a guess (open question below).
 
 ### 2b. Moving `characterize_capacitance.py` — deferred, and this is the reason
 

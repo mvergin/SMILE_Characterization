@@ -148,8 +148,13 @@ as a second measurement of the LED.
 python make_capacitance_figures.py ../SMILE_Characterization
 ```
 
-Builds all twelve figures for **[INVESTIGATION_REPORT.md](INVESTIGATION_REPORT.md)**
-from the `charatests/` and `caprun/` runs in the measurement repo, and prints the
+Builds all twelve figures for **`INVESTIGATION_REPORT.md`**, which is
+**confidential and deliberately not in this repo** -- it lives only on the
+measurement machine, at `C:\_D\programs\SMILE_IQE_Analysis\`. The root
+`.gitignore` blocks the filename at any depth so it cannot be committed again.
+The figures are gitignored too (`*_report/`).
+
+This script reads the `charatests/` and `caprun/` runs in the measurement repo, and prints the
 numbers it plotted so the report text cannot drift from the data. Read the report
 first if you are wondering why the sweep settles for seconds, why High-C is
 mandatory, or why every rising-side EQE before 261014 is unusable.
