@@ -57,12 +57,17 @@ def test_config_defaults_are_valid():
 def test_config_rejects_bad_input():
     for bad in (dict(source_mode="sideways"), dict(roi="NOWHERE"), dict(bitvals=()),
                 dict(vramp_low_frac=2.0), dict(n_fine=1), dict(pixel_area_um2=0),
-                dict(roi=(0, 0, 999, 3)), dict(bitvals=(99,)), dict(nvled_range_i=0.003)):
+                dict(roi=(0, 0, 999, 3)), dict(bitvals=(99,)), dict(nvled_range_i=0.003),
+                # the retry gate is optical, and a non-zero reference bitval emits:
+                # bitval 1 is 11.6% of bitval 15 at -2.60 V (run 261015-2326, section 20)
+                dict(leak_ref_bitval=1, leak_ref_tries=3)):
         try:
             IQEConfig(**bad).validate()
         except ValueError:
             continue
         raise AssertionError(f"{bad} should not validate")
+    # ... but a non-zero reference bitval is fine as long as nothing retries on it
+    IQEConfig(leak_ref_bitval=1, leak_ref_tries=1).validate()
     try:
         IQEConfig.from_dict({"not_a_field": 1})
     except ValueError as exc:

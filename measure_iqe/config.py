@@ -561,6 +561,8 @@ class IQEConfig:
                              #
                              # Cost is nil: ~1% of points fail, and only those retry.
                              # Set to 1 to reproduce runs taken before this existed.
+                             # Requires leak_ref_bitval == 0: the gate is optical, and
+                             # bitval 1 emits 11.6% of bitval 15 (section 20).
     leak_ref_max_frac: float = 0.25  # retry while PM400_POWER_REF / PM400_POWER_MEAN
                              # exceeds this. The gate is OPTICAL on purpose: a healthy
                              # backplane conducts 58% of the reading at -0.80 V but does
@@ -661,6 +663,17 @@ class IQEConfig:
             raise ValueError(
                 f"leak_ref_bitval={self.leak_ref_bitval} is also a swept bitval: the reference "
                 "must be a drive level the sweep does not measure as signal.")
+        # The retry's gate is the OPTICAL ratio, so it only means "the write did not
+        # land" when the reference is DARK. Run 261015-2326 referenced at bitval 1 and
+        # found it emits 17.4 nW, 11.6% of bitval 15 at -2.60 V and 84% of it at
+        # -0.80 V: the gate fired on 33 of 64 points and burned 66 frame writes on a
+        # pixel doing exactly what it was told. Section 20.
+        if self.leak_reference and self.leak_ref_tries > 1 and self.leak_ref_bitval != 0:
+            raise ValueError(
+                f"leak_ref_tries={self.leak_ref_tries} with leak_ref_bitval="
+                f"{self.leak_ref_bitval}: the retry gate is optical and a non-zero "
+                "reference bitval EMITS, so every point would retry to the limit. Set "
+                "leak_ref_tries=1, or reference at bitval 0.")
         if not 0.0 <= self.vramp_low_frac <= 1.0:
             raise ValueError(f"vramp_low_frac={self.vramp_low_frac} must be in [0, 1]")
         # Measured 261013: in High-C the LIMIT selects the current measure range, so a
