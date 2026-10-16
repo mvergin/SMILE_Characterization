@@ -96,11 +96,19 @@ def test_config_roundtrips_through_a_file():
 
 
 def test_example_config_matches_the_defaults():
-    """configs/standard.yaml is documentation — it must stay loadable and in sync."""
+    """configs/standard.yaml is documentation — it must stay loadable and in sync.
+
+    Values AND keys. Comparing only the loaded config against the defaults lets a
+    MISSING key pass, because from_dict falls back to the default for anything absent:
+    `sweep_rotate` and `bias_major_precondition` were both added without this test
+    noticing. ROADMAP item 3.
+    """
     example = Path(__file__).parent / "configs" / "standard.yaml"
     if not example.exists():
         return
     try:
+        import yaml
+        raw = yaml.safe_load(example.read_text(encoding="utf-8")) or {}
         loaded = IQEConfig.from_file(example)
     except ImportError:
         return                                             # PyYAML not installed
@@ -109,6 +117,15 @@ def test_example_config_matches_the_defaults():
         "COPY of the defaults, not the source of them: editing it changes nothing at "
         "runtime. To change a default, edit measure_iqe/config.py; for one array use "
         "--array NAME; for one run use --set.")
+    want = {f.name for f in dataclasses.fields(IQEConfig)}
+    missing, extra = sorted(want - set(raw)), sorted(set(raw) - want)
+    assert not missing, (
+        f"configs/standard.yaml is MISSING {len(missing)} field(s): {missing}. A missing "
+        "key silently inherits the default and the equality check above cannot see it, "
+        "which is how sweep_rotate and bias_major_precondition got in unannotated. That "
+        "file is what a colleague is handed: every field belongs in it, with a comment.")
+    assert not extra, (
+        f"configs/standard.yaml has {len(extra)} field(s) IQEConfig does not: {extra}")
 
 
 def test_config_coerces_and_rejects_value_types():
@@ -813,6 +830,72 @@ def test_completed_biases_finds_whole_biases_not_whole_pixels():
             "completed_pixels no longer over-reports on a bias_major file; re-check "
             "whether _sweep_bias_major still needs completed_biases")
         assert completed_biases(tmp) != set(px), "the two must not be interchangeable"
+
+def test_local_config_overrides_a_shared_one_but_not_the_command_line():
+    """ROADMAP item 3. configs/local.yaml describes THIS MACHINE, so it outranks a
+    config file shared between machines -- but never --set or --out, which are typed
+    per invocation. And every key it applies has to be logged, or it is the same
+    invisible-override problem item 0 was about.
+    """
+    import measure_iqe.cli as cli
+    from measure_iqe.cli import build_config, build_parser
+
+    lines = []
+    real = cli.local_overrides
+
+    def fake(log=None, data=None):
+        if log and data:
+            log(f"applied {cli.LOCAL_CONFIG}: {', '.join(sorted(data))}")
+        return dict(data or {})
+
+    try:
+        # absent: nothing applied, nothing logged
+        cli.local_overrides = lambda log=None: fake(log, None)
+        cfg = build_config(build_parser().parse_args([]), lines.append)
+        assert cfg.base_dir == IQEConfig().base_dir
+        assert not lines, f"an absent local.yaml must log nothing, logged {lines}"
+
+        # present: it wins over the defaults AND announces itself
+        cli.local_overrides = lambda log=None: fake(log, {"base_dir": "D:/runs",
+                                                          "n_fine": 7})
+        cfg = build_config(build_parser().parse_args([]), lines.append)
+        assert cfg.base_dir == "D:/runs" and cfg.n_fine == 7, cfg.base_dir
+        assert any("local.yaml" in x and "base_dir" in x and "n_fine" in x
+                   for x in lines), f"every applied key must be named in the log: {lines}"
+
+        # --out and --set are typed for THIS run, so they outrank it
+        args = build_parser().parse_args(["--out", "E:/here", "--set", "n_fine=9"])
+        cfg = build_config(args, lines.append)
+        assert cfg.base_dir == "E:/here", "--out must beat local.yaml"
+        assert cfg.n_fine == 9, "--set must beat local.yaml"
+
+        # ... and a config file shared between machines must NOT put this machine's
+        # runs where they do not exist, so local.yaml outranks --config
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp) / "shared.json"
+            shared.write_text(json.dumps({"base_dir": "/somebody/elses/disk",
+                                          "n_fine": 21}), encoding="utf-8")
+            args = build_parser().parse_args(["--config", str(shared)])
+            cfg = build_config(args, lines.append)
+            assert cfg.base_dir == "D:/runs", "local.yaml must beat --config on paths"
+            assert cfg.n_fine == 7, "local.yaml wins where both set a key"
+    finally:
+        cli.local_overrides = real
+
+    # the real loader, on a real file, through the real path
+    with tempfile.TemporaryDirectory() as tmp:
+        f = Path(tmp) / "local.yaml"
+        f.write_text("base_dir: Z:/elsewhere\n", encoding="utf-8")
+        try:
+            import yaml
+        except ImportError:
+            return
+        assert yaml.safe_load(f.read_text(encoding="utf-8")) == {
+            "base_dir": "Z:/elsewhere"}, "the file format is plain partial YAML"
+        # a top-level list is a mistake worth naming, not a silent no-op
+        f.write_text("- base_dir\n", encoding="utf-8")
+        assert not isinstance(yaml.safe_load(f.read_text(encoding="utf-8")), dict)
+
 
 def test_array_flag_names_the_run_and_picks_up_its_calibration():
     """--array NAME must set sample_name AND apply that array's measured settings."""

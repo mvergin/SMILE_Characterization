@@ -228,3 +228,7 @@ calibrations/
 demo/
 demo_test/
 caprun/
+
+# ROADMAP item 3: per-machine overrides, above all base_dir. Deliberately untracked:
+# a run must never depend on an uncommitted edit to a file git thinks is clean.
+configs/local.yaml

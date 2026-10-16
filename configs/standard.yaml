@@ -214,8 +214,24 @@ resume: false              # --resume RUN_DIR sets this; skip the pixels a kille
 # reading at -0.95 V and 58% at -0.80 V. Without the subtraction the EQE appears to collapse 20x on the
 # rising side. The reference is the SAME pixel at bitval 0 -- a BLANKED frame draws ~4x MORE and is invalid.
 leak_reference: true
-leak_ref_bitval: 0        # addressed, but not driven
-leak_ref_settle_s: 2.0    # only the drive changes, not the bias
+leak_ref_bitval: 0        # addressed, but not driven. MUST be 0 when leak_ref_tries > 1:
+                          # the retry gate below is OPTICAL, and bitval 1 emits 11.6% of
+                          # bitval 15 at -2.60 V, so a non-zero reference would retry
+                          # every point to the limit. config.validate() refuses it.
+leak_ref_settle_s: 2.0    # only the drive changes, not the bias. Ample at both ends:
+                          # the leakage settles in 0.53 s at -0.85 V and shows no
+                          # transient at all at -1.30 or -1.80 V (sections 20, 21).
+leak_ref_tries: 3         # the FPGA drops the bitval-0 frame write intermittently, in
+                          # both directions, so the reference is verified optically and
+                          # the frame re-written up to this many times. Counted over 128
+                          # writes it has never fired: the 95% upper bound on the
+                          # per-write failure rate is 2.3% (section 21). Every run before
+                          # 16 October 2026 predates it and carries the uncorrected rate.
+leak_ref_max_frac: 0.25   # retry while P_REF / P_lit exceeds this. The margin is a BIAS
+                          # effect, not a write-failure one: the worst of 128 points was
+                          # 8.9% at -0.80 V, and that is P_lit falling to 0.22 nW rather
+                          # than P_REF rising. A sweep extended fainter trips this gate
+                          # on physics (section 21).
 
 # ---- Dead-pixel threshold (fast scan) ----
 nvled_v_fastscan: -1.35   # single fast-scan bias — does DOUBLE duty. At −1.35 V the pixels sit at J≈25 A/cm², ...
@@ -227,15 +243,43 @@ smu_display_off: false
 # ---- Derived / helpers ----
 
 # ---- Serialisation ----
+calibration_source: ""    # set BY the run, not by you: --array NAME fills it with the
+                          # calibrations/NAME.yaml that was applied, so the saved
+                          # *_config.json names the file that produced the run.
 
 # --- loop order (section 15) ------------------------------------------------------
 # WHICH LOOP IS OUTSIDE. The single biggest lever on run time.
 #   pixel_major  for pixel: for bias: settle, measure      (the original)
 #   bias_major   for bias:  settle once; for pixel: measure
 # The dwell is paid for the BIAS change, not the pixel change: one global 42.8 uF on the
-# common cathode, and the frame only picks the driven row/column. Measured 261014-2223:
-# a frame change at a held bias costs under 0.5% and is over at once, against the ~3.8%
-# a 54 s pixel-major dwell still leaves. 100 pixels x 30 points: 31.0 h -> 3.6 h.
+# common cathode, and the frame only picks the driven row/column. 100 pixels x 30
+# points: 31.0 h -> 3.6 h, and that part stands.
+#
+# The cost of the frame change itself was WRONG in this file until 16 October 2026. It
+# said "under 0.5% and is over at once" and "measured need is under 1 s", both from run
+# 261014-2223, which referenced a capture to its own still-moving 20 s tail and so could
+# not see anything slower than 20 s. What the 122 s records say (sections 20-22):
+#   * NPLC 0.01: -9.16% at 0-5 ms, ~200 ms to recover. A single NPLC 1.0 integration
+#     over that window reports -5.7% of it and the old 500-sample trace saw nothing.
+#   * NPLC 1.0: still -0.42 to -0.58% at 2 s at three biases, reaching 0.1% only at
+#     60-90 s. "Over at once" is false by four decades.
+#   * the LIGHT does not follow: at -1.05 V the current is 1.0% low at 0-0.5 s and the
+#     light is +0.03%. The fast part is NON-RADIATIVE, so EQE at 2 s reads +0.50% HIGH,
+#     not 0.5% low. Every earlier number here was a statement about the current only.
 sweep_order: pixel_major
-pixel_switch_settle_s: 2.0   # bias_major only: the wait after a frame change. Measured
-                             # need is under 1 s; 2 s leaves 0.21-0.33%.
+pixel_switch_settle_s: 2.0   # bias_major only: the wait after a frame change. Leave it
+                             # at 2 s -- not because the transient is over (it is not)
+                             # but because the part you would wait out is non-emissive:
+                             # 20 s buys 0.24 pp of current and 0.07 pp of EQE, at 10x
+                             # the switch cost. bias_major therefore carries a known
+                             # one-signed +0.5% EQE surplus on the faint side. Subtract
+                             # it, or use pixel_major (sections 17, 21, 22).
+sweep_rotate: 0              # rotate the MEASUREMENT ORDER by N, same pixels. Built to
+                             # test whether bias_major's slot 0 was special. It is not:
+                             # the clean pixel followed the PIXEL through the rotation
+                             # (section 17, run 261015-1225), which withdrew every
+                             # loop-position claim in section 15. Keep at 0.
+bias_major_precondition: false  # one conditioning pass at the brightest bias before the
+                             # first bias, to test whether a cold pixel reads low.
+                             # Measured: it changes nothing, -3.02% against -2.99%
+                             # (section 17, run 261015-1321). Keep false.

@@ -14,6 +14,7 @@ import argparse
 import dataclasses
 import json
 import sys
+from pathlib import Path
 from typing import Any, Sequence
 
 from .acquire import make_logger, run_calibration, run_iqe_measurement
@@ -37,11 +38,48 @@ def parse_override(text: str) -> tuple[str, Any]:
         return key.strip(), raw
 
 
-def build_config(args: argparse.Namespace) -> IQEConfig:
+LOCAL_CONFIG = "configs/local.yaml"
+
+
+def local_overrides(log=None) -> dict[str, Any]:
+    """``configs/local.yaml`` if it exists, as a partial override dict.
+
+    This file is for what is true of THIS MACHINE and nothing else -- ``base_dir``
+    above all. It is gitignored on purpose: ROADMAP item 3 rejected auto-loading the
+    tracked ``configs/standard.yaml`` because a run's behaviour would then depend on an
+    uncommitted edit to a file git calls clean, which is the provenance problem item 0
+    was about.
+
+    Every key it applies is logged, because an override nobody can see is the same
+    problem wearing a different hat.
+
+    ponytail: no schema beyond IQEConfig's own coercion, and no check that the file is
+    actually gitignored. If someone commits machine paths, add `git check-ignore` here.
+    """
+    path = Path(__file__).resolve().parent.parent / LOCAL_CONFIG
+    if not path.exists():
+        return {}
+    import yaml                                   # only needed when the file is there
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a mapping at the top level")
+    if log and data:
+        log(f"applied {LOCAL_CONFIG}: {', '.join(sorted(data))}")
+        for k, v in sorted(data.items()):
+            log(f"  {k} = {v!r}")
+    return data
+
+
+def build_config(args: argparse.Namespace, log=None) -> IQEConfig:
     """Config file (or defaults) with ``--set`` overrides applied on top."""
     base = IQEConfig.from_file(args.config) if args.config else IQEConfig()
     data = base.to_dict()
-    # Precedence, lowest first: defaults, --config, --calibration, --set, --out.
+    # Precedence, lowest first: defaults, --config, configs/local.yaml, --calibration,
+    # --set, --out.
+    # local.yaml sits ABOVE --config on purpose: it describes the machine, and a config
+    # file shared between machines must not put this one's runs somewhere that does not
+    # exist here. Anything per-invocation (--set, --out) still wins over both.
+    data.update(local_overrides(log))
     # The calibration is measured fact about this array; an explicit --set still wins,
     # so a deliberate override is never silently replaced by the calibration.
     if getattr(args, "array", None):
@@ -115,8 +153,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"{f.name:<28} {str(f.type):<28} default={f.default!r}")
         return 0
 
+    # The logger is built BEFORE the config so configs/local.yaml can announce itself
+    # at the top of the run rather than after the instruments are already connected.
+    log = make_logger()
     try:
-        cfg = build_config(args)
+        cfg = build_config(args, log)
     except (ValueError, OSError) as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
@@ -128,7 +169,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"wrote {cfg.write_file(args.dump_config)}")
         return 0
 
-    log = make_logger()
     if args.array and not args.calibrate and not args.calibration:
         auto = calibration_path(args.array)
         if auto.exists():
