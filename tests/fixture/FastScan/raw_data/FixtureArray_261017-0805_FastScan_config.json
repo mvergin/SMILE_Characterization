@@ -1,7 +1,7 @@
 {
   "settings": {
     "sample_name": "FixtureArray",
-    "base_dir": "C:/Users/vergin/AppData/Local/Temp/fx",
+    "base_dir": "C:\\Users\\vergin\\AppData\\Local\\Temp\\fixgen2",
     "roi": [
       0,
       0,
@@ -20,6 +20,9 @@
     "nth_pixel_sweep": 5,
     "max_sweep_pixels": 40,
     "fastscan_bitval": 15,
+    "pool_clusters": 0,
+    "pool_size": 4,
+    "pool_seed": 1,
     "source_mode": "voltage",
     "current_sweep_low_a": 3e-07,
     "current_sweep_high_a": 0.00012,
@@ -138,22 +141,21 @@
     "smu_display_off": false
   },
   "provenance": {
-    "commit": "96143b2867d924645458b1dfb6775a612e5106cd",
-    "commit_short": "96143b2",
+    "commit": "6ebfc9fb333fe2d8b59f7a844361263752b04d73",
+    "commit_short": "6ebfc9f",
     "branch": "main",
-    "committed": "2026-10-16T16:06:37+02:00",
-    "describe": "v0.2-118-g96143b2-dirty",
+    "committed": "2026-10-17T06:58:14+02:00",
+    "describe": "v0.2-120-g6ebfc9f-dirty",
     "dirty": true,
     "changed": [
       "configs/standard.yaml",
-      "measure_iqe/__init__.py",
       "measure_iqe/acquire.py",
       "measure_iqe/config.py",
       "test_measure_iqe.py",
       "test_run_format.py"
     ],
-    "diff_sha256": "78cb4de39ceffcd6",
-    "started": "2026-10-16T18:35:57+02:00",
+    "diff_sha256": "c8b7c1d580062f45",
+    "started": "2026-10-17T08:05:15+02:00",
     "host": "IHT-RE316",
     "python": "3.10.5",
     "platform": "Windows-10-10.0.26100-SP0"

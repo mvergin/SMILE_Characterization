@@ -15,6 +15,7 @@ import csv
 import dataclasses
 import io
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -1308,6 +1309,227 @@ def _repo_calibrations() -> dict[str, float]:
         return {}
     return {f.name: hashlib.sha256(f.read_bytes()).hexdigest()
             for f in sorted(d.glob("*.yaml"))}
+
+
+def test_pooling_is_off_by_default_and_adds_no_columns():
+    """An ordinary run's files must be byte-for-byte what they were before pooling.
+
+    A flag nobody set must not change the run format, or every existing reader has to
+    learn a column to read a run that has no pooled rows in it.
+    """
+    assert IQEConfig().pool_clusters == 0, "pooling must default to off"
+    with tempfile.TemporaryDirectory() as tmp:
+        res = run_iqe_measurement(IQEConfig(**FAST), simulate=True, base_dir=tmp,
+                                  log=QUIET)
+        rows = _agg_rows(res.run_dir)
+    assert rows, "no sweep rows"
+    for col in ("POOL_K", "POOL_MEMBERS"):
+        assert col not in rows[0], f"{col} written on a run with pool_clusters=0"
+
+
+def test_a_pooled_target_lights_every_member_and_references_them_all():
+    """K members lit together, and the reference is the SAME K at bitval 0.
+
+    Section 6: an all-off frame conducts ~4x the bitval-0 level, so a blanked frame is
+    not a reference. For a pooled target the only valid reference is the same members
+    at zero drive -- same frame structure, same select state, no drive.
+    """
+    seen = []
+
+    class Spy:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def set_pixel(self, x, y, bit):
+            seen.append(("one", ((int(x), int(y)),), int(bit)))
+            return self._inner.set_pixel(x, y, bit)
+
+        def set_pixels(self, coords, bit):
+            coords = tuple((int(x), int(y)) for x, y in coords)
+            seen.append(("many", coords, int(bit)))
+            return self._inner.set_pixels(coords, bit)
+
+        def blank_frame(self):
+            return self._inner.blank_frame()
+
+    real = acquire.connect_sim
+    acquire.connect_sim = lambda cfg, log: (lambda t: (t[0], t[1], Spy(t[2])))(real(cfg, log))
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = IQEConfig(**{**FAST, "roi": (0, 0, 15, 15), "block_size": 8,
+                               "pool_clusters": 1, "pool_size": 4})
+            res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
+            rows = [r for r in _agg_rows(res.run_dir) if r.get("POOL_K") not in (None, "", "nan")]
+    finally:
+        acquire.connect_sim = real
+
+    assert rows, "pooling was requested but no pooled row was written"
+    members = tuple(tuple(int(v) for v in m.split(":"))
+                    for m in rows[0]["POOL_MEMBERS"].split())
+    assert len(members) == 4 and int(float(rows[0]["POOL_K"])) == 4
+    assert (int(rows[0]["X"]), int(rows[0]["Y"])) == members[0], (
+        "a pooled row's X,Y must be its first member, or it has no unique key")
+    lit = [c for c in seen if c[0] == "many" and c[2] != 0]
+    off = [c for c in seen if c[0] == "many" and c[2] == 0]
+    assert lit, "the pooled target was never lit through set_pixels"
+    assert off, "the pooled target was never referenced at bitval 0"
+    for _t, coords, _b in lit + off:
+        assert coords == members, f"frame lit {coords}, members are {members}"
+    # The fast scan legitimately lights every pixel on its own. What must not happen is
+    # a member driven alone AFTER pooling starts -- that would be a different
+    # measurement reported under the pooled row's key.
+    first_pooled = next(i for i, c in enumerate(seen) if c[0] == "many")
+    alone = {c[1][0] for c in seen[first_pooled:] if c[0] == "one" and c[2] != 0}
+    assert not (alone & set(members)), (
+        f"pooled members {alone & set(members)} were lit individually during the sweep")
+
+
+def test_a_pooled_target_does_not_make_single_pixels_look_dead():
+    """The dead test compares against the median of the other targets.
+
+    A pooled target emits K x as much, so an unscaled median would rise by roughly K and
+    condemn live single pixels. Both walks judge per MEMBER, so the two are comparable.
+    """
+    bright = dict(PM400_POWER_MEAN=4e-8, POOL_K=4)       # 10 nW per member
+    single = dict(PM400_POWER_MEAN=1e-8)                 # 10 nW, the same pixel
+    assert acquire.per_member_power(bright) == acquire.per_member_power(single), (
+        "a 4-member target at 4x the power must read the same per member")
+    assert acquire.per_member_power(dict(PM400_POWER_MEAN=-2e-9)) == 2e-9, (
+        "the current is signed; the test is on magnitude")
+    # and a run with both kinds must not kill the singles
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = IQEConfig(**{**FAST, "roi": (0, 0, 15, 15), "block_size": 8,
+                           "pool_clusters": 1, "pool_size": 4, "dead_abort": True})
+        res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
+        rows = _agg_rows(res.run_dir)
+    per_target = {}
+    for r in rows:
+        per_target.setdefault((r["X"], r["Y"]), []).append(r)
+    singles = [k for k, rs in per_target.items()
+               if rs[0].get("POOL_K") in (None, "", "nan")]
+    assert len(singles) >= 2, f"expected several single pixels, got {len(singles)}"
+    full = max(len(rs) for rs in per_target.values())
+    short = [k for k in singles if len(per_target[k]) < full]
+    assert not short, (
+        f"single pixel(s) {short} were dead-aborted in a run with a pooled target; "
+        f"the pooled target's power leaked into the live median")
+
+
+def test_the_pooled_members_column_survives_the_csv():
+    """POOL_MEMBERS must carry no comma.
+
+    The aggregated writer joins fields with a comma and does not quote, so "x,y" inside
+    a value shifts every later column of that row. The first version did exactly that
+    and pandas refused the file.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = IQEConfig(**{**FAST, "roi": (0, 0, 15, 15), "block_size": 8,
+                           "pool_clusters": 1, "pool_size": 4})
+        res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
+        rows = _agg_rows(res.run_dir)
+        n_cols = len(acquire.agg_cols(cfg))
+        for agg in sorted((Path(res.run_dir) / "NVLEDSweep" / "Sweep").glob(
+                "*aggregated_bitval=*.csv")):
+            for i, line in enumerate(agg.read_text().splitlines()):
+                assert len(line.split(",")) == n_cols, (
+                    f"{agg.name} line {i} has {len(line.split(','))} fields, "
+                    f"expected {n_cols}: a value contains a comma")
+    pooled = [r for r in rows if r.get("POOL_K") not in (None, "", "nan")]
+    assert pooled, "nothing pooled"
+    assert "," not in pooled[0]["POOL_MEMBERS"] and "'" not in pooled[0]["POOL_MEMBERS"], (
+        f"POOL_MEMBERS is not clean: {pooled[0]['POOL_MEMBERS']!r}")
+
+
+def test_pooling_is_refused_where_it_cannot_mean_anything():
+    for kwargs, why in [
+            (dict(pool_clusters=2, pool_size=1), "a group of one"),
+            (dict(pool_clusters=-1), "a negative count"),
+            (dict(pool_clusters=2, source_mode="current"), "a current source")]:
+        try:
+            IQEConfig(**kwargs).validate()
+        except ValueError:
+            continue
+        raise AssertionError(f"validate() accepted {why}: {kwargs}")
+
+
+def test_every_gui_default_round_trips_through_the_cli():
+    """What the console types must parse back to the value it showed.
+
+    The console renders every field as text and sends the changed ones as --set, which
+    the CLI parses as JSON. A field whose rendering does not round-trip would silently
+    change a run the moment the operator touched any OTHER field -- because then it
+    would differ from the default and be sent too.
+    """
+    from measure_iqe.cli import parse_override
+    from measure_iqe.gui import _as_text
+
+    base = IQEConfig()
+    bad = []
+    for f in dataclasses.fields(IQEConfig):
+        txt = _as_text(getattr(base, f.name))
+        try:
+            k, v = parse_override(f"{f.name}={txt}")
+            got = getattr(IQEConfig.from_dict({**base.to_dict(), k: v}), f.name)
+        except Exception as exc:                      # noqa: BLE001 - reported below
+            bad.append(f"{f.name}={txt!r} -> {type(exc).__name__}: {exc}")
+            continue
+        if got != getattr(base, f.name):
+            bad.append(f"{f.name}={txt!r} -> {got!r}, expected {getattr(base, f.name)!r}")
+    assert not bad, "fields the console cannot round-trip:\n  " + "\n  ".join(bad)
+
+
+def test_the_console_only_sends_what_the_operator_changed():
+    """An unchanged field must NOT become a --set.
+
+    --set outranks both --config and configs/local.yaml, so a console that sent all
+    132 fields every time would silently overwrite the machine's own settings with
+    its idea of the defaults -- the exact failure ROADMAP item 3 was written to avoid.
+    """
+    from measure_iqe.gui import _defaults, build_argv
+
+    d = _defaults()
+    assert build_argv(dict(d), d) == [sys.executable, "-m", "measure_iqe"], (
+        "an untouched console must produce a bare command")
+    v = dict(d)
+    v["pool_clusters"] = "50"
+    v["roi"] = "FULL"
+    argv = build_argv(v, d, simulate=True, array="Array42_IQE",
+                      extra="# a comment\nn_fine=12\n\n")
+    assert argv.count("--set") == 3, argv
+    assert "--simulate" in argv and "--array" in argv
+    for want in ("roi=FULL", "pool_clusters=50", "n_fine=12"):
+        assert want in argv, f"{want} missing from {argv}"
+
+
+def test_the_console_presets_describe_runs_that_actually_happen():
+    """Each preset must name the number of targets it really produces.
+
+    A preset labelled "25 singles + 50 pooled" that yields 16 and 25 is worse than no
+    preset: the operator reads the label, not the selection log.
+    """
+    from measure_iqe.gui import PRESETS
+
+    names = {f.name for f in dataclasses.fields(IQEConfig)}
+    for label, over in PRESETS.items():
+        assert set(over) <= names, f"{label}: not config fields: {set(over) - names}"
+        IQEConfig(**over).validate()
+
+    alive = [{"X": x, "Y": y} for x in range(512) for y in range(512)]
+    cfg = IQEConfig(**PRESETS["Full array, 25 singles + 50 pooled"]).validate()
+    singles = acquire.select_sweep_pixels(alive, cfg, QUIET)
+    groups = acquire.select_pool_clusters(alive, singles, cfg, QUIET)
+    assert len(singles) == 25, f"preset says 25 singles, got {len(singles)}"
+    assert len(groups) == 50, f"preset says 50 pooled groups, got {len(groups)}"
+    # and the two draws must not overlap, or the grounding comparison is circular
+    s_set = {(r["X"], r["Y"]) for r in singles}
+    members = {m for g in groups for m in g["POOL_MEMBERS"]}
+    assert not (s_set & members), f"{len(s_set & members)} pixel(s) are both"
+    assert len(members) == 200, f"50 groups of 4 is 200 pixels, got {len(members)}"
+
+    cfg100 = IQEConfig(**PRESETS["Full array, 100 singles"]).validate()
+    assert len(acquire.select_sweep_pixels(alive, cfg100, QUIET)) == 100
+    cfg1k = IQEConfig(**PRESETS["Full array, 1000 singles"]).validate()
+    assert len(acquire.select_sweep_pixels(alive, cfg1k, QUIET)) == 1000
 
 
 if __name__ == "__main__":

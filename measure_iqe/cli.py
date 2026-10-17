@@ -141,12 +141,20 @@ def build_parser() -> argparse.ArgumentParser:
                     help="print the effective config as JSON and exit")
     ap.add_argument("--list-params", action="store_true",
                     help="list every config field with its default and exit")
+    ap.add_argument("--gui", action="store_true",
+                    help="open the tkinter operator console instead of running")
     return ap
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point.  Returns the process exit code."""
     args = build_parser().parse_args(argv)
+
+    if args.gui:
+        # Imported here, not at module scope: a headless measurement machine has no
+        # display and importing tkinter there would break every ordinary CLI run.
+        from .gui import main as gui_main
+        return gui_main()
 
     if args.list_params:
         for f in dataclasses.fields(IQEConfig):

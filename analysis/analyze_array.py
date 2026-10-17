@@ -605,6 +605,20 @@ def _load_config(folder):
 
 def enrich(df, dark_W=0.0):
     df = df.copy()
+    # How many pixels each row is the SUM of. 1 for every ordinary row, and for every
+    # run written before pooling existed -- RUN_FORMAT.md says an absent column means 1,
+    # not unknown, so a pre-pooling run reads exactly as it always did.
+    #
+    # This divides the CURRENT DENSITY and nothing else. Power and current stay as
+    # measured, because they are what the instrument read and halving them into a
+    # per-member average would invent a number. EQE is a ratio of the two and is
+    # unaffected either way -- sum(P)/sum(I) is the current-weighted mean of the
+    # members' EQEs, which is the figure a pooled row is for. J is the one quantity
+    # that must be per member, because every EQE(J) curve compares a pooled target
+    # against single pixels on the same axis.
+    pool_k = (df["POOL_K"].astype(float).fillna(1.0).clip(lower=1.0)
+              if "POOL_K" in df.columns else 1.0)
+    df["POOL_K_EFF"] = pool_k
 
     def _val(base):
         # prefer the honest *_MEDIAN column (new files with raw samples); fall back to *_MEAN
@@ -644,9 +658,9 @@ def enrich(df, dark_W=0.0):
         df["LEAK_FRAC"] = np.nan
     denom = np.maximum(Iv.abs(), Inv.abs()).replace(0, np.nan)
     df["LEAKAGE"] = (Iv + Inv).abs() / denom
-    df["J_VLED"] = current_density(Iv, PIXEL_AREA_UM2)
-    df["J_NVLED"] = current_density(Inv, PIXEL_AREA_UM2)
-    df["J_LED"] = current_density(df["I_LED"], PIXEL_AREA_UM2)
+    df["J_VLED"] = current_density(Iv / pool_k, PIXEL_AREA_UM2)
+    df["J_NVLED"] = current_density(Inv / pool_k, PIXEL_AREA_UM2)
+    df["J_LED"] = current_density(df["I_LED"] / pool_k, PIXEL_AREA_UM2)
     df["EQE_VLED"] = compute_eqe(P, Iv, WAVELENGTH_NM)
     df["EQE_NVLED"] = compute_eqe(P, Inv, WAVELENGTH_NM)
     # EQE on the LEAKAGE-CORRECTED current. On an uncorrected run I_LED is |Inv| and this
@@ -1796,9 +1810,18 @@ def analyse_sweep(sweep_dir, label, log):
 
     n_px = df.groupby(["X", "Y"]).ngroups
     n_rel = int(df["RELIABLE"].sum())
+    # Say it here or it is invisible: a pooled target looks like one pixel in every
+    # groupby, and its EQE is a current-weighted mean of K members, not one pixel's.
+    pooled = (df[df["POOL_K_EFF"] > 1].groupby(["X", "Y"])
+              if "POOL_K_EFF" in df.columns else None)
+    n_pool = pooled.ngroups if pooled is not None else 0
     log(
         f"  [{label}] {n_px} pixels, {len(df)} points, {n_rel} reliable "
         f"(dark={dark:.2e} W)"
+        + (f" -- {n_pool} of the {n_px} are POOLED targets covering "
+           f"{int(df[df['POOL_K_EFF'] > 1].groupby(['X', 'Y'])['POOL_K_EFF'].first().sum())} "
+           f"pixels; their EQE is a current-weighted mean of their members and their J "
+           f"is per member" if n_pool else "")
     )
 
     # Plots that don't need a fit

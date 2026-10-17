@@ -47,6 +47,11 @@ AGG_OPTIONAL = ["NVLED_CURR_MEDIAN", "NVLED_CURR_SAMPSTD", "NVLED_CURR_N",
                 "PM400_POWER_REF", "PM400_POWER_REF_STD", "LEAK_REF_BITVAL",
                 "LEAK_REF_TRIES", "LEAK_REF_FRAC", "LEAK_REF_CACHED",
                 "NVLED_LIMIT_A", "NVLED_AT_COMPLIANCE"]
+# Written ONLY when pool_clusters > 0, which is not the default. Listed apart
+# from AGG_OPTIONAL on purpose: an ordinary run must write the columns above and
+# no others, or every existing reader has to learn a column to read a run with no
+# pooled rows in it. test_measure_iqe.py pins the "off by default" half.
+AGG_POOL = ["POOL_K", "POOL_MEMBERS"]
 RAW_COLS = ["X", "Y", "BITVAL", "NVLED_V", "TIME", "TYPE", "MEAS_VALUE", "MEAS_STD"]
 SAMPLE_COLS = ["X", "Y", "BITVAL", "NVLED_V", "TIME", "TYPE", "SAMPLE_IDX", "VALUE"]
 RAW_TYPES = {"PM400", "VLED", "NVLED"}
@@ -77,7 +82,8 @@ def _check_layout(run_dir: Path, label: str):
             f"{label}/{folder.name}: required columns changed -> {cols[:len(AGG_REQUIRED)]}"
 
     sweep_agg = _header(sorted(sweep.glob("*aggregated_bitval=*_mean_std.csv"))[0])
-    assert sweep_agg == AGG_REQUIRED + AGG_OPTIONAL, \
+    assert sweep_agg in (AGG_REQUIRED + AGG_OPTIONAL,
+                         AGG_REQUIRED + AGG_OPTIONAL + AGG_POOL), \
         f"{label}: sweep columns changed -> {sweep_agg}"
 
     raw = run_file(run_dir, "NVLEDSweep/Sweep/raw_data/Sweep.csv")

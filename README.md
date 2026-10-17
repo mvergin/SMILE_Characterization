@@ -25,6 +25,7 @@ sides have their own test for it (`test_run_format.py` for the writer,
 | `measure_iqe/` | **the measurement: library + CLI** — fast scan, pixel selection, IQE sweep |
 | `smile/`, `instruments/` | SMILE FPGA driver and the PM400 / Keithley 2602B instrument drivers |
 | `measurement/`, `data/`, `smile_postprocess.py` | **reference only, unmaintained** — the transient / ultra-fast / hardware-paced-TSP techniques that predate `measure_iqe`. See [MEASUREMENT_MODES.md](MEASUREMENT_MODES.md) |
+| `measure_iqe/gui.py` | the operator console: `python -m measure_iqe --gui`. tkinter, runs the CLI as a subprocess |
 | `analysis/` | **the analysis: fits, figures, reports** — reads a run directory, needs no hardware. `python analysis/analyze_array.py "<run_dir>"` |
 | `characterize_capacitance.py` | the investigation tool: the array's ~50 µF capacitance, step transients, the leakage as a time series, and what each does to a low-current reading |
 
@@ -154,6 +155,7 @@ python -m measure_iqe [options]
 | `--dump-config` | `PATH` | write the effective config to `PATH` (`.json`/`.yaml`) and exit |
 | `--print-config` | — | print the effective config as JSON and exit |
 | `--list-params` | — | list every field with its type and default, and exit |
+| `--gui` | — | open the tkinter operator console instead of running |
 | `-h`, `--help` | — | usage |
 
 `--set` values are parsed as JSON, so types survive; anything that is not valid
@@ -204,6 +206,46 @@ voltage sweep, so an interrupted run leaves directly analysable files.
 
 ---
 
+## The operator console
+
+```bash
+python -m measure_iqe --gui
+```
+
+tkinter, so it needs no install, and it runs the CLI as a **subprocess** rather than
+importing the package. That gives the log window for free, makes Stop actually work,
+and means a crash inside a sweep cannot take the window down with it.
+
+Everything the window can do, it does by building an argument list a person could
+have typed, and **Preview command** shows that list. There is nothing the console can
+reach that the CLI cannot.
+
+| tab | what it is for |
+|---|---|
+| **Run shape** | the ~20 fields that decide a run, plus four presets and a free-text `--set` box |
+| **All parameters** | every `IQEConfig` field, generated from the dataclass so it cannot drift, with a filter box |
+| **Queue** | argument lists run in sequence, so a night's work can be left to run |
+
+Three things worth knowing:
+
+* **Stop sends CTRL_BREAK, not a kill.** `measure_iqe.safeexit` turns it into an
+  orderly shutdown: outputs off, frame blanked, files flushed. A killed process leaves
+  the SMU driving the array.
+* **Only fields you changed become `--set`.** Sending all 132 every time would defeat
+  `--config` and `configs/local.yaml`, because an explicit `--set` outranks both.
+* **Check config** runs `--print-config` in a subprocess and reports the realised
+  shape, so a mistake costs a second rather than a night. It touches no hardware.
+
+The presets are the run shapes this project actually uses, and their labels are
+checked against the sampler in `test_measure_iqe.py` so they cannot lie:
+
+| preset | targets |
+|---|---|
+| Full array, 100 singles | 10x10 blocks, 1 single each |
+| Full array, 25 singles + 50 pooled | 5x5 blocks, 1 single each, plus 50 pooled groups of 4 over 200 further pixels |
+| Full array, 1000 singles | 10x10 blocks, 10 singles each |
+| Quick check, 16x16 ROI | 4 singles, 6 biases |
+
 ## Configuration reference
 
 Every field below is a constructor argument of `IQEConfig`, a key in a
@@ -232,6 +274,9 @@ runs that pinned each value.
 | `block_size` | `int` | `8` | blocks mode: block edge in pixels (ROI → ~ROI/BLOCK_SIZE blocks/axis) |
 | `pixels_per_block` | `int` | `4` | blocks mode: alive pixels sampled per block |
 | `block_seed` | `int` | `0` | blocks mode: RNG seed (vary across runs to sample new pixels) blocks mode: no two measured pixels may sit closer than this (Chebyshev, so 2 = never sharing an edge or a corner). Without it, each block's farthest-point walk ran to the block's own border and the block next door did the same, so pairs of measured LEDs landed side by side across the shared edge — the sample looked stratified but was really clustered, and neighbouring blocks' statistics blurred into each other. Raise it to spread the sample further (thermal/optical crosstalk between nearby pixels is a physical question, so it is a knob); 1 disables the guard. A block too dead or too small to honour it falls back and says so in the log. |
+| `pool_clusters` | `int` | `0` | pooled groups swept **in addition** to the single pixels. 0 = off, and that is the default: a pooled row reports the SUM of K pixels' light and the SUM of their current, so it is not a pixel. See *Pooled clusters* below. |
+| `pool_size` | `int` | `4` | members per pooled group. 4, not 16: a dead member is a 1/K deficit against a sum whose own spread is 16.4 %/√K (measured, run 261015-0015), which is 3.0σ at K=4 and only 1.5σ at K=16. |
+| `pool_seed` | `int` | `1` | RNG stream for the pooled members, separate from `block_seed` so a pooled member is never also a single pixel. Sharing one would make the grounding comparison circular. |
 | `min_pixel_separation` | `int` | `2` |  |
 | `sweep_fraction` | `float` | `0.1` | spatial mode: fraction of ALIVE pixels to sweep |
 | `min_sweep_pixels` | `int` | `6` | spatial mode: floor on the count (so tiny ROIs still map) |
@@ -500,6 +545,53 @@ compliance, and `nvled_range_i` / `probe_range_i` must be one of
 * **`vramp_lowv_n_pm` / `vramp_lowv_nplc`** — the low-J precision budget. The
   light is the limiting channel at low current, so spend on `*_n_pm` before
   `*_nplc`.
+
+### Pooled clusters: measuring K pixels as one target
+
+`pool_clusters` adds pooled groups to a sweep. **Off by default**, and it has to be:
+a pooled row is not a pixel, it is the sum of K of them.
+
+```bash
+# 20 single pixels, and 50 pooled groups of 4 on top of them
+python -m measure_iqe --set block_size=114 --set pixels_per_block=1 \
+                      --set pool_clusters=50 --set pool_size=4
+```
+
+The single pixels are unchanged, so a pooled run is a **superset** of the ordinary
+one. That is the point: the singles are per-pixel ground truth taken under the same
+lamp, the same thermal history and the same instrument state, so they **ground** the
+pooled numbers. Wherever the singles are still above their own noise the two must
+agree, and where the singles fall into the noise the pooled groups keep going.
+
+`set_pixels` writes all K members in **one** frame instruction, so a pooled point
+costs what a single point costs — K pixels per dwell instead of one. The reference
+pools with it: the same K members at `leak_ref_bitval`, never a blanked frame, since
+a blanked frame conducts ~4× the bitval-0 level.
+
+What pooling cannot do is tell you which member did what. A pooled reading is a sum,
+and a dead member is a `1/K` deficit against a sum whose own spread is `16.4 %/√K` —
+the array's measured alive-pixel brightness spread (52.21 ± 8.55 nW over 261 441
+pixels, run 261015-0015). That is 3.0σ at K = 4 and 1.5σ at K = 16, which is why
+`pool_size` defaults to 4.
+
+Three rules the selection enforces, each for a measured reason:
+
+* **one quadrant per group** — the `tl_pixen`/`tr_pixen`/… enables live in the frame
+  instruction, not in the pixel data, so a group across a 256 boundary would light the
+  near quadrant's mirror image instead of the far member.
+* **no member is also a single pixel** (`pool_seed` is a separate RNG stream) —
+  sharing one would make the grounding comparison circular.
+* **members are separated** by the same `min_pixel_separation` the singles get, so
+  crosstalk cannot masquerade as pooling gain.
+
+What the files carry: `POOL_K` and `POOL_MEMBERS`, with `X`,`Y` set to the first
+member so every `groupby(["X","Y"])` keeps working. EQE needs no correction — it is
+`P/I` and both are summed by the same K — but **current density does**, and
+`analyze_array.py` divides by `POOL_K` for exactly that reason. See `RUN_FORMAT.md`.
+
+`pool_clusters` is refused with `source_mode: current`: a current source sets one
+current for the whole frame, so the members would share it and no per-member
+operating point would be known.
 
 ### How blocks mode samples
 

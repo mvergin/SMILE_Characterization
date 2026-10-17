@@ -11,8 +11,8 @@ Items 0 and 1 are done; the rest are proposals, not decisions.
 | 2b | `characterize_capacitance` into `measure_iqe` | **deferred, deliberately** | ~1 h | see below |
 | 3 | config: a local override for `base_dir` | yes — but **not** by auto-loading `standard.yaml` | ~1 h | **done** |
 | 4 | README | yes, after 1–3 | ~2 h | **done** |
-| 5 | cluster / strided scan | pursue — but not for the reason it was proposed | spike first | **primitive + harness done, bench run pending** |
-| 6 | GUI | last | 1–2 days | open |
+| 5 | cluster / strided scan | pursue — but not for the reason it was proposed | spike first | **done, except the bench run** |
+| 6 | GUI | last | 1–2 days | **done** |
 
 ---
 
@@ -298,9 +298,49 @@ Still open, and deliberately not built: the pooled path is **not** wired into
 `measure_iqe`'s sweep. That is only worth doing if the bench run says the scatter
 falls, and the run is the cheap half.
 
-`yieldsimu.py` and `pseudo_implementation_clusterscan.py` are **not in this repo** —
-they are not in the history either, so the 1 s → 30 ms correction has to be made
-wherever they actually live.
+### Done, 17 October 2026 — pooling wired in, and the simulator corrected
+
+**`pool_clusters` sweeps pooled targets**, off by default and deliberately so. A
+pooled row is not a pixel: it carries `POOL_K` and the **sum** of its members' light
+and current. `X`,`Y` is the first member, so every `groupby(["X","Y"])` keeps working.
+EQE needs no correction, because both sums carry the same K; **current density does**,
+and `analyze_array.py` divides by `POOL_K`.
+
+The shape it is built for is both at once — singles and pooled groups in the same
+session, the singles grounding the pooled numbers under the same lamp, thermal history
+and instrument state. `pool_seed` is a separate RNG stream so a pooled member is never
+also a single pixel, or the grounding comparison would be circular.
+
+One defect this turned up and fixed: **both dead-pixel tests compare a target against
+the median of the others**, so an unscaled pooled target (K× the light) would have
+raised the median by roughly K and condemned live single pixels. Both now judge per
+member, `acquire.per_member_power`.
+
+**`yieldsimu.py` corrected** (it lives in `C:\_D\programs\SmallProjects\SmileYieldSimu`,
+outside this repo and not under version control). The 1 s/pixel placeholder is now the
+measured 29.56 ms, and the claim in the line above — *"it moves every curve"* — was
+**wrong**:
+
+* the **speedup ratio does not move at all**. `speedup = brute_tests / group_tests`,
+  and a per-test cost shared by both cancels. Every breakeven in that file — 70.71 %
+  uniform, ~50 % blobs, ~64 % lines — is a property of the Dorfman arithmetic and the
+  defect geometry, not of time, and all of them stand.
+* the **absolute numbers move by 34×**, and that is what kills the motive. Brute force
+  is 2.15 h, not 72.8 h. Cases C and D of that file's protocol save minutes.
+
+Two things the correction added that matter more than the arithmetic:
+
+* **the real array is at 99.73 % yield** (261 441 of 262 144 alive at a 2 nW
+  threshold, run 261015-0015) — off the top of every chart in that file, which sweeps
+  50–99 %.
+* **the group test is ANALOG, and that, not Dorfman, caps K.** One dead member is a
+  `1/K` deficit against a sum whose own spread is `16.4 %/√K` (the measured
+  alive-pixel brightness spread, 52.21 ± 8.55 nW). That is 3.0σ at K = 4 and 1.5σ at
+  K = 16, so `max_detectable_k()` returns 4.1 and `pool_size` defaults to 4. The cap
+  lifts once the members' individual brightnesses are known — which is exactly what a
+  single-pixel pass in the same session buys.
+
+`yieldsimu.py` has a `_selfcheck()` on both claims and runs it before plotting.
 
 ## 6. GUI — last
 
@@ -313,6 +353,35 @@ process. That gives the log window for free, makes a kill button actually work, 
 means a crash in the sweep cannot take the window down. The queue is a list of
 arg-lists run in sequence; the progress bar parses the `[3/16]` lines the sweep already
 prints.
+
+### Done, 17 October 2026 — built exactly to that shape
+
+`measure_iqe/gui.py`, opened with `python -m measure_iqe --gui`. tkinter, the CLI as a
+subprocess, a queue of argument lists, and the progress bar parsing `[3/16]`.
+
+What the shape above did not say, and what the operator asked for — **full control
+over what is measured, how, and what is kept**:
+
+* **Run shape** holds the ~20 fields that decide a run, four presets, and a free-text
+  `--set` box.
+* **All parameters** is generated from `dataclasses.fields(IQEConfig)`, so all 132
+  fields are reachable and the tab cannot drift from the dataclass.
+* **Preview command** prints the argument list. There is nothing the console can reach
+  that the CLI cannot, which is the property that keeps the console from becoming a
+  second source of truth.
+
+Three decisions worth recording:
+
+* **Stop sends CTRL_BREAK, not a kill.** `safeexit` turns it into outputs off, frame
+  blanked, files flushed. A killed process leaves the SMU driving the array. This is
+  the one thing in that file that is not a convenience.
+* **Only CHANGED fields become `--set`.** An explicit `--set` outranks both `--config`
+  and `configs/local.yaml`, so a console that always sent all 132 would silently
+  overwrite the machine's own settings with its idea of the defaults — the exact
+  failure item 3 was written to avoid.
+* **The presets' labels are tested against the sampler**, because an operator reads
+  the label, not the selection log. Writing that test is what caught the pooled
+  selection asking the sampler for a quarter of the pixels it needed.
 
 The calibration check — *"warn them that no calibration is available"* — is the best
 part of that idea and needs no GUI. It belongs in the CLI now: `--array Array43_IQE`

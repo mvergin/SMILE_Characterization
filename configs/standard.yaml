@@ -44,6 +44,36 @@ sweep_select: "blocks"   # "blocks" | "spatial" | "stride"
 block_size: 8   # blocks mode: block edge in pixels (ROI → ~ROI/BLOCK_SIZE blocks/axis)
 pixels_per_block: 4   # blocks mode: alive pixels sampled per block
 block_seed: 0   # blocks mode: RNG seed (vary across runs to sample new pixels)
+
+# ── Pooled clusters: K pixels lit together, swept as one target ──────────────
+# OFF by default and deliberately so. A pooled row is not a pixel: it reports the SUM
+# of its members' light and the SUM of their current. Turning it on is a choice about
+# what the run is for.
+#
+# Why it exists: open question 1, the optical floor. The PM400 dark reading wanders
+# 75 pW under a 210 pW signal and faint-end power scatters 8.5-8.9 % under BOTH sweep
+# methods, so the suspect is the meter, not the method. K members emit K x the light
+# while the drift stays put, and set_pixels writes them in ONE frame instruction -- so
+# a pooled point costs exactly what a single point costs. K pixels per dwell, not one.
+#
+# The intended shape is BOTH in one run: the single pixels stay exactly as they are and
+# the pooled groups are added on top, so the singles ground the pooled numbers under
+# the same lamp, thermal history and instrument state. For example 20 singles plus 50
+# pooled groups:
+#     --set pixels_per_block=1 --set block_size=114 --set pool_clusters=50
+#
+# Pooled EQE = sum(P)/sum(I) is a CURRENT-WEIGHTED mean of the members, not the mean of
+# their EQEs. The two differ whenever brightness and current correlate across members.
+pool_clusters: 0   # pooled groups swept IN ADDITION to the single pixels. 0 = off.
+pool_size: 4       # members per group. 4, not 16: a dead or dim member is a 1/K deficit
+                   # against a sum whose own spread is 16.4%/sqrt(K) (the array's
+                   # measured alive-pixel brightness spread, 52.21 +- 8.55 nW over
+                   # 261 441 pixels, run 261015-0015). That is 3.0 sigma at K=4 and only
+                   # 1.5 sigma at K=16, so above ~4 a pooled reading cannot tell "one
+                   # member died" from "these members are dim".
+pool_seed: 1       # separate RNG stream from block_seed, so the pooled members are
+                   # never the single pixels. Sharing one would make the grounding
+                   # comparison circular.
 min_pixel_separation: 2   # blocks mode: no two measured pixels may sit closer than this (Chebyshev, so 2 = never ...
 sweep_fraction: 0.1   # spatial mode: fraction of ALIVE pixels to sweep
 min_sweep_pixels: 6   # spatial mode: floor on the count (so tiny ROIs still map)

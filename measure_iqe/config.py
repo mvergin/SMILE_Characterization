@@ -107,6 +107,41 @@ class IQEConfig:
     max_sweep_pixels: int = 40  # hard cap (spatial/stride only; blocks controls its own count)
     fastscan_bitval: int = 15  # bitval for the alive/dead fast scan (brightest)
 
+    # ── Pooled clusters: K pixels lit together, swept as one target ─────
+    # OFF by default and deliberately so. A pooled row is not a pixel: it reports the
+    # SUM of its members' light and the SUM of their current, so per-pixel quantities
+    # drawn from it are averages, not measurements. Turning it on is a choice about
+    # what the run is for, never a default the operator did not make.
+    #
+    # Why it exists: open question 1, the optical floor. The PM400 dark reading wanders
+    # 75 pW under a 210 pW signal and faint-end power scatters 8.5-8.9 % under BOTH
+    # sweep methods, so the suspect is the meter. K members emit K x the light while
+    # the drift stays put. set_pixels writes them in ONE frame instruction, so a pooled
+    # point costs exactly what a single point costs -- K pixels per dwell, not one.
+    #
+    # Pooled EQE = sum(P)/sum(I) is a CURRENT-WEIGHTED mean of the members, which is
+    # arguably the right array figure. It is not the mean of the members' EQEs, and the
+    # two differ whenever brightness and current are correlated across members.
+    #
+    # The intended shape is both at once: N single pixels and M pooled groups in the
+    # same run. The singles are per-pixel ground truth measured under the same lamp,
+    # the same thermal history and the same instrument state, so they GROUND the pooled
+    # numbers -- the pooled faint end can be checked against the singles wherever the
+    # singles are still above their own noise. Measured on run 261015-0015 the array's
+    # alive-pixel brightness spread is 16.4 % (52.21 +- 8.55 nW over 261 441 pixels),
+    # which is what a pooled reading has to be interpreted against.
+    pool_clusters: int = 0  # pooled groups swept IN ADDITION to the single pixels.
+                            # 0 = off. The singles are unaffected either way, so a
+                            # pooled run is a superset of the ordinary one.
+    pool_size: int = 4      # members per group. 4, not 16, because a dead or dim member
+                            # is a 1/K deficit against a sum whose own spread is
+                            # 16.4%/sqrt(K): detectable at 3.0 sigma for K=4 and only
+                            # 1.5 sigma for K=16. Above ~4 a pooled reading cannot tell
+                            # "one member died" from "these members are dim".
+    pool_seed: int = 1      # separate RNG stream from block_seed, so the pooled members
+                            # are not the single pixels. Sharing a pixel between the two
+                            # would make the grounding comparison circular.
+
     # ── Source mode ─────────────────────────────────────────────────────
     # "voltage": ch B sources voltage, adaptive current-targeted sweep. PROVEN on
     #            Array42 — the 10 mA voltage sweep captured the IQE peak (J≈6,
@@ -722,6 +757,19 @@ class IQEConfig:
                 f"leak_ref_per_point_above_v={self.leak_ref_per_point_above_v}: this is "
                 f"a bias in volts and the sweep is negative, so a positive value would "
                 f"cache the reference at EVERY point, faint side included.")
+        if self.pool_clusters and self.source_mode == "current":
+            raise ValueError(
+                "pool_clusters with source_mode='current': a current source sets ONE "
+                "current for the whole frame, so a pooled group would share it between "
+                "its members and the per-member operating point would be unknown. "
+                "Pooling is a voltage-sweep feature.")
+        if self.pool_clusters < 0:
+            raise ValueError(f"pool_clusters={self.pool_clusters}; expected >= 0")
+        if self.pool_clusters and self.pool_size < 2:
+            raise ValueError(
+                f"pool_size={self.pool_size} with pool_clusters={self.pool_clusters}: a "
+                f"pooled group of one is a single pixel measured through the pooled "
+                f"path, which only hides it from the analysis. Use pool_clusters=0.")
         for name in ("nvled_range_i", "probe_range_i", "current_source_range_i"):
             if getattr(self, name) not in SMU_I_RANGES:
                 raise ValueError(f"{name}={getattr(self, name)}; the 2602B only has "

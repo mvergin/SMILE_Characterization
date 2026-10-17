@@ -437,6 +437,8 @@ _AGG_COLS_REF = ["NVLED_CURR_REF", "NVLED_CURR_REF_STD", "VLED_CURR_REF",
 # The compliance actually in force at each point, and whether the point hit it. Written
 # for the voltage ramp, where the limit tracks the measured current (see pick_limit).
 _AGG_COLS_LIMIT = ["NVLED_LIMIT_A", "NVLED_AT_COMPLIANCE"]
+# Only written when pooling is on, so an ordinary run's files do not change at all.
+_AGG_COLS_POOL = ["POOL_K", "POOL_MEMBERS"]
 
 
 def agg_cols(cfg: IQEConfig) -> list[str]:
@@ -446,7 +448,21 @@ def agg_cols(cfg: IQEConfig) -> list[str]:
         cols += _AGG_COLS_REF
     if cfg.fine_sweep_mode == "voltage":
         cols += _AGG_COLS_LIMIT
+    if cfg.pool_clusters:
+        cols += _AGG_COLS_POOL
     return cols
+
+
+def agg_field(v) -> str:
+    """One aggregated-CSV field.
+
+    ``repr`` for everything numeric, because round-tripping a float through ``str``
+    loses digits. A string is written bare: ``repr`` would wrap it in quotes that are
+    not CSV quoting, and every reader would carry them into the value. The only string
+    column is POOL_MEMBERS, and it uses ":" between coordinates precisely so it carries
+    no comma of its own -- this writer joins fields with a comma and does not quote.
+    """
+    return v if isinstance(v, str) else repr(v)
 
 
 def write_aggregated_one(path: str | Path, rows: list[Row]) -> None:
@@ -455,7 +471,7 @@ def write_aggregated_one(path: str | Path, rows: list[Row]) -> None:
     with open(path, "w") as f:
         f.write(",".join(_AGG_COLS) + "\n")
         for r in rows:
-            f.write(",".join(repr(r[c]) for c in _AGG_COLS) + "\n")
+            f.write(",".join(agg_field(r[c]) for c in _AGG_COLS) + "\n")
 
 
 def write_aggregated_per_bitval(folder: str | Path, rows: list[Row],
@@ -571,7 +587,7 @@ class BackgroundWriter:
             self._samp_f.flush()
         for r in prows:
             self._agg_fh(r["BITVAL"]).write(
-                ",".join(repr(r.get(c, float("nan"))) for c in self._cols) + "\n")
+                ",".join(agg_field(r.get(c, float("nan"))) for c in self._cols) + "\n")
         for f in self._agg_f.values():
             f.flush()
 
@@ -942,6 +958,7 @@ def connect_sim(cfg: IQEConfig, log: Logger):
 def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
                   run_dir: Path, cfg: IQEConfig, log: Logger) -> list[Row]:
     volts = cfg.fastscan_v_list()
+    _pool_members.clear()      # a fresh selection owns the pooled groups
     npx = (x2 - x1 + 1) * (y2 - y1 + 1)
     log("=" * 56)
     log(f"FAST SCAN @ NVLED={', '.join(f'{v:g}' for v in volts)} V over {npx} pixels"
@@ -1015,12 +1032,87 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
             f"most of this region is dead; block selection draws from the lit minority.")
     smile.blank_frame()      # never hand the next stage a lit pixel
     sel = select_sweep_pixels(alive, cfg, log)
+    # Pooled groups come AFTER the rotation, deliberately: sweep_rotate exists to move a
+    # different single pixel into slot 0 (section 17, open question 13), and a pooled
+    # target in that slot would answer a different question.
     if cfg.sweep_rotate and sel:
         k = cfg.sweep_rotate % len(sel)
         sel = sel[k:] + sel[:k]
         log(f"  sweep_rotate={cfg.sweep_rotate}: same {len(sel)} pixels, order rotated by "
             f"{k}. Slot 0 is now ({sel[0]['X']},{sel[0]['Y']}).")
-    return sel
+    return sel + select_pool_clusters(alive, sel, cfg, log)
+
+
+def select_pool_clusters(alive: list[Row], singles: list[Row], cfg: IQEConfig,
+                         log: Logger) -> list[Row]:
+    """Pick ``pool_clusters`` groups of ``pool_size`` alive pixels, each inside ONE quadrant.
+
+    Returns selection rows keyed on the FIRST member, with ``POOL_MEMBERS`` attached, and
+    registers each group in ``_pool_members`` so ``light()`` finds it.
+
+    Three constraints, each for a measured reason:
+
+      * **one quadrant per group.** The ``tl_pixen``/``tr_pixen``/... enables live in the
+        frame instruction, not in the pixel data, so a group across a 256 boundary would
+        light the near quadrant's mirror image instead of the far member.
+      * **no member is a single pixel.** The singles are the ground truth the pooled rows
+        are checked against. Sharing a pixel between the two makes that check circular.
+      * **members are separated**, by the same ``min_pixel_separation`` the singles get.
+        Adjacent members would fold thermal and optical crosstalk into the pooled sum,
+        and the pooled number is already a sum -- there would be no way to see it.
+    """
+    if not cfg.pool_clusters:
+        return []
+    taken = {(int(r["X"]), int(r["Y"])) for r in singles}
+    pool = [r for r in alive if (int(r["X"]), int(r["Y"])) not in taken]
+    want = cfg.pool_clusters * cfg.pool_size
+    # Same sampler the singles use, so the members inherit the separation guarantee,
+    # and a different seed so the two draws do not land on the same pixels. The sampler
+    # returns nblocks x pixels_per_block, so ask for enough PER BLOCK to reach `want`
+    # -- deriving it from pool_clusters alone ignored the block count and came up
+    # short by exactly that factor.
+    x1, y1, x2, y2 = cfg.resolve_roi()
+    nblocks = (max(1, round((abs(x2 - x1) + 1) / cfg.block_size))
+               * max(1, round((abs(y2 - y1) + 1) / cfg.block_size)))
+    # +1 block's worth of slack: the quadrant chunking below drops the remainder of
+    # each quadrant's list, so asking for exactly `want` reliably yields fewer groups.
+    per_block = max(1, -(-want // nblocks) + 1)
+    pcfg = dataclasses.replace(cfg, block_seed=cfg.pool_seed,
+                               pixels_per_block=per_block)
+    picks = select_sweep_pixels(pool, pcfg, lambda _s: None)
+    by_quad: dict[str, list[Row]] = {}
+    for r in picks:
+        q = ("TL", "TR", "BL", "BR")[(1 if int(r["X"]) >= 256 else 0)
+                                     + 2 * (1 if int(r["Y"]) >= 256 else 0)]
+        by_quad.setdefault(q, []).append(r)
+    groups: list[Row] = []
+    for q, rs in sorted(by_quad.items()):
+        for i in range(0, len(rs) - cfg.pool_size + 1, cfg.pool_size):
+            if len(groups) >= cfg.pool_clusters:
+                break
+            grp = rs[i:i + cfg.pool_size]
+            members = tuple((int(r["X"]), int(r["Y"])) for r in grp)
+            head = dict(grp[0])
+            head["POOL_MEMBERS"] = members
+            head["POOL_QUADRANT"] = q
+            _pool_members[members[0]] = members
+            groups.append(head)
+    if not groups:
+        log(f"  pooling: no group of {cfg.pool_size} separated alive pixels fits in one "
+            f"quadrant -- nothing pooled, the single pixels are unaffected")
+        return []
+    if len(groups) < cfg.pool_clusters:
+        log(f"  pooling: only {len(groups)} of {cfg.pool_clusters} requested group(s) "
+            f"could be formed from {len(picks)} picked pixel(s)")
+    log(f"  pooling: {len(groups)} group(s) of {cfg.pool_size}, "
+        f"{len(groups) * cfg.pool_size} extra pixel(s) lit, swept as {len(groups)} "
+        f"target(s) on top of the {len(singles)} single pixel(s). A pooled row carries "
+        f"POOL_K and the SUM of its members -- EQE is unaffected, per-pixel current is "
+        f"not. Seed {cfg.pool_seed}.")
+    for g in groups:
+        log(f"    [{g['POOL_QUADRANT']}] "
+            + " ".join(f"({x},{y})" for x, y in g["POOL_MEMBERS"]))
+    return groups
 
 
 def run_sweep_current(pm, smu, smile, selected: list[Row], run_dir: Path,
@@ -1082,6 +1174,44 @@ _ref_warned: set[tuple[int, int]] = set()
 # sweep, so this only matters to the tests, which is why they clear it.
 
 _ref_cache: dict[tuple[int, int], tuple] = {}
+
+# (x, y) -> every member of the pooled group this target stands for. A target absent
+# from this map is an ordinary single pixel, which is the default and the common case.
+# Kept module-level beside _ref_cache for the same reason: measure_point is handed
+# coordinates, not the selection row, and threading a members argument through the two
+# sweep walks, the reference read and the pre-pass would be five signatures changed to
+# carry one fact that never varies within a run.
+_pool_members: dict[tuple[int, int], tuple[tuple[int, int], ...]] = {}
+
+
+def per_member_power(row) -> float:
+    """|P| divided by the number of members -- the quantity a dead test can compare.
+
+    Both dead-pixel tests judge a target against the median of the others. A pooled
+    target emits K x as much, so mixing the two unscaled would raise the median by
+    roughly K and condemn perfectly live SINGLE pixels. Per member, the two are
+    comparable again.
+    """
+    return abs(row["PM400_POWER_MEAN"]) / max(1, int(row.get("POOL_K", 1) or 1))
+
+
+def pool_members(x, y) -> tuple[tuple[int, int], ...]:
+    """The members this target lights. ``((x, y),)`` for an ordinary single pixel."""
+    return _pool_members.get((int(x), int(y)), ((int(x), int(y)),))
+
+
+def light(smile, x, y, bitval):
+    """Drive the target keyed by ``(x, y)`` at ``bitval``.
+
+    A single pixel goes through ``set_pixel``; a pooled group goes through
+    ``set_pixels``, which writes all K members in ONE frame instruction. That is why a
+    pooled point costs what a single point costs: the dwell, the settle and the burst
+    are per FRAME, not per pixel.
+    """
+    members = _pool_members.get((int(x), int(y)))
+    if members is None:
+        return smile.set_pixel(x, y, bitval)
+    return smile.set_pixels(members, bitval)
 # Per-pixel leakage reference, filled by prefill_reference_cache() and read by
 # measure_point() at every bias at or below cfg.leak_ref_per_point_above_v. Same
 # lifetime and the same reason as _ref_warned: one sweep per process.
@@ -1118,7 +1248,10 @@ def read_reference(pm, smu, smile, x, y, n_pm, n_smu, cfg: IQEConfig,
     # run 261015-0015 a healthy pixel references at 2e-4 of its own light and the
     # failures sit at 0.38-1.03, with no clean point above the gate at ANY bias.
     for tries in range(1, max(1, cfg.leak_ref_tries) + 1):
-        smile.set_pixel(x, y, cfg.leak_ref_bitval)
+        # The reference pools too. Section 6: an all-off frame conducts ~4x the
+        # bitval-0 level, and for a pooled target the same-members-at-bitval-0 frame is
+        # the only reference with the same frame structure and select state.
+        light(smile, x, y, cfg.leak_ref_bitval)
         time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
         # FULL n_pm, not a quarter of it. The reference current is stable to ~0.2 nA
         # and needs almost no averaging, but the reference POWER is the dark level
@@ -1264,18 +1397,29 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
             ref, tries, frac = read_reference(pm, smu, smile, x, y, n_pm, n_smu,
                                               cfg, p, log, v)
             if restore:
-                smile.set_pixel(x, y, bitval)
+                light(smile, x, y, bitval)
                 time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
             # else: the caller blanks the frame next, so lighting this pixel again and
             # waiting for it to settle would be two seconds spent on a state nothing
             # reads. In bias_major that is half the per-point cost, on every point.
 
     vr = round(float(v), 4)
+    # A pooled row's X,Y is its FIRST member, so the row still has a unique key and the
+    # analysis groups by it unchanged. POOL_K says how many pixels the numbers are the
+    # sum of. A reader that ignores POOL_K gets K x the power AND K x the current, so
+    # EQE comes out right and only per-pixel current density is wrong -- see
+    # RUN_FORMAT.md, which says to treat an absent column as 1.
+    members = pool_members(x, y)
     row = dict(X=x, Y=y, BITVAL=bitval, NVLED_V=vr,
                TIME_START=time.perf_counter() - t0, TIME_END=time.perf_counter() - t0,
                NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
                VLED_CURR_MEAN=iv, VLED_CURR_STD=ivs,
                PM400_POWER_MEAN=p, PM400_POWER_STD=ps)
+    if len(members) > 1:
+        # "x:y x:y", not "x,y": the aggregated writer joins fields with a comma and
+        # does not quote, so a comma inside a value silently shifts every later column.
+        row.update(POOL_K=len(members),
+                   POOL_MEMBERS=" ".join(f"{mx}:{my}" for mx, my in members))
     if ref is not None:
         rp, rps, riv, _, rinv, rinvs, _, _ = ref
         row.update(NVLED_CURR_REF=rinv, NVLED_CURR_REF_STD=rinvs,
@@ -1434,7 +1578,7 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
     # cannot differ anyway, or there would be no shared bias to hold.
     first = selected[0]
     smile.blank_frame()
-    smile.set_pixel(first["X"], first["Y"], cfg.bitvals[0])
+    light(smile, first["X"], first["Y"], cfg.bitvals[0])
     fine = build_fine_voltages(pm, smu, cfg, log,
                                tag=f"grid from ({first['X']},{first['Y']}): ")
     if not fine:
@@ -1458,7 +1602,7 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
         t_pre = time.perf_counter()
         for (x, y) in live:
             smile.blank_frame()
-            smile.set_pixel(x, y, cfg.bitvals[0])
+            light(smile, x, y, cfg.bitvals[0])
             time.sleep(cfg.warmup_ms / 1000.0)
         smile.blank_frame()
         log(f"  preconditioned {len(live)} pixel(s) at {cfg.warmup_nvled_v:+.2f} V, "
@@ -1544,7 +1688,7 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
             #
             # See config.pixel_switch_settle_s and sections 17-18.
             smile.blank_frame()
-            smile.set_pixel(live[0][0], live[0][1], bitval)
+            light(smile, live[0][0], live[0][1], bitval)
             smu.set_voltage("b", float(v))
             dwell = settle_s * cfg.settle_scale
             if cfg.trace_settling and dwell >= cfg.trace_settling_min_s:
@@ -1563,7 +1707,7 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
                 if parked():
                     break
                 smile.blank_frame()
-                smile.set_pixel(x, y, bitval)
+                light(smile, x, y, bitval)
                 time.sleep(cfg.pixel_switch_settle_s * cfg.settle_scale)
                 row, raw_s = measure_point(pm, smu, smile, x, y, bitval, v, limit,
                                            n_pm, n_smu, cfg, t0, log, restore=False)
@@ -1575,10 +1719,10 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
                 # high_to_low is the brightest, exactly as in pixel_major. Here it
                 # drops the pixel from every remaining bias, so one judgement saves
                 # n_points measurements instead of n_points-1.
-                if cfg.dead_abort and jpt == 0 and abs(row["PM400_POWER_MEAN"]) < \
+                if cfg.dead_abort and jpt == 0 and per_member_power(row) < \
                         max(cfg.dead_abort_nw * 1e-9,
                             cfg.dead_abort_frac * float(np.median(
-                                [abs(r["PM400_POWER_MEAN"]) for r in rows]))):
+                                [per_member_power(r) for r in rows]))):
                     dead_here.append((x, y))
             for px in dead_here:
                 live.remove(px)
@@ -1744,7 +1888,7 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
             # first pixel of every scan, old script included: run 261014-0048 pixel 33,32
             # had REF/lit = 0.5018 against 0.0065 for all 23 others.
             smile.blank_frame()
-            smile.set_pixel(x, y, bitval)
+            light(smile, x, y, bitval)
             fine = build_fine_voltages(pm, smu, cfg, log, tag=f"bit{bitval}: ")
             # Conditioning dwell: hold at high current to clear the slow non-radiative
             # parasitic current that otherwise contaminates the low-J denominator on a
@@ -1823,7 +1967,9 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                 last_v = v
                 # Early dead-pixel abort: judge on the first (brightest) point only.
                 if cfg.dead_abort and jpt == 0:
-                    first_p = abs(p)
+                    # Per member, so a pooled target is judged on the same scale as a
+                    # single pixel and cannot poison the running live median.
+                    first_p = per_member_power(row)
                     if first_p < dead_thr:
                         log(f"      dead-skip: brightest point P={first_p*1e9:.2f} nW "
                             f"< {dead_thr*1e9:.2f} nW → skipping remaining {len(fine)-1} points")
