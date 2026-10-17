@@ -1043,6 +1043,12 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
     return sel + select_pool_clusters(alive, sel, cfg, log)
 
 
+# Measured on run 261015-0015: the median pixel draws 117.7 uA at -2.60 V and 33.3 uA
+# at the -1.35 V fast-scan bias. The ratio is what turns a fast-scan reading, which the
+# selection already has, into a bright-end estimate it does not.
+BRIGHT_OVER_FASTSCAN = 117.7 / 33.3
+
+
 def select_pool_clusters(alive: list[Row], singles: list[Row], cfg: IQEConfig,
                          log: Logger) -> list[Row]:
     """Pick ``pool_clusters`` groups of ``pool_size`` alive pixels, each inside ONE quadrant.
@@ -1104,6 +1110,31 @@ def select_pool_clusters(alive: list[Row], singles: list[Row], cfg: IQEConfig,
     if len(groups) < cfg.pool_clusters:
         log(f"  pooling: only {len(groups)} of {cfg.pool_clusters} requested group(s) "
             f"could be formed from {len(picks)} picked pixel(s)")
+    # The OTHER cap on K, and a harder one than detection: K members draw K x the
+    # current, and pick_limit's ladder stops at vramp_highv_limit_a. At the measured
+    # 117.7 uA per pixel at -2.60 V, a 1 mA ceiling clamps at K = 8. A clamped point is
+    # the instrument's current, not the device's, and the EQE from it is meaningless --
+    # so say it here, at selection, and not 30 hours later in NVLED_AT_COMPLIANCE.
+    # Each member's own fast-scan current, by coordinate. .get() because a caller may
+    # hand in bare {X, Y} rows -- RUN_FORMAT.md's rule, and here it means the check
+    # quietly does not run rather than taking the selection down with it.
+    i_fs = {(int(r["X"]), int(r["Y"])): abs(float(r.get("NVLED_CURR_MEAN") or 0.0))
+            for r in alive}
+    worst = max((sum(i_fs.get(m, 0.0) for m in g["POOL_MEMBERS"]) for g in groups),
+                default=0.0)
+    i_bright = worst * BRIGHT_OVER_FASTSCAN
+    if i_bright > cfg.vramp_highv_limit_a:
+        log(f"  !! POOLED CLAMPING EXPECTED: the brightest group should draw "
+            f"~{i_bright*1e6:.0f} uA at {cfg.nvled_v_coarse_stop:g} V, over the "
+            f"{cfg.vramp_highv_limit_a*1e6:.0f} uA ceiling of pick_limit's ladder. "
+            f"Those points will sit on the compliance limit and are NOT measurements "
+            f"-- they are flagged NVLED_AT_COMPLIANCE and dropped by the analysis. "
+            f"Use pool_size <= {max(1, int(cfg.vramp_highv_limit_a / max(i_bright / cfg.pool_size, 1e-12)))}, "
+            f"or raise vramp_highv_limit_a, or stop the sweep short of the bright end.")
+    elif i_bright > 0.7 * cfg.vramp_highv_limit_a:
+        log(f"  pooled bright-end estimate ~{i_bright*1e6:.0f} uA against a "
+            f"{cfg.vramp_highv_limit_a*1e6:.0f} uA ceiling -- close, watch "
+            f"NVLED_AT_COMPLIANCE.")
     log(f"  pooling: {len(groups)} group(s) of {cfg.pool_size}, "
         f"{len(groups) * cfg.pool_size} extra pixel(s) lit, swept as {len(groups)} "
         f"target(s) on top of the {len(singles)} single pixel(s). A pooled row carries "
@@ -2275,7 +2306,11 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
         if not selected:
             log("No alive pixels selected - nothing to sweep.")
         elif warmup_diag:
-            pixels = [(r["X"], r["Y"]) for r in selected[:cfg.warmup_diag_n_pixels]]
+            # Singles only. The diagnostic watches one pixel turn on and relax; a
+            # pooled target would be driven as its first member alone here, which is a
+            # different measurement reported under the same coordinates.
+            pixels = [(r["X"], r["Y"]) for r in selected
+                      if "POOL_MEMBERS" not in r][:cfg.warmup_diag_n_pixels]
             run_warmup_diag(pm, smu, smile, pixels, out_dir, cfg, log)
         elif cfg.source_mode == "current":
             n_points = run_sweep_current(pm, smu, smile, selected, out_dir, cfg, log)

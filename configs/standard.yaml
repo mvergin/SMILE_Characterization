@@ -65,12 +65,19 @@ block_seed: 0   # blocks mode: RNG seed (vary across runs to sample new pixels)
 # Pooled EQE = sum(P)/sum(I) is a CURRENT-WEIGHTED mean of the members, not the mean of
 # their EQEs. The two differ whenever brightness and current correlate across members.
 pool_clusters: 0   # pooled groups swept IN ADDITION to the single pixels. 0 = off.
-pool_size: 4       # members per group. 4, not 16: a dead or dim member is a 1/K deficit
-                   # against a sum whose own spread is 16.4%/sqrt(K) (the array's
-                   # measured alive-pixel brightness spread, 52.21 +- 8.55 nW over
-                   # 261 441 pixels, run 261015-0015). That is 3.0 sigma at K=4 and only
-                   # 1.5 sigma at K=16, so above ~4 a pooled reading cannot tell "one
-                   # member died" from "these members are dim".
+pool_size: 4       # members per group. 4, not 16, for two measured reasons.
+                   # DETECTION: a dead or dim member is a 1/K deficit against a sum
+                   # whose own spread is 16.4%/sqrt(K) (the array's measured alive-pixel
+                   # brightness spread, 52.21 +- 8.55 nW over 261 441 pixels, run
+                   # 261015-0015). That is 3.0 sigma at K=4 and 1.5 sigma at K=16, so
+                   # above ~4 a pooled reading cannot tell "one member died" from "these
+                   # members are dim".
+                   # COMPLIANCE, the harder cap: K members draw K x the current and
+                   # pick_limit's ladder stops at vramp_highv_limit_a. At the measured
+                   # 117.7 uA per pixel at -2.60 V a 1 mA ceiling clamps at K=8, and a
+                   # clamped point is the instrument's current, not the device's. The
+                   # selection estimates this from the fast scan and warns before the
+                   # sweep starts.
 pool_seed: 1       # separate RNG stream from block_seed, so the pooled members are
                    # never the single pixels. Sharing one would make the grounding
                    # comparison circular.

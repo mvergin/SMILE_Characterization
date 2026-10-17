@@ -568,11 +568,22 @@ costs what a single point costs — K pixels per dwell instead of one. The refer
 pools with it: the same K members at `leak_ref_bitval`, never a blanked frame, since
 a blanked frame conducts ~4× the bitval-0 level.
 
-What pooling cannot do is tell you which member did what. A pooled reading is a sum,
-and a dead member is a `1/K` deficit against a sum whose own spread is `16.4 %/√K` —
-the array's measured alive-pixel brightness spread (52.21 ± 8.55 nW over 261 441
-pixels, run 261015-0015). That is 3.0σ at K = 4 and 1.5σ at K = 16, which is why
-`pool_size` defaults to 4.
+Two measured things cap K, and `pool_size` defaults to 4 because of them:
+
+* **Detection.** A pooled reading is a sum, and a dead member is a `1/K` deficit
+  against a sum whose own spread is `16.4 %/√K` — the array's measured alive-pixel
+  brightness spread (52.21 ± 8.55 nW over 261 441 pixels, run 261015-0015). That is
+  3.0σ at K = 4 and 1.5σ at K = 16. Above ~4, a pooled reading cannot tell *one member
+  died* from *these members are dim*.
+* **Compliance, which is the harder cap.** K members draw K× the current, and
+  `pick_limit`'s ladder stops at `vramp_highv_limit_a`. At the measured 117.7 µA per
+  pixel at −2.60 V, a 1 mA ceiling clamps at **K = 8**, and a clamped point is the
+  instrument's current, not the device's. The selection estimates this from the fast
+  scan and says so before the sweep starts, rather than leaving it to
+  `NVLED_AT_COMPLIANCE` thirty hours later.
+
+The detection cap lifts once each member's own brightness is known — which is exactly
+what the single pixels in the same run buy. The compliance cap does not.
 
 Three rules the selection enforces, each for a measured reason:
 

@@ -336,9 +336,15 @@ Two things the correction added that matter more than the arithmetic:
 * **the group test is ANALOG, and that, not Dorfman, caps K.** One dead member is a
   `1/K` deficit against a sum whose own spread is `16.4 %/√K` (the measured
   alive-pixel brightness spread, 52.21 ± 8.55 nW). That is 3.0σ at K = 4 and 1.5σ at
-  K = 16, so `max_detectable_k()` returns 4.1 and `pool_size` defaults to 4. The cap
-  lifts once the members' individual brightnesses are known — which is exactly what a
-  single-pixel pass in the same session buys.
+  K = 16, so `max_detectable_k()` returns 4.1. The cap lifts once the members'
+  individual brightnesses are known — which is exactly what a single-pixel pass in the
+  same session buys.
+* **and the code review found a second cap, harder than both.** K members draw K× the
+  current, and `pick_limit`'s ladder stops at `vramp_highv_limit_a`. At the measured
+  117.7 µA per pixel at −2.60 V a 1 mA ceiling clamps at **K = 8**. Two independent
+  measurements therefore land on the same answer, and `pool_size` defaults to 4.
+  `select_pool_clusters` estimates the bright-end current from the members' own
+  fast-scan readings and warns at selection time; this one does not lift.
 
 `yieldsimu.py` has a `_selfcheck()` on both claims and runs it before plotting.
 

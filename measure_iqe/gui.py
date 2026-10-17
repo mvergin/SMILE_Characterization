@@ -242,7 +242,6 @@ class App(ttk.Frame):
         self.array = tk.StringVar(value="")
         self.config_file = tk.StringVar(value="")
         self.out_dir = tk.StringVar(value="")
-        self.extra = tk.StringVar(value="")
         self.jobs: list[list[str]] = []
         self.runner = Runner()
 
@@ -502,6 +501,11 @@ class App(ttk.Frame):
                     self._say("=== all jobs finished")
         except queue.Empty:
             pass
+        except Exception as exc:                      # noqa: BLE001
+            # One bad line must not stop the log for the rest of the session: the pump
+            # is the only thing draining the runner's queue, and a dead pump looks
+            # exactly like a hung measurement.
+            self.log.insert("end", f"!! console error while logging: {exc!r}\n")
         self.after(100, self._pump)
 
 

@@ -1532,6 +1532,73 @@ def test_the_console_presets_describe_runs_that_actually_happen():
     assert len(acquire.select_sweep_pixels(alive, cfg1k, QUIET)) == 1000
 
 
+def test_a_pooled_group_that_will_clamp_says_so_before_the_sweep():
+    """K members draw K x the current, and pick_limit's ladder has a ceiling.
+
+    Measured 261015-0015: 117.7 uA per pixel at -2.60 V against a 1 mA
+    vramp_highv_limit_a, so K=8 is the edge and K=16 clamps. A clamped point is the
+    instrument's current, not the device's, and the EQE from it is meaningless -- so
+    this has to be said at selection and not 30 hours later in NVLED_AT_COMPLIANCE.
+    """
+    # every pixel at the measured fast-scan current, so the estimate is the real one
+    alive = [{"X": x, "Y": y, "NVLED_CURR_MEAN": -33.3e-6}
+             for x in range(64) for y in range(64)]
+    seen = {}
+    for k in (4, 8, 16):
+        cfg = IQEConfig(roi=(0, 0, 63, 63), block_size=16, pixels_per_block=1,
+                        pool_clusters=2, pool_size=k).validate()
+        singles = acquire.select_sweep_pixels(alive, cfg, QUIET)
+        msgs: list[str] = []
+        groups = acquire.select_pool_clusters(alive, singles, cfg, msgs.append)
+        assert groups, f"K={k}: nothing selected, the test measures nothing"
+        seen[k] = " ".join(msgs)
+    assert "CLAMPING EXPECTED" not in seen[4], (
+        "K=4 draws ~471 uA against a 1 mA ceiling and must not warn")
+    assert "CLAMPING EXPECTED" not in seen[8] and "close, watch" in seen[8], (
+        "K=8 draws ~942 uA: close, but not over")
+    assert "CLAMPING EXPECTED" in seen[16], (
+        "K=16 draws ~1.9 mA against a 1 mA ceiling and must warn")
+    assert "pool_size <= 8" in seen[16], (
+        f"the warning must name a usable K, got: {seen[16]}")
+
+
+def test_the_warmup_diagnostic_never_runs_on_a_pooled_target():
+    """It watches ONE pixel turn on and relax.
+
+    A pooled target reaching it would be driven as its first member alone, which is a
+    different measurement reported under the same coordinates.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = IQEConfig(**{**FAST, "roi": (0, 0, 15, 15), "block_size": 8,
+                           "pool_clusters": 1, "pool_size": 4,
+                           "warmup_diag_n_pixels": 8, "warmup_diag_seconds": 0.01})
+        res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET,
+                                  warmup_diag=True)
+        csvs = list(Path(res.run_dir).rglob("*armup*.csv"))
+        assert csvs, "the warm-up diagnostic wrote nothing"
+        import csv as _csv
+        with csvs[0].open() as f:
+            rows = list(_csv.DictReader(f))
+    assert rows, "no warm-up rows"
+    # asked for 8 pixels from a selection of 4 singles + 1 pooled target: it must stop
+    # at the 4 singles rather than reach into the pooled one
+    seen = {(r["pixel_x"], r["pixel_y"]) for r in rows}
+    assert len(seen) <= 4, f"the diagnostic touched {len(seen)} targets, expected <= 4"
+
+
+def test_aggregated_fields_keep_full_float_precision():
+    """`agg_field` must not round-trip a float through `str`.
+
+    It writes strings bare so POOL_MEMBERS is usable, and that change must not quietly
+    turn every number into a shorter one.
+    """
+    v = 1.2345678901234567e-09
+    assert acquire.agg_field(v) == repr(v) and float(acquire.agg_field(v)) == v
+    assert acquire.agg_field(True) == "True"
+    assert acquire.agg_field(float("nan")) == "nan"
+    assert acquire.agg_field("7:5 5:13") == "7:5 5:13", "a string must not be quoted"
+
+
 if __name__ == "__main__":
     # write_calibration() writes to every calibration root, the install tree included.
     # That is wanted for a real --calibrate and poison for a test: the suite once

@@ -133,11 +133,17 @@ class IQEConfig:
     pool_clusters: int = 0  # pooled groups swept IN ADDITION to the single pixels.
                             # 0 = off. The singles are unaffected either way, so a
                             # pooled run is a superset of the ordinary one.
-    pool_size: int = 4      # members per group. 4, not 16, because a dead or dim member
-                            # is a 1/K deficit against a sum whose own spread is
-                            # 16.4%/sqrt(K): detectable at 3.0 sigma for K=4 and only
-                            # 1.5 sigma for K=16. Above ~4 a pooled reading cannot tell
-                            # "one member died" from "these members are dim".
+    pool_size: int = 4      # members per group. 4, not 16, for two measured reasons.
+                            # DETECTION: a dead or dim member is a 1/K deficit against
+                            # a sum whose own spread is 16.4%/sqrt(K), which is 3.0
+                            # sigma at K=4 and 1.5 sigma at K=16 -- above ~4 a pooled
+                            # reading cannot tell "one member died" from "these members
+                            # are dim". COMPLIANCE, and this one is harder: K members
+                            # draw K x the current and pick_limit's ladder stops at
+                            # vramp_highv_limit_a, so at the measured 117.7 uA per pixel
+                            # at -2.60 V a 1 mA ceiling clamps at K=8. select_pool_
+                            # clusters estimates it from the fast scan and says so
+                            # before the sweep starts.
     pool_seed: int = 1      # separate RNG stream from block_seed, so the pooled members
                             # are not the single pixels. Sharing a pixel between the two
                             # would make the grounding comparison circular.
