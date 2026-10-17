@@ -539,7 +539,7 @@ collects under pytest if you have it.
 ```bash
 python test_measure_iqe.py              # the config, the CLI, the sweep plumbing
 python test_run_format.py               # the WRITER side of RUN_FORMAT.md
-python test_characterize_capacitance.py # the switch metric and the optical poller
+python test_characterize_capacitance.py # the switch metric, the optical poller, set_pixels
 python analysis/test_reads_run_format.py   # the READER side of the same contract
 ```
 
@@ -588,6 +588,7 @@ reading is right, and it is the likely cause of:
 ```bash
 python characterize_capacitance.py --what all --highc-both
 python characterize_capacitance.py --what optfloor          # 2 min, no pixels needed
+python characterize_capacitance.py --what cluster --highc --compliance 1e-5
 ```
 
 **That C is the same everywhere is an assumption**, so every pixel-dependent
@@ -606,9 +607,12 @@ immediately before its long run, and a dead one is skipped and reported. Pass
 | `stepdir` | One voltage reached from a small and from a large step. Parasitic conduction depends on time since turn-on; a capacitor depends on the charge moved. If settling scales with \|ΔV\|, it is the capacitor. |
 | `decay` | Charge the cap, then source 0 A so the node floats and discharges through the LED, logging V(t) and light. `I = C·dV/dt`. Run lit and blanked; the difference is the LED current. See below. |
 | `optfloor` | The PM400 noise floor vs averaging, array blanked. Decides how low in J you can go at all. |
+| `cluster` | K pixels lit at once (K = 1, 4, 16), pooled P and I at one faint bias. `optfloor` says how big the meter noise is; this says whether it **averages down**. Needs no `--pixels`. |
 
 `--simulate` exercises the plumbing only — the built-in rig has no capacitance
-model, so it reports instant settling and cannot model the decay.
+model, so it reports instant settling and cannot model the decay. Its PM noise
+is purely relative, with no additive dark floor, so `cluster` cannot average
+down in simulation either and says so before printing its verdict.
 
 ### How low in J can you go?
 
@@ -655,6 +659,30 @@ So **J = 0.1 is reachable at `n_pm` 512 provided EQE there is within ~11× of it
 peak**, and at `n_pm` 32 only if it is within ~4×. `optfloor` also records
 `per_point_s`, the time each averaging level costs per measured point, which is
 what a sweep has to pay.
+
+### The other lever: light K pixels at once
+
+Averaging buys sensitivity as `N^−0.5`, and `per_point_s` is the bill. `cluster`
+buys the same square root a different way — by multiplying the **signal** instead
+of integrating longer. K pixels lit together emit K× the light while the meter's
+dark drift stays where it is, so 16 pixels are worth 16× the averaging time and
+cost one dwell instead of sixteen.
+
+`SmileFPGA.set_pixels(coords, bitval)` writes them in **one** frame instruction,
+the same `RESET_DIS` + `USB_2_DIS` pair a single pixel costs, because `roi_lrow`
+is derived from the payload length. Two constraints the primitive enforces:
+
+* **one quadrant per cluster.** The `tl_pixen`/`tr_pixen`/… enables live in the
+  frame instruction, not in the pixel data. A cluster across a 256 boundary would
+  silently light the near quadrant's mirror image, so it raises instead.
+* **the reference pools too.** The reference for K lit pixels is the same K pixels
+  at `leak_ref_bitval`, never a blanked frame — a blanked frame conducts ~4× the
+  bitval-0 level, and that error grows with K.
+
+The verdict is the `rel_scatter_x_sqrt_k` column. Flat across K means the faint-end
+scatter is meter noise and a cluster buys a cleaner faint end; rising with K means
+the scatter is the array and a cluster buys nothing but a loss of per-pixel
+resolution. Pooled EQE = ΣP/ΣI is a current-weighted mean of the members.
 
 On the current side, `decay` is the route below 1 µA. At 100 nA into 50 µF the
 decay slope is `I/C` = **2 mV/s**, which the SMU's voltmeter resolves far better

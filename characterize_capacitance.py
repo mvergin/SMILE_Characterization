@@ -53,12 +53,19 @@ Experiments (``--what``):
             difference is the LED current. This is the route to J < 1.
   optfloor  The PM400 noise floor vs averaging, array blanked. Decides how low in
             J you can go at all, since the light scales with the current.
+  cluster   K pixels lit at once (K = 1, 4, 16), pooled P and I at one faint bias.
+            optfloor says how big the meter noise is; this says whether it
+            AVERAGES DOWN. If the relative scatter falls as 1/sqrt(K) the floor is
+            the meter and a cluster buys a cleaner faint end; if it stays at 8.5 %
+            the scatter is the array. The reference pools too -- the same K pixels
+            at bitval 0, never a blanked frame. Needs no --pixels.
 
 Usage:
     python characterize_capacitance.py --what all
     python characterize_capacitance.py --what step cap --per-quadrant 3
     python characterize_capacitance.py --what isrc --pixels 54,33 177,63 --isrc-seconds 300
     python characterize_capacitance.py --what optfloor          # 2 minutes, no pixels needed
+    python characterize_capacitance.py --what cluster --highc --compliance 1e-5
 
 Writes one CSV per experiment, every row tagged with its pixel. It fits and plots
 nothing; point ``analysis/`` at the CSVs for that.
@@ -73,6 +80,7 @@ import csv
 import dataclasses
 import datetime
 import json
+import math
 import threading
 import time
 from pathlib import Path
@@ -1197,9 +1205,130 @@ def exp_optfloor(pm, smu, smile, cfg, args, log):
     return rows
 
 
+def _quadrant_of(x, y):
+    """Which 256x256 quadrant a logical pixel sits in."""
+    return ("TL", "TR", "BL", "BR")[(1 if x >= 256 else 0) + 2 * (1 if y >= 256 else 0)]
+
+
+def exp_cluster(pm, smu, smile, cfg, args, log):
+    """Pooled K-pixel measurement. Does the faint-end scatter fall as 1/sqrt(K)?
+
+    ROADMAP item 5, and the only live attack on open question 1. The PM400 dark
+    reading wanders 75 pW under a 210 pW signal, and faint-end power scatters
+    8.5-8.9 % under BOTH sweep methods -- which is why the suspect is the meter and
+    not the method. Lighting K pixels multiplies the light by K and leaves the drift
+    where it is.
+
+    The verdict is one number, ``rel_scatter * sqrt(K)``:
+
+      * constant across K  -> the scatter is meter noise, and a 16-pixel cluster
+        buys a 4x cleaner faint end. Pooled EQE = sum(P)/sum(I) is a
+        current-weighted mean of the members, which is arguably the right array
+        figure anyway.
+      * rising with K      -> the scatter is the array, and a cluster buys nothing
+        but a loss of per-pixel resolution.
+
+    Two things this must not get wrong:
+
+      * **the reference pools too.** Section 6: an all-off frame conducts ~4x the
+        bitval-0 level, so lit-minus-blanked subtracts the wrong number. The
+        reference is the SAME K pixels addressed at ``leak_ref_bitval``.
+      * **the members are separated, not adjacent.** ``select_pixels`` hands back
+        picks at least ``min_pixel_separation`` apart. Adjacent members would
+        confound K-scaling with thermal and optical crosstalk, and the question
+        here is only whether the meter noise averages down.
+
+    K is nested: K=4 is the first four members of the K=16 set, so the comparison
+    across K is the same pixels plus more, never a different sample.
+    """
+    members = [(p["X"], p["Y"]) for p in
+               select_pixels(pm, smu, smile, cfg,
+                             argparse.Namespace(**{**vars(args),
+                                                   "quadrants": [args.quadrants[0]],
+                                                   "per_quadrant": max(args.cluster_k)}),
+                             log)]
+    quads = sorted({_quadrant_of(x, y) for x, y in members})
+    if len(quads) > 1:
+        raise ValueError(f"a cluster must stay inside one quadrant, got {quads}: the "
+                         f"pixel-enable bits are per frame, not per pixel")
+    ks = [k for k in sorted(args.cluster_k) if k <= len(members)]
+    if not ks:
+        log(f"    only {len(members)} alive pixel(s), need at least {min(args.cluster_k)}")
+        return []
+    if max(args.cluster_k) > len(members):
+        log(f"    only {len(members)} alive pixel(s) in {quads[0]}, K capped at {max(ks)}")
+
+    m.configure_voltage_source_b(smu, cfg, log)
+    smu.set_voltage("b", args.cluster_v)
+    # The bias is set once and never moves, so the charge-limited wait is paid once.
+    # Every later wait is a frame change at a held bias, which is the cheap one.
+    charge = min(3 * charge_time_s(args.capacitance, args.cluster_v,
+                                   cfg.nvled_compliance), args.max_presettle_s)
+    log(f"    {len(members)} member(s) in {quads[0]} at {args.cluster_v:+.2f} V, "
+        f"K = {ks}, {args.cluster_reps} reps; charging {charge:.1f} s")
+    smile.set_pixels(members[:1], cfg.bitvals[0])
+    time.sleep(max(charge, args.cluster_settle_s))
+
+    rows = []
+    base = None
+    for k in ks:
+        grp = members[:k]
+        states = {}
+        for state, bv in (("lit", cfg.bitvals[0]), ("off", cfg.leak_ref_bitval)):
+            smile.set_pixels(grp, bv)
+            time.sleep(args.cluster_settle_s)
+            states[state] = [m.acquire_point(pm, smu, args.cluster_n_smu,
+                                             args.cluster_n_pm)
+                             for _ in range(args.cluster_reps)]
+        p = np.array([r[0] for r in states["lit"]]) - np.array([r[0] for r in states["off"]])
+        i = np.array([r[4] for r in states["lit"]]) - np.array([r[4] for r in states["off"]])
+        p_m, i_m = float(p.mean()), float(abs(i).mean())
+        p_sd = float(p.std(ddof=1)) if p.size > 1 else float("nan")
+        rel = abs(p_sd / p_m) if p_m else float("nan")
+        ok = bool(np.isfinite(p_m) and p_m > 0 and i_m > 0)
+        rows.append(dict(k=k, quadrant=quads[0], v=args.cluster_v,
+                         members=" ".join(f"{x},{y}" for x, y in grp),
+                         reps=args.cluster_reps,
+                         p_led_W=p_m, p_led_sd_W=p_sd, rel_scatter=rel,
+                         # the verdict column: flat across K means meter noise
+                         rel_scatter_x_sqrt_k=rel * math.sqrt(k),
+                         p_per_pixel_W=p_m / k,
+                         i_led_A=i_m, i_led_sd_A=float(abs(i).std(ddof=1)) if i.size > 1 else float("nan"),
+                         i_per_pixel_A=i_m / k, j_per_pixel=to_j(i_m / k, cfg),
+                         p_lit_W=float(np.mean([r[0] for r in states["lit"]])),
+                         p_off_W=float(np.mean([r[0] for r in states["off"]])),
+                         i_lit_A=float(np.mean([abs(r[4]) for r in states["lit"]])),
+                         i_off_A=float(np.mean([abs(r[4]) for r in states["off"]])),
+                         pooled_eqe=((p_m / cfg.photon_energy_j)
+                                     / (i_m / 1.602176634e-19)) if ok else float("nan"),
+                         led_current_physical=ok,
+                         smu_errors=drain_errors(smu)))
+        if base is None:
+            base = rel
+        log(f"    K={k:>3}: P {p_m*1e12:9.1f} pW +-{p_sd*1e12:7.1f}  "
+            f"({100*rel:5.2f}% scatter, x sqrt(K) = {100*rel*math.sqrt(k):5.2f}%)  "
+            f"I {i_m*1e9:8.1f} nA  J/px {to_j(i_m/k, cfg):6.3f}"
+            + (f"  EQE {100*rows[-1]['pooled_eqe']:6.3f}%" if ok else "  << NON-PHYSICAL"))
+    smile.blank_frame()
+
+    if len(rows) > 1:
+        first, last = rows[0], rows[-1]
+        gain = first["rel_scatter"] / last["rel_scatter"] if last["rel_scatter"] else float("nan")
+        ideal = math.sqrt(last["k"] / first["k"])
+        log(f"    K={first['k']} -> K={last['k']}: scatter fell {gain:.2f}x, "
+            f"1/sqrt(K) predicts {ideal:.2f}x -> "
+            + ("METER NOISE, a cluster buys a cleaner faint end"
+               if gain >= 0.7 * ideal else
+               "NOT meter noise, the scatter is the array"))
+        if args.simulate:
+            log("    (the sim rig has no additive optical floor -- its PM noise is "
+                "purely relative, so it CANNOT average down. Ignore this verdict.)")
+    return rows
+
+
 PER_PIXEL = {"step": exp_step, "cap": exp_cap, "leak": exp_leak, "isrc": exp_isrc,
              "stepdir": exp_stepdir, "switch": exp_switch, "decay": exp_decay}
-ARRAY_WIDE = {"optfloor": exp_optfloor}
+ARRAY_WIDE = {"optfloor": exp_optfloor, "cluster": exp_cluster}
 ALL = [*PER_PIXEL, *ARRAY_WIDE]
 
 
@@ -1253,6 +1382,11 @@ def estimate_seconds(what, cfg, args, n_pixels):
         total += n_pixels * 2 * (args.decay_charge_s + args.decay_seconds)
     if "optfloor" in what:
         total += sum(n * 4e-3 * args.optfloor_reps for n in args.optfloor_n)
+    if "cluster" in what:
+        # two frame states per K, each one settle plus reps x (PM reads || SMU burst)
+        per_rep = max(args.cluster_n_pm * 4e-3, args.cluster_n_smu * 2 / 50.0)
+        total += len(args.cluster_k) * 2 * (args.cluster_settle_s
+                                            + args.cluster_reps * per_rep)
     if not args.pixels:
         total += len(args.quadrants) * args.quadrant_window ** 2 * 0.21
     return total
@@ -1392,6 +1526,19 @@ def build_parser():
                     help="repeats per N_PM, for the repeatability spread")
     ap.add_argument("--responsivity-w-per-a", type=float, default=22e-9 / 25e-6,
                     help="W of optical power per A of LED current, for the min-J estimate")
+    ap.add_argument("--cluster-k", nargs="+", type=int, default=[1, 4, 16],
+                    help="how many pixels to light at once, nested: K=4 is the first "
+                         "four members of the K=16 set")
+    ap.add_argument("--cluster-v", type=float, default=-0.90,
+                    help="the faint-end bias the scatter is measured at")
+    ap.add_argument("--cluster-reps", type=int, default=12,
+                    help="repeats per K, for the scatter. This is the whole statistic, "
+                         "so it is the knob that costs time")
+    ap.add_argument("--cluster-settle-s", type=float, default=2.0,
+                    help="wait after a frame change at the held bias. The bias itself "
+                         "is charged once, before the first K")
+    ap.add_argument("--cluster-n-pm", type=int, default=8)
+    ap.add_argument("--cluster-n-smu", type=int, default=16)
     return ap
 
 

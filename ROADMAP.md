@@ -11,7 +11,7 @@ Items 0 and 1 are done; the rest are proposals, not decisions.
 | 2b | `characterize_capacitance` into `measure_iqe` | **deferred, deliberately** | ~1 h | see below |
 | 3 | config: a local override for `base_dir` | yes — but **not** by auto-loading `standard.yaml` | ~1 h | **done** |
 | 4 | README | yes, after 1–3 | ~2 h | **done** |
-| 5 | cluster / strided scan | pursue — but not for the reason it was proposed | spike first | next |
+| 5 | cluster / strided scan | pursue — but not for the reason it was proposed | spike first | **primitive + harness done, bench run pending** |
 | 6 | GUI | last | 1–2 days | open |
 
 ---
@@ -266,6 +266,41 @@ comes along free as a second use of the same primitive.
 
 Correct the 1 s → 30 ms cost in `yieldsimu.py` before trusting its break-even maps. It
 moves every curve.
+
+### Done, 17 October 2026 — the primitive and the harness, not yet the answer
+
+The spike is built and runs end to end in simulation. The bench run is what is left,
+and it is ~2 minutes of instrument time.
+
+* **`smile.utils.display.set_pixels(dev, coords, value, cfg)`** — K pixels of one
+  quadrant in **one** `RESET_DIS` + `USB_2_DIS` pair, the same cost as one pixel.
+  It reuses `_pixel_row_constructor` and ORs the rows together, so the nibble
+  addressing lives in exactly one place, and it hands the payload to `set_row`,
+  which already derives `roi_lrow` from the payload length. No second copy of the
+  frame builder.
+* **`SmileFPGA.set_pixels(coords, bit_val)`** — logical coordinates, and the two
+  guards the hardware needs. A cluster that straddles a 256 boundary raises rather
+  than silently lighting the near quadrant's mirror image, and an out-of-array
+  coordinate raises rather than taking `map_logical_to_physical`'s legacy fall back
+  to TL, which for one pixel is harmless and for a cluster collides two members.
+* **`characterize_capacitance.py --what cluster`** — nested K (K=4 is the first four
+  members of the K=16 set, never a fresh sample), the pooled bitval-0 reference, and
+  one verdict column, `rel_scatter_x_sqrt_k`. The bias is charged once and every
+  later wait is a frame change at a held bias.
+
+Six checks in `test_characterize_capacitance.py`, three of them on the bit packing:
+one pixel through `set_pixels` packs identically to `set_pixel`, K pixels are the OR
+of their single-pixel frames and nothing leaks into an empty row, and the guards
+reject what they must. Two more drive `exp_cluster` against the sim rig and assert
+the reference pools and the K sets nest.
+
+Still open, and deliberately not built: the pooled path is **not** wired into
+`measure_iqe`'s sweep. That is only worth doing if the bench run says the scatter
+falls, and the run is the cheap half.
+
+`yieldsimu.py` and `pseudo_implementation_clusterscan.py` are **not in this repo** —
+they are not in the history either, so the 1 s → 30 ms correction has to be made
+wherever they actually live.
 
 ## 6. GUI — last
 

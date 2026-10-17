@@ -27,13 +27,15 @@ class SmileFPGA:
         self._dev = smile_dev
         # Lazy import so the module can be imported without the smile library installed.
         if smile_dev is not None:
-            from smile.utils.display import send_image, set_pixel
+            from smile.utils.display import send_image, set_pixel, set_pixels
 
             self._send_image = send_image
             self._set_pixel = set_pixel
+            self._set_pixels = set_pixels
         else:
             self._send_image = None
             self._set_pixel = None
+            self._set_pixels = None
 
     # ------------------------------------------------------------------
     # Coordinate mapping
@@ -77,6 +79,40 @@ class SmileFPGA:
         row, col, quad_cfg = self.map_logical_to_physical(log_x, log_y)
         if self._dev is not None:
             self._set_pixel(self._dev, row, col, bit_val, cfg=quad_cfg)
+        return time.perf_counter()
+
+    def set_pixels(self, coords, bit_val):
+        """Turn on several logical pixels at once, all in ONE quadrant.
+
+        `coords` is an iterable of (log_x, log_y). The quadrant enable bits
+        (`tl_pixen`/`tr_pixen`/...) live in the frame instruction, not in the
+        pixel data, so a cluster that straddles a 256 boundary cannot be written
+        as one frame. Rather than silently light the mirror image of half the
+        cluster, this raises.
+
+        Returns
+        -------
+        float
+            `time.perf_counter()` taken immediately after the FPGA ACK.
+        """
+        coords = [(int(x), int(y)) for x, y in coords]
+        if not coords:
+            raise ValueError("coords is empty")
+        # map_logical_to_physical falls back to TL for out-of-range input, which is
+        # harmless for one pixel and silently collides two cluster members here.
+        bad = [c for c in coords if not (0 <= c[0] < 512 and 0 <= c[1] < 512)]
+        if bad:
+            raise ValueError(f"logical coordinates outside the 512x512 array: {bad[:4]}")
+        mapped = [self.map_logical_to_physical(x, y) for x, y in coords]
+        quad_cfg = mapped[0][2]
+        if any(m[2] != quad_cfg for m in mapped):
+            quads = sorted({k for _, _, q in mapped for k, v in q.items() if v})
+            raise ValueError(
+                f"a cluster must stay inside one quadrant, got {quads}: the pixel-enable "
+                f"bits are per frame")
+        if self._dev is not None:
+            self._set_pixels(self._dev, [(r, c) for r, c, _ in mapped], bit_val,
+                             cfg=quad_cfg)
         return time.perf_counter()
 
     def blank_frame(self):

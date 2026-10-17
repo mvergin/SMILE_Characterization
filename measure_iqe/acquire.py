@@ -897,10 +897,28 @@ class _SimSmile:
     def __init__(self, smu):
         self._smu = smu
 
+    @staticmethod
+    def _gain(x, y):
+        h = (1103515245 * (x * 1009 + y) + 12345) & 0x7fffffff
+        return 0.0 if (h % 13 == 0) else 0.6 + 0.7 * ((h >> 8) % 1000) / 1000.0
+
     def set_pixel(self, x, y, bit):
         self._smu._on = True
-        h = (1103515245 * (x * 1009 + y) + 12345) & 0x7fffffff
-        self._smu._pixel_gain = 0.0 if (h % 13 == 0) else 0.6 + 0.7 * ((h >> 8) % 1000) / 1000.0
+        self._smu._pixel_gain = self._gain(x, y)
+        self._smu._bit_scale = max(1, int(bit)) / 15.0
+        return time.perf_counter()
+
+    def set_pixels(self, coords, bit):
+        """K pixels in parallel: the gains add, which is the whole point of a cluster.
+
+        Pooled EQE = sum(P)/sum(I), so a correct sim only has to make both sums
+        scale with K. The sim has no cluster-specific physics beyond that.
+        """
+        coords = [(int(x), int(y)) for x, y in coords]
+        if not coords:
+            raise ValueError("coords is empty")
+        self._smu._on = True
+        self._smu._pixel_gain = sum(self._gain(x, y) for x, y in coords)
         self._smu._bit_scale = max(1, int(bit)) / 15.0
         return time.perf_counter()
 

@@ -1,4 +1,4 @@
-"""Self-checks for the switch-deviation metric.
+"""Self-checks for the switch-deviation metric and the K-pixel cluster primitive.
 
 The metric exists to answer one question at the bench: does a frame switch cost
 current that the dwell then has to pay back? Run 261016-0726 is the case the old
@@ -6,9 +6,21 @@ version failed on, so it is the case this file pins down. Section 21.
 
     python test_characterize_capacitance.py
 """
+import importlib.util
+import pathlib
+
 import numpy as np
 
-from characterize_capacitance import switch_deviation
+from characterize_capacitance import exp_cluster, switch_deviation
+from instruments.smile_fpga import SmileFPGA
+
+# smile/__init__.py pulls in termcolor, which an analysis-only machine need not have.
+# The bit packing is what is under test, so load that one module off disk rather than
+# making this file depend on the whole display package.
+_spec = importlib.util.spec_from_file_location(
+    "_display", pathlib.Path(__file__).parent / "smile" / "utils" / "display.py")
+display = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(display)
 
 FS = 1.0 / 0.0407          # the real sample rate at NPLC 1.0 on two channels
 N = 3000                   # --samples 3000, as every switch run uses
@@ -135,9 +147,166 @@ def test_power_trace_starts_at_the_trigger_and_survives_a_dead_meter():
     assert PowerTrace(FakePM()).stop()[0].size == 0
 
 
+class _RecordingDev:
+    """Captures what would go down the USB link."""
+
+    commands = {"RESET_DIS": 0x1, "USB_2_DIS": 0x2}
+
+    def __init__(self):
+        self.sent = []
+
+    def send_instruction(self, instr, data=None):
+        self.sent.append((instr, list(data) if data is not None else None))
+
+
+def _payload(fn, *a, **k):
+    dev = _RecordingDev()
+    fn(dev, *a, **k)
+    frames = [d for _i, d in dev.sent if d is not None]
+    assert len(frames) == 1, f"expected exactly one data frame, got {len(frames)}"
+    return frames[0]
+
+
+def test_one_pixel_through_set_pixels_matches_set_pixel():
+    """The cluster path must not invent a second addressing convention.
+
+    If these ever diverge, a cluster lights different silicon than the per-pixel
+    sweep it is being compared against, and the comparison is meaningless.
+    """
+    for row, col in [(0, 0), (0, 255), (5, 31), (5, 32), (200, 177), (255, 255)]:
+        one = _payload(display.set_pixel, row, col, 11)
+        many = _payload(display.set_pixels, [(row, col)], 11)
+        assert one == many, f"({row},{col}) packs differently"
+
+
+def test_k_pixels_are_the_or_of_their_single_pixel_frames():
+    """K pixels in one frame, and only those K."""
+    coords = [(0, 0), (0, 200), (3, 31), (3, 32), (7, 255)]
+    many = _payload(display.set_pixels, coords, 15)
+    want = [0] * (8 * 8)                      # rows 0..7, 8 words each
+    for row, col in coords:
+        for i, w in enumerate(display._pixel_row_constructor(col, 15)):
+            want[row * 8 + i] |= w
+    assert many == want, "the K-pixel frame is not the OR of the single-pixel frames"
+    assert len(many) == 8 * (max(r for r, _ in coords) + 1), (
+        "only rows 0..max(row) should be sent -- roi_lrow comes from the payload length")
+    # and nothing leaks into a row that holds no member
+    assert many[8:24] == [0] * 16, "rows 1 and 2 hold no member and must be zero"
+
+
+def test_set_pixels_rejects_what_it_cannot_write():
+    for bad, why in [([], "empty"), ([(0, 256)], "column out of range"),
+                     ([(256, 0)], "row out of range")]:
+        try:
+            _payload(display.set_pixels, bad, 4)
+        except ValueError:
+            continue
+        raise AssertionError(f"set_pixels accepted {why}")
+    try:
+        _payload(display.set_pixels, [(0, 0)], 16)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("set_pixels accepted a bitval above 15")
+
+
+def test_a_cluster_may_not_straddle_a_quadrant_boundary():
+    """The pixel-enable bits live in the frame instruction, not in the pixel data.
+
+    Without this guard the far member is silently written into the near quadrant's
+    mirror image, so the frame lights a pixel nobody asked for and the pooled
+    measurement is wrong in a way no column records.
+    """
+    fpga = SmileFPGA(None)                 # no device: the guards still run
+    fpga.set_pixels([(10, 10), (20, 20)], 15)          # both TL, fine
+    for bad in ([(10, 10), (300, 10)], [(10, 10), (10, 300)]):
+        try:
+            fpga.set_pixels(bad, 15)
+        except ValueError as exc:
+            assert "quadrant" in str(exc), exc
+        else:
+            raise AssertionError("straddling cluster accepted")
+    for bad in ([(10, 10), (512, 10)], [(-1, 0)]):
+        try:
+            fpga.set_pixels(bad, 15)
+        except ValueError:
+            continue
+        raise AssertionError("out-of-array coordinate accepted")
+
+
+class _FakeSmile:
+    """Records every frame the experiment asks for."""
+
+    def __init__(self, sim):
+        self.frames = []
+        self._sim = sim
+
+    def set_pixel(self, x, y, bit):
+        self.frames.append(("one", ((int(x), int(y)),), int(bit)))
+        return self._sim.set_pixel(x, y, bit)
+
+    def set_pixels(self, coords, bit):
+        coords = [(int(x), int(y)) for x, y in coords]
+        self.frames.append(("many", tuple(coords), int(bit)))
+        return self._sim.set_pixels(coords, bit)
+
+    def blank_frame(self):
+        self.frames.append(("blank", (), 0))
+        return self._sim.blank_frame()
+
+
+def _cluster_run(ks, n_members=16):
+    """exp_cluster against the built-in sim rig, with every frame recorded."""
+    import measure_iqe as m
+    from characterize_capacitance import build_parser
+
+    cfg = m.IQEConfig()
+    pm, smu, sim = m.connect(cfg, lambda _s: None, simulate=True)
+    smile = _FakeSmile(sim)
+    args = build_parser().parse_args(
+        ["--what", "cluster", "--cluster-k", *[str(k) for k in ks],
+         "--cluster-reps", "3", "--cluster-settle-s", "0", "--max-presettle-s", "0",
+         "--cluster-n-pm", "2", "--cluster-n-smu", "2",
+         "--pixels", *[f"{10 + i},{20 + i}" for i in range(n_members)]])
+    rows = exp_cluster(pm, smu, smile, cfg, args, lambda _s: None)
+    return rows, smile.frames
+
+
+def test_the_cluster_reference_pools_and_is_never_a_blank_frame():
+    """Section 6: an all-off frame conducts ~4x the bitval-0 level.
+
+    So the reference for K lit pixels is the SAME K pixels at bitval 0. A blanked
+    frame subtracts the wrong number, and the error grows with K.
+    """
+    rows, frames = _cluster_run([1, 4])
+    lit = [f for f in frames if f[0] == "many" and f[2] != 0]
+    off = [f for f in frames if f[0] == "many" and f[2] == 0]
+    assert len(off) == len(rows), f"expected one reference frame per K, got {len(off)}"
+    # lit[0] is the charge frame before the first K, so pair from lit[1:]
+    for (_t, members, _b), (_t2, ref, _b2) in zip(lit[1:], off):
+        assert members == ref, f"the reference lit {ref}, the measurement lit {members}"
+    assert not [f for f in frames[:-1] if f[0] == "blank"], (
+        "a blanked frame appeared mid-experiment: it is not a valid reference")
+
+
+def test_cluster_k_is_nested_so_the_comparison_is_the_same_pixels():
+    """K=4 must be the first four members of K=16, never a fresh sample.
+
+    A different sample per K would mix pixel-to-pixel spread into the scatter the
+    experiment is trying to attribute to the meter.
+    """
+    rows, _frames = _cluster_run([1, 4, 16])
+    assert [r["k"] for r in rows] == [1, 4, 16]
+    sets = [r["members"].split() for r in rows]
+    for small, big in zip(sets, sets[1:]):
+        assert big[:len(small)] == small, "the K sets are not nested"
+    # the verdict column must be the one the log quotes
+    for r in rows:
+        assert abs(r["rel_scatter_x_sqrt_k"] - r["rel_scatter"] * np.sqrt(r["k"])) < 1e-12
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
             fn()
             print(f"  ok  {name}")
-    print("all switch-deviation checks passed")
+    print("all switch-deviation and cluster checks passed")

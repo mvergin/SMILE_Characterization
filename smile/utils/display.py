@@ -195,8 +195,10 @@ def set_row(
 ) -> None:
     """Write a single row using USB_2_DIS.
 
-    _pixel_data: if provided, used as the 8-word row payload instead of
-    row_constructor(value). Internal parameter used by set_pixel.
+    _pixel_data: if provided, used as the payload instead of
+    row_constructor(value). Internal parameter used by set_pixel and set_pixels.
+    8 words for one row, or 8*(n+1) for rows 0..n -- roi_lrow is derived from
+    len(data), so a longer payload simply writes more rows with one instruction.
     """
     pixels = _pixel_data if _pixel_data is not None else row_constructor(value)
     
@@ -271,6 +273,46 @@ def set_pixel(
     """
     set_row(dev, row, value=0, default=0, cfg=cfg,
             _pixel_data=_pixel_row_constructor(col, value))
+
+
+def set_pixels(
+    dev: Smile,
+    coords,
+    value: int,
+    cfg: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write several pixels of ONE quadrant with a single RESET_DIS + USB_2_DIS.
+
+    `coords` is an iterable of (row, col), both 0..255, local to the quadrant that
+    `cfg` enables. Every listed pixel gets `value`; everything else stays 0.
+
+    This is `set_pixel` for K pixels, and it costs the same one instruction, because
+    `set_row` derives roi_lrow from the payload length. Only rows 0..max(row) are
+    sent, so a cluster near the top of the frame is cheaper than a full image.
+
+    Why K pixels at once: lighting K pixels multiplies the optical signal by K while
+    the PM400's dark drift stays put, which is the only lever left on the faint end
+    (ROADMAP item 5).
+    """
+    if not (0 <= value <= 15):
+        raise ValueError("value must be between 0 and 15")
+    rows: Dict[int, List[int]] = {}
+    for row, col in coords:
+        row, col = int(row), int(col)
+        if not (0 <= row < 256 and 0 <= col < 256):
+            raise ValueError(f"(row={row}, col={col}) is outside the 256x256 quadrant")
+        # Reuse the single-pixel nibble layout and OR the rows together, so the
+        # addressing convention lives in exactly one place.
+        words = rows.setdefault(row, [0] * 8)
+        for i, w in enumerate(_pixel_row_constructor(col, value)):
+            words[i] |= w
+    if not rows:
+        raise ValueError("coords is empty")
+
+    data: List[int] = []
+    for r in range(max(rows) + 1):
+        data += rows.get(r, [0] * 8)
+    set_row(dev, 0, value=0, default=0, cfg=cfg, _pixel_data=data)
 
 
 def set_col(

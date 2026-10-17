@@ -244,6 +244,11 @@ class SmileFPGASim:
         time.sleep(0.005)
         return time.perf_counter()
 
+    def set_pixels(self, coords, bit_val):
+        # One frame write for K pixels, so one ACK latency, not K.
+        time.sleep(0.005)
+        return time.perf_counter()
+
     def blank_frame(self):
         time.sleep(0.005)
         return time.perf_counter()
