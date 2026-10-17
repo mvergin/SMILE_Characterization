@@ -2473,10 +2473,13 @@ def plot_fastscan_efficiency(fs, out, plt):
     )
 
 
-# The fast scan is a peak-IQE proxy ONLY when its bias sits on the flat EQE peak plateau. EQE stays
-# within ~1% of its peak across J≈8–30, so a fast scan at J≈25 (NVLED −1.35 V) reads ≈ each pixel's
-# peak EQE; outside this band (e.g. the old −2.6 V / J≈95 droop scan) EQE ≠ peak and the proxy is
-# invalid, so the map is skipped.
+# The fast scan is a peak-IQE proxy only near the EQE peak, and the band below is generous.
+# MEASURED over the 100 swept pixels of 261015-0015: median EQE runs 93.7% to 99.7% of its peak
+# across J≈8–30 -- a 6.3% spread, not the ~1% this comment used to claim -- and the peak sits at
+# −1.05 V, J=7.2. A fast scan at the default −1.35 V (J≈33) therefore reads ~92% of peak, so the
+# map it produces is a RANK map calibrated to the sweep, not each pixel's peak EQE. Outside the
+# band (e.g. the old −2.6 V / J≈95 droop scan, 74% of peak) it is invalid and the map is skipped.
+# Withdrawn claim and the numbers behind it: investigation report 26.2.
 FASTSCAN_PEAK_J_BAND = (5.0, 40.0)
 
 

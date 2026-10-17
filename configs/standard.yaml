@@ -295,8 +295,14 @@ fastscan_voltages: []     # EXTRA fast-scan biases; nvled_v_fastscan is always f
                           # extra bias is another full pass over the ROI, sharing the one
                           # fastscan_limit_a. Worth setting because -1.35 V is 0.30 V off
                           # the measured peak: over the 100 pixels of 261015-0015 peak EQE
-                          # sits at -1.05 V and the proxy ranks pixels at Spearman 0.890
-                          # against the sweep, where -1.05 V gives 0.989. For example:
+                          # sits at -1.05 V (J=7.2), where median EQE is 100% of peak
+                          # against 93.7% at -1.30 V and ~92% at -1.35 V. The -1.35 V
+                          # proxy RANKS pixels well -- Spearman 0.934 against the sweep
+                          # at -1.30 V, best 0.940 at -1.244 V -- but it agrees best
+                          # near its own bias and only 0.873 at -1.05 V, so it cannot
+                          # see the peak. (An earlier comment claimed 0.890 and 0.989;
+                          # neither reproduces, both withdrawn -- report 26.2.)
+                          # For example:
                           # [-1.05, -1.65] measures the peak and both shoulders in one run.
 dead_threshold_frac: 0.2   # a pixel is alive if P ≥ this × the "typical lit" level
 fastscan_alive_pctl: 90   # "typical lit" level = this percentile of the fast-scan power. NOT the median: the ...

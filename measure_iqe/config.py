@@ -668,10 +668,15 @@ class IQEConfig:
 
     # ── Dead-pixel threshold (fast scan) ────────────────────────────────
     nvled_v_fastscan: float = -1.35  # single fast-scan bias — does DOUBLE duty. At −1.35 V the pixels
-                                     # sit at J≈25 A/cm², which is dead on the (broad, flat) EQE peak
-                                     # plateau: EQE is within ~1% of its peak across J≈8–30, so the
-                                     # fast-scan EQE=P/I here ≈ each pixel's PEAK EQE. That turns the
-                                     # fast scan into a full-coverage peak-IQE proxy for all 65 536
+                                     # sit at J≈33 A/cm², on the droop side of a plateau that is wider
+                                     # than it is flat. MEASURED over the 100 swept pixels of
+                                     # 261015-0015: median EQE runs 93.7% to 99.7% of peak across
+                                     # J≈8–30, a 6.3% spread, and the peak is at -1.05 V (J=7.2).
+                                     # -1.35 V sits at ~92% of peak, so EQE=P/I here is a good RANK
+                                     # proxy and NOT each pixel's peak EQE. (The earlier "within ~1%
+                                     # across J≈8–30" is withdrawn -- investigation report 26.2. Use
+                                     # fastscan_voltages to add -1.05 V if the peak is what you want.)
+                                     # It still gives a full-coverage proxy for all 65 536
                                      # pixels (calibrated to the sweep in analysis), while still emitting
                                      # ~22 nW for the alive/dead classification — ~1000× the
                                      # MEASURED optical floor (3σ = 23 pW at n_pm 32; see the
@@ -692,7 +697,14 @@ class IQEConfig:
                                      # Over the 100 pixels of run 261015-0015 the peak is at
                                      # -1.05 V (81/100 within -0.99..-1.11), and -1.30 V -- the
                                      # nearest grid bias -- reads 93.6% of peak and ranks pixels
-                                     # at Spearman 0.890 against the sweep. -1.05 V gives 0.989.
+                                     # at Spearman 0.934 against the sweep at -1.30 V,
+                                     # best 0.940 at -1.244 V -- it agrees best near its
+                                     # OWN bias, and only 0.873 at -1.05 V. What it
+                                     # cannot do is SEE the peak: median EQE over those
+                                     # 100 pixels is 100% at -1.05 V, 93.7% at -1.30 V
+                                     # and ~92% at -1.35 V. (An earlier comment here
+                                     # claimed 0.890 and 0.989; neither reproduces and
+                                     # both are withdrawn -- investigation report 26.2.)
                                      # A list lets one scan carry both and the analysis compare
                                      # them, instead of re-running the array to move one number.
                                      #
