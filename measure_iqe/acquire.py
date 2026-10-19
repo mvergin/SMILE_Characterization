@@ -728,6 +728,15 @@ def connect_real(cfg: IQEConfig, log: Logger):
     return pm, smu, smile
 
 
+# What the meter reports after configure_common, or 0 if it was never asked. The
+# pooled over-range check needs the REALISED scale: measured on run 261019-1031,
+# SENS:POW:RANG 1e-7 lands the S171C on 470 nW, so comparing against the request was
+# comparing against a number 4.7x too small.
+_pm_range_realised = [0.0]
+
+PM_RANGE_REALISED_DEFAULT = 470e-9      # S171C, from a pm_range=1e-7 request
+
+
 def configure_common(pm, smu, cfg: IQEConfig, log: Logger) -> None:
     """PM400 + ch A (voltage anode) + buffers. ch B is configured per source mode."""
     pm.set_wavelength(cfg.pm_wavelength)
@@ -744,6 +753,7 @@ def configure_common(pm, smu, cfg: IQEConfig, log: Logger) -> None:
         # to know its headroom. Log it.
         try:
             got = float(pm.inst.query("SENS:POW:RANG?"))
+            _pm_range_realised[0] = got
             log(f"  PM400 range {got*1e9:.0f} nW (autorange off, requested "
                 f"{cfg.pm_range*1e9:.0f} nW)")
         except Exception as e:                 # a query failure must not end a 30 h run
@@ -1402,13 +1412,24 @@ def register_pools(sel: list[Row], alive: list[Row], cfg: IQEConfig,
             for r in alive}
     p_worst = max((sum(p_fs.get(m, 0.0) for m in g["POOL_MEMBERS"]) for g in groups),
                   default=0.0) * BRIGHT_OVER_PM_FASTSCAN
-    rng_w = cfg.pool_pm_range or cfg.pm_range
+    # The realised scale if this run asked the meter, else the measured default for a
+    # 1e-7 request, else the request itself. pm_range is only a request: SENS:POW:RANG
+    # picks the smallest hardware range that covers it.
+    rng_w = (cfg.pool_pm_range or _pm_range_realised[0]
+             or (PM_RANGE_REALISED_DEFAULT if cfg.pm_range == 1e-7 else cfg.pm_range))
+    how = ("set by pool_pm_range" if cfg.pool_pm_range else
+           "realised, queried at startup" if _pm_range_realised[0] else
+           "the measured S171C scale for a 1e-7 request")
     if p_worst > rng_w:
         log(f"  !! POOLED OVER-RANGE LIKELY: the brightest group should emit "
-            f"~{p_worst*1e9:.0f} nW at {cfg.nvled_v_coarse_stop:g} V against a "
-            f"requested PM400 range of {rng_w*1e9:.0f} nW. The range is FIXED "
-            f"(autorange is off on purpose, so a mid-sweep switch cannot put a step "
-            f"in the data). Raise pool_pm_range, or use smaller groups.")
+            f"~{p_worst*1e9:.0f} nW at {cfg.nvled_v_coarse_stop:g} V against a PM400 "
+            f"range of {rng_w*1e9:.0f} nW ({how}). The range is FIXED (autorange is "
+            f"off on purpose, so a mid-sweep switch cannot put a step in the data). "
+            f"Raise pool_pm_range, or use smaller groups, or stop short of the bright "
+            f"end.")
+    elif p_worst > 0.8 * rng_w:
+        log(f"  pooled bright-end estimate ~{p_worst*1e9:.0f} nW against a "
+            f"{rng_w*1e9:.0f} nW PM400 range ({how}) -- close.")
     return len(groups)
 
 

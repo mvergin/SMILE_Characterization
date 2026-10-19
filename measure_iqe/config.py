@@ -190,12 +190,24 @@ class IQEConfig:
                             # flags one corner wholesale: measured, detrending lifts
                             # K=4 recall at a 5 % budget from 85.5 % to 93.5 %.
     pool_pm_range: float = 0.0
-                            # W, the PM400 range for pooled targets. 0 = use pm_range.
-                            # A single pixel spans 0.2 nW at -0.8 V to 257 nW at -2.6 V
-                            # (run 261016-2252) and pm_range=1e-7 covers it. A K=4
-                            # target spans 0.8 nW to ~1 uW, so the bright end may need
-                            # headroom the faint end should not pay for. Set per run,
-                            # not guessed: the realised range is logged at startup.
+                            # W, the PM400 range for pooled targets. 0 = use pm_range,
+                            # which is almost always right -- read on.
+                            # MEASURED, run 261019-1031: pm_range=1e-7 realises as
+                            # 470 nW on the S171C, so pm_range is a REQUEST and not a
+                            # scale. A single pixel's 257 nW maximum at -2.6 V (run
+                            # 261016-2252) sits at 55 % of it, which is why nothing
+                            # ever clipped. A K=4 group reaches ~591 nW there and a
+                            # K=8 group ~1182 nW, both over.
+                            # Raising this is usually the WRONG fix. The additive
+                            # optical floor is 30.4 pW on the 470 nW range, 0.0065 %
+                            # of full scale; if that fraction is what the front end
+                            # fixes, a decade coarser range costs a 10x worse floor
+                            # and a K=8 group's faint end would scatter ~9 % -- worse
+                            # than one pixel on the fine range, and the whole point of
+                            # pooling is gone. Pool over the FAINT segment and keep
+                            # the fine range, or sweep K=4 and let the brightest
+                            # points over-range and be dropped. Whether the floor
+                            # really scales with full scale is open question 22.
 
     # ── Source mode ─────────────────────────────────────────────────────
     # "voltage": ch B sources voltage, adaptive current-targeted sweep. PROVEN on

@@ -276,7 +276,7 @@ runs that pinned each value.
 | `block_seed` | `int` | `0` | blocks mode: RNG seed (vary across runs to sample new pixels) blocks mode: no two measured pixels may sit closer than this (Chebyshev, so 2 = never sharing an edge or a corner). Without it, each block's farthest-point walk ran to the block's own border and the block next door did the same, so pairs of measured LEDs landed side by side across the shared edge — the sample looked stratified but was really clustered, and neighbouring blocks' statistics blurred into each other. Raise it to spread the sample further (thermal/optical crosstalk between nearby pixels is a physical question, so it is a knob); 1 disables the guard. A block too dead or too small to honour it falls back and says so in the log. |
 | `pool_groups` | `tuple[int,...]` | `()` | per-block pooled group sizes. `()` = off, and that is the default: a pooled row reports the SUM of K pixels' light and current, so it is not a pixel. `[4]` adds one group of 4 to every block; `[2,4,8]` adds three groups of different K. See *Pooled groups* below. |
 | `pool_include_singles` | `bool` | `true` | each group takes one of its **own block's** single pixels as a member, which makes the comparison paired: `P(group) − P(single)` is the rest of the group on the same silicon. `false` keeps the two sets disjoint. |
-| `pool_pm_range` | `float` | `0.0` | W. The PM400 range for pooled targets, `0` = use `pm_range`. The range is fixed, and a K-pixel group is K× brighter at the bright end. |
+| `pool_pm_range` | `float` | `0.0` | W. The PM400 range for pooled targets, `0` = use `pm_range`, which is almost always right. Measured: `pm_range=1e-7` realises as **470 nW** on the S171C, so a K=4 group over-ranges at −2.6 V — but raising this costs a 10× worse optical floor and defeats the point of pooling. See *The pooled fast-scan screen* and report Q22. |
 | `min_pixel_separation` | `int` | `2` |  |
 | `sweep_fraction` | `float` | `0.1` | spatial mode: fraction of ALIVE pixels to sweep |
 | `min_sweep_pixels` | `int` | `6` | spatial mode: floor on the count (so tiny ROIs still map) |
@@ -597,11 +597,19 @@ a blanked frame conducts ~4× the bitval-0 level.
   1e-5` drove K = 16 to exactly 10.000 µA and its per-pixel current collapsed from
   1.78 to 0.61 µA.
 * **The PM400 range, which nothing used to check.** Autorange is off on purpose, so a
-  mid-sweep range switch cannot put a step in the data. A single pixel spans 0.2 nW at
-  −0.8 V to 257 nW at −2.6 V (run 261016-2252); a K = 4 group spans 0.8 nW to ~1 µW.
-  Set `pool_pm_range` if the bright end needs headroom the faint end should not pay
-  for. The realised range is logged at startup — it is not `pm_range`, which is only a
-  request.
+  mid-sweep range switch cannot put a step in the data — which means a pooled group has
+  no room to range up. Measured on run 261019-1031: `pm_range=1e-7` realises as
+  **470 nW** on the S171C, so `pm_range` is a *request*, not a scale. A single pixel's
+  257 nW maximum at −2.6 V is 55 % of it; a **K = 4 group reaches ~591 nW and
+  over-ranges.**
+
+  **Raising `pool_pm_range` is usually the wrong fix.** The additive optical floor is
+  30.4 pW on the 470 nW range, 0.0065 % of full scale. If that fraction is what the
+  front end fixes, a decade coarser range costs a 10× worse floor, and a K = 8 group's
+  faint end would scatter ~9 % — worse than one pixel on the fine range, so the whole
+  gain is gone. **Pool over the faint segment and keep the fine range**, or sweep K = 4
+  and let the brightest points over-range and be dropped. The realised range is logged
+  at startup and the selection warns against it.
 
 The selection estimates the last two from the members' own fast-scan readings and
 warns before the sweep starts, rather than leaving it to `NVLED_AT_COMPLIANCE` thirty

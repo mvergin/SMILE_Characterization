@@ -1377,6 +1377,14 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
                          i_off_A=float(np.mean([abs(r[4]) for r in states["off"]])),
                          pooled_eqe=((p_m / cfg.photon_energy_j)
                                      / (i_m / 1.602176634e-19)) if ok else float("nan"),
+                         # K x the current against the ch B limit. A clamped point is the
+                         # INSTRUMENT's current, not the device's, so every verdict below
+                         # drops it. Measured at -0.90 V on 1e-5: K=8 and K=16 both pinned
+                         # at exactly 10.000 uA, which is what made the first version
+                         # report 39 % additivity and call it supply droop.
+                         at_compliance=int(abs(float(np.mean(
+                             [abs(r[4]) for r in states["lit"]])))
+                             >= 0.95 * cfg.nvled_compliance),
                          led_current_physical=ok,
                          smu_errors=drain_errors(smu)))
         rows[-1]["settled_frac"] = (rows[-1]["p_probe_W"] / p_m if p_m else float("nan"))
@@ -1390,18 +1398,33 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
             + f"  sd/pred {rows[-1]['scatter_vs_pred']:5.2f}"
             + (f"  settled@{args.cluster_probe_s*1e3:.0f}ms "
                f"{100*rows[-1]['settled_frac']:5.1f}%"
-               if np.isfinite(rows[-1]["settled_frac"]) else ""))
+               if np.isfinite(rows[-1]["settled_frac"]) else "")
+            + ("  << AT COMPLIANCE, NOT A MEASUREMENT"
+               if rows[-1]["at_compliance"] else ""))
     smile.blank_frame()
 
-    if len(rows) > 1:
-        first, last = rows[0], rows[-1]
+    clamped = [r for r in rows if r["at_compliance"]]
+    if clamped:
+        ks = ", ".join(str(r["k"]) for r in clamped)
+        need = max(abs(r["i_lit_A"]) for r in clamped) / max(r["k"] for r in clamped)
+        log(f"    !! K = {ks} sat ON the {cfg.nvled_compliance*1e6:.0f} uA ch B limit. "
+            f"Those rows are the INSTRUMENT's current, not the device's, so every "
+            f"verdict below ignores them -- and so should any reading of additivity or "
+            f"settling for those K. At {args.cluster_v:+.2f} V a member draws "
+            f"~{need*1e6:.2f} uA, so K={max(r['k'] for r in clamped)} needs "
+            f"--compliance {10 ** np.ceil(np.log10(need * max(r['k'] for r in clamped) * 1.5)):.0e} "
+            f"or a fainter bias. In High-C the compliance also sets the measure range, "
+            f"so raising it costs current resolution: prefer the fainter bias.")
+    rows_ok = [r for r in rows if not r["at_compliance"]]
+    if len(rows_ok) > 1:
+        first, last = rows_ok[0], rows_ok[-1]
         gain = first["rel_scatter"] / last["rel_scatter"] if last["rel_scatter"] else float("nan")
         ratio = last["k"] / first["k"]
         # The verdict is the slope of the ABSOLUTE scatter, because that is what tells
         # additive noise from proportional noise. 0 = additive (pooling buys K),
         # +0.5 = independent per member (buys sqrt(K)), +1 = proportional (buys none).
-        ks = np.array([r["k"] for r in rows], float)
-        sds = np.array([r["p_led_sd_W"] for r in rows], float)
+        ks = np.array([r["k"] for r in rows_ok], float)
+        sds = np.array([r["p_led_sd_W"] for r in rows_ok], float)
         ok_sd = np.isfinite(sds) & (sds > 0)
         slope = (float(np.polyfit(np.log(ks[ok_sd]), np.log(sds[ok_sd]), 1)[0])
                  if ok_sd.sum() > 1 else float("nan"))
@@ -1410,10 +1433,14 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
                 "INDEPENDENT PER MEMBER -- pooling buys sqrt(K), which averaging buys "
                 "more cheaply" if slope < 0.75 else
                 "PROPORTIONAL TO THE SIGNAL -- pooling buys nothing")
-        log(f"    absolute scatter goes as K^{slope:+.2f} -> {kind}")
+        log(f"    absolute scatter goes as K^{slope:+.2f} over K="
+            + ",".join(str(r["k"]) for r in rows_ok) + f" -> {kind}")
+        log(f"    absolute scatter {' '.join(f'{v*1e12:.1f}' for v in sds)} pW, "
+            f"mean {sds.mean()*1e12:.1f} pW -- flat is the whole result, because it is "
+            f"what tells additive noise from proportional")
         log(f"    K={first['k']} -> K={last['k']}: relative scatter fell {gain:.2f}x "
             f"(1/sqrt(K) predicts {math.sqrt(ratio):.2f}x, 1/K predicts {ratio:.2f}x)")
-        sf = [(r["k"], r["settled_frac"]) for r in rows
+        sf = [(r["k"], r["settled_frac"]) for r in rows_ok
               if np.isfinite(r.get("settled_frac", float("nan")))]
         if len(sf) > 1:
             worst_k, worst = min(sf, key=lambda kv: kv[1])
@@ -1427,9 +1454,12 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
                    f"sweep needs its OWN dwell calibration, not the single-pixel one"))
         add = last["additivity_p"]
         if np.isfinite(add) and abs(add - 1) > 0.03:
-            log(f"    !! K={last['k']} emits {100*add:.1f}% of its members' own sum. "
-                f"The pool is NOT the sum of its parts, so pooled EQE is not the "
-                f"members' EQE. Suspect supply droop at {args.cluster_v:+.2f} V.")
+            log(f"    !! K={last['k']} emits {100*add:.1f}% of its members' own sum, "
+                f"and it is NOT on the current limit. The pool is not the sum of its "
+                f"parts, so pooled EQE is not the members' EQE. Supply droop is the "
+                f"suspect at {args.cluster_v:+.2f} V. (Check at_compliance first: a "
+                f"clamped K reads low here for a reason that has nothing to do with "
+                f"the device.)")
         if args.simulate:
             log("    (the sim rig has no additive optical floor -- its PM noise is "
                 "purely relative, so it CANNOT average down. Ignore this verdict, and "

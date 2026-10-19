@@ -298,6 +298,40 @@ Still open, and deliberately not built: the pooled path is **not** wired into
 `measure_iqe`'s sweep. That is only worth doing if the bench run says the scatter
 falls, and the run is the cheap half.
 
+### Done, 19 October 2026 — confirmed in a second quadrant, and three lessons on clamping
+
+Run **261019-1031**: same experiment in **BR** at **−0.90 V**, `--compliance 1e-5`.
+
+**The floor reproduces.** Over the unclamped K = 1, 2, 4 the absolute scatter is 37.4,
+16.0 and 37.9 pW — mean **30.4 pW**, exponent `K^+0.01` — against **30.3 pW** in TL at
+−0.82 V. Two quadrants, two biases, 0.3 % apart. The floor is the meter, not the array.
+
+**A group settles like a single pixel, to K = 4.** `settled_frac` at 50 ms: 103.0 %,
+101.2 %, 102.1 %, a spread of 1.8 pp. `pool_groups` may inherit the single-pixel dwell
+at those K.
+
+**But K = 8 and K = 16 sat ON the 10 µA limit**, at exactly 10.000 µA. At −0.90 V a
+member draws 1.33 µA against 0.30 µA at −0.82 V, so K = 8 needs 10.6 µA and there was
+never room. The run then reported 39 % additivity and blamed *supply droop*, fitted the
+scatter slope through both clamped points, and put the settling spread at 98.8 pp. All
+three were artifacts: with the SMU holding current the light decays through the dwell,
+which is why the 50 ms probe read 200 % of settled. Fixed — `--what cluster` carries an
+`at_compliance` column, marks the log line, drops those rows from every verdict, and
+names the remedy instead of guessing a cause.
+
+**The PM400's realised range, measured for the first time:** `pm_range=1e-7` lands the
+S171C on **470 nW**. A single pixel's 257 nW maximum is 55 % of it, which is why nothing
+ever clipped. The pooled over-range check had been comparing against the request, 4.7×
+too small, and now uses the realised value.
+
+**And that settles the shape of a pooled sweep.** A K = 4 group reaches ~591 nW at
+−2.60 V, over the 470 nW scale. Raising the range is the wrong fix: the floor is
+30.4 pW, 0.0065 % of full scale, so a decade coarser range plausibly costs a 10× worse
+floor and a K = 8 faint end would scatter ~9 % — worse than one pixel on the fine range.
+**Pool over the faint segment and keep the fine range**, or sweep K = 4 and accept
+dropped points at the bright end. Whether the floor scales with full scale is open
+question 22 and an `optfloor` run at two ranges settles it in minutes.
+
 ### Done, 19 October 2026 — the bench answered it: the floor is the meter
 
 Run **261019-0952** (`--what cluster --highc --compliance 1e-5 --cluster-v -0.82
