@@ -583,6 +583,38 @@ costs what a single point costs — K pixels per dwell instead of one. The refer
 pools with it: the same K members at `leak_ref_bitval`, never a blanked frame, since
 a blanked frame conducts ~4× the bitval-0 level.
 
+#### What is measured, and what is not
+
+Four bench runs on 19 October 2026 (`261019-0914`, `-0952`, `-1031`, `-1057`) plus two
+`optfloor` runs (`-1056`, `-1212`). Full derivations in the investigation report,
+§26.7–§26.15.
+
+| question | answer |
+|---|---|
+| Is the faint-end floor the meter or the array? | **the meter, and additive.** Absolute scatter flat at **30.3 / 30.4 / 32.1 pW** across three runs, two quadrants and two biases, while the signal grew 12.7× |
+| What does pooling buy? | **a factor of K, not √K.** 8.52 % at one pixel → 1.76 % at K = 4 → **0.52 % at K = 8**, flat after |
+| Is a pooled reading the sum of its members? | **yes.** `additivity_p` 0.974–1.002 at every unclamped K, including 0.994 at K = 16 |
+| Does a group settle like a single pixel? | **the question is wrong.** A transient below 200 ms sits under a **+0.77 % drift at 6.4σ** that does not decay out to 20 s. No dwell removes it |
+| Does the optical floor scale with PM400 full scale? | **yes, as `range^0.74`** — 5.45× worse for a 10× range |
+| Can a pooled fast scan replace the census? | **as a screen only.** K = 4 finds 91.8 % of the dead pixels for 3.46× less time; 8.2 % are missed |
+| Where may a pooled sweep run? | **the faint segment only, today.** K = 4 reaches ~591 nW at −2.60 V against a 470 nW scale |
+
+**Not yet known**, in the order it matters:
+
+1. Whether the PM400 range may change per sweep segment. Until it can, a pooled sweep
+   stops short of the bright end. (Report Q23.)
+2. Whether the drift is worse for a group than for a single pixel. Unresolvable at K = 1,
+   where the per-rep scatter is 6.8 % against a 0.77 % effect. (Report Q21.)
+3. **`pool_groups` has never run on hardware.** Every number above comes from
+   `--what cluster`, which lights one group at a time at one bias. The selection, the
+   pooled reference inside a real sweep and the analysis path are tested only against the
+   simulator and the fixture.
+
+**Averaging is the alternative lever and it is the expensive one.** `n_pm = 512` buys 11×
+over `n_pm = 8` for **64× the time per point**, where pooling buys 11.3× at K = 16 for one
+frame instruction and one dwell. They are independent and multiply: pool first, average
+only as far as the time budget allows.
+
 #### What caps K
 
 * **Detection.** A pooled reading is a sum, and a dead member is a `1/K` deficit
@@ -611,10 +643,22 @@ a blanked frame conducts ~4× the bitval-0 level.
   and let the brightest points over-range and be dropped. The realised range is logged
   at startup and the selection warns against it.
 
+The three are often confused because they all land near 4–8, but they bound different
+things:
+
+| cap | value | what it bounds | lifts? |
+|---|---|---|---|
+| detection | K ≈ 4 (3.0σ), 1.5σ at K = 16 | finding a *dead member* inside a group | **yes** — once each member's own brightness is known, which the single pixels in the same run buy |
+| compliance | **K = 8** at 1 mA | staying off the SMU's current limit | only by a fainter bias or a coarser compliance, and in High-C that costs current resolution |
+| PM400 range | **K = 4** at −2.60 V | staying on scale optically | only by a coarser range, which costs 5.45× in floor — so only at the bright end |
+
+**None of them bounds the scatter gain**, which runs to K = 8 and is where the 16.4×
+comes from. A run that wants both detection and the cleanest faint end asks for both
+sizes: `pool_groups=[4,8]`.
+
 The selection estimates the last two from the members' own fast-scan readings and
 warns before the sweep starts, rather than leaving it to `NVLED_AT_COMPLIANCE` thirty
-hours later. The detection cap lifts once each member's own brightness is known —
-which is exactly what the single pixels in the same run buy. The other two do not.
+hours later.
 
 #### The dwell a pooled target needs is not the single-pixel one
 
