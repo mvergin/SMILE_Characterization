@@ -32,10 +32,29 @@ def parse_override(text: str) -> tuple[str, Any]:
     key, sep, raw = text.partition("=")
     if not sep:
         raise argparse.ArgumentTypeError(f"--set expects KEY=VALUE, got {text!r}")
+    key = key.strip()
+    # A value wrapped in matching quotes is shell leakage, not data. PowerShell and bash
+    # strip `roi='[0,0,63,63]'`; cmd.exe passes the quotes through, so the same command
+    # fails on one machine with "unknown ROI" and works on another. Two shapes, and the
+    # second is the one that hides: a DOUBLE-quoted value is valid JSON for the string
+    # inside it, so `roi="[0,0,63,63]"` parses happily into the string "[0,0,63,63]"
+    # and never looks wrong until the config rejects it.
+    quoted = len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'"
     try:
-        return key.strip(), json.loads(raw)
+        val = json.loads(raw)
     except json.JSONDecodeError:
-        return key.strip(), raw
+        if quoted:                       # 'FULL' or '[0,0,63,63]' from cmd.exe
+            try:
+                return key, json.loads(raw[1:-1])
+            except json.JSONDecodeError:
+                return key, raw[1:-1]
+        return key, raw                  # mode=voltage: a bare word stays a string
+    if quoted and isinstance(val, str):  # "[0,0,63,63]" parsed as a string
+        try:
+            return key, json.loads(val)
+        except json.JSONDecodeError:
+            pass                         # "Array42" really is the string Array42
+    return key, val
 
 
 LOCAL_CONFIG = "configs/local.yaml"

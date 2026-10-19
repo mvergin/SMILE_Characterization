@@ -1592,6 +1592,32 @@ def test_the_screen_rescans_what_it_flags_and_says_what_it_skipped():
     assert "screened estimate(s)" in text
 
 
+def test_a_set_value_survives_a_shell_that_does_not_strip_quotes():
+    """PowerShell and bash strip `roi='[0,0,63,63]'`. cmd.exe does not.
+
+    The value then arrives as "'[0,0,63,63]'", which is not JSON, is kept as a
+    plain string, and is rejected with "unknown ROI" -- naming the ROI rather than
+    the quoting. Same command, same repo, different shell.
+    """
+    from measure_iqe.cli import parse_override
+
+    for quoted, bare in ((chr(39), ''), (chr(34), '')):
+        for raw, want in ((f'roi={quoted}[0,0,63,63]{quoted}', [0, 0, 63, 63]),
+                          (f'pool_groups={quoted}[4,8]{quoted}', [4, 8]),
+                          (f'n_fine={quoted}8{quoted}', 8),
+                          (f'roi={quoted}FULL{quoted}', 'FULL')):
+            k, v = parse_override(raw)
+            assert v == want, f'{raw} gave {v!r}, wanted {want!r}'
+            # and the unquoted form must give exactly the same thing
+            k2, v2 = parse_override(raw.replace(quoted, bare))
+            assert (k, v) == (k2, v2), f'{raw} and its bare form disagree'
+
+    # a value that is genuinely a string keeps its characters
+    assert parse_override('sample_name=Array42')[1] == 'Array42'
+    assert parse_override('sweep_direction=low_to_high')[1] == 'low_to_high'
+    # one quote is not a pair and must not be eaten
+    assert parse_override("sample_name=it's")[1] == "it's"
+
 def test_the_ramp_never_goes_past_the_stop_it_was_asked_for():
     """A knee outside the ramp cannot split it, and must not extend it.
 

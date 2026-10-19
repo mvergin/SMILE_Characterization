@@ -554,6 +554,13 @@ compliance, and `nvled_range_i` / `probe_range_i` must be one of
 `pool_groups` adds pooled groups to a sweep. **Off by default**, and it has to be:
 a pooled row is not a pixel, it is the sum of K of them.
 
+> **Quoting.** `--set` reads its value as JSON, and shells disagree about quotes.
+> PowerShell and bash strip `--set roi='[0,0,63,63]'`; **cmd.exe passes the quotes
+> through**. Every form below is now accepted and gives the same value, so copy a
+> command between shells freely:
+> `roi=[0,0,63,63]`, `roi='[0,0,63,63]'`, `roi="[0,0,63,63]"`. A value that is
+> genuinely a string keeps its characters, and a single unmatched quote is left alone.
+
 ```bash
 # 2 singles per block plus one pooled group of 4 per block.
 # block_size=52 gives 10 blocks per axis -> 200 singles and 100 groups.
