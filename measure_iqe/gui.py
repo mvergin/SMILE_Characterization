@@ -57,9 +57,11 @@ SHAPE: list[tuple[str, str, str]] = [
     ("block_size", "Block edge (px)", "ROI/block_size blocks per axis"),
     ("pixels_per_block", "Singles per block", "single pixels measured per block"),
     ("block_seed", "Single seed", "change between runs to cover new pixels"),
-    ("pool_clusters", "Pooled groups", "0 = off. Added ON TOP of the single pixels"),
-    ("pool_size", "Pooled group size", "members per group. 4 is the detection limit"),
-    ("pool_seed", "Pooled seed", "separate stream, so a member is never also a single"),
+    ("pool_groups", "Pooled groups per block",
+     "[] = off. e.g. [4] or [2,4,8]. One group per entry, inside each block"),
+    ("pool_include_singles", "Pool shares a single",
+     "a group takes one of its block's singles -> paired comparison"),
+    ("pool_pm_range", "Pooled PM400 range (W)", "0 = same as pm_range"),
     ("nvled_v_fastscan", "Fast-scan bias (V)", "the ONLY bias that judges alive/dead"),
     ("fastscan_voltages", "Extra fast-scan biases", "e.g. [-1.05,-1.65]"),
     ("n_fine", "Sweep points", "biases per target"),
@@ -78,20 +80,24 @@ SHAPE: list[tuple[str, str, str]] = [
 PRESETS: dict[str, dict] = {
     "Full array, 100 singles": dict(
         roi="FULL", sweep_select="blocks", block_size=52, pixels_per_block=1,
-        pool_clusters=0, sweep_order="bias_major"),
-    # 36 and not 20: the block grid is square AND never crosses the quadrant edge at
-    # 256, so each 256 px half takes round(256/102)=3 blocks and the axis takes 6.
-    # 6x6 blocks at one single each is 36. 20 is not reachable -- the count is always
-    # (2*round(256/block_size))^2.
-    "Full array, 36 singles + 50 pooled": dict(
+        sweep_order="bias_major"),
+    # One group per block, so the counts follow the block grid: blocks never cross the
+    # quadrant edge at 256, so each axis takes 2*round(256/block_size) blocks. 52 px
+    # gives 10 per axis and 100 blocks -> 200 singles and 100 groups of 4.
+    "Full array, 200 singles + 100 pooled x4": dict(
+        roi="FULL", sweep_select="blocks", block_size=52, pixels_per_block=2,
+        pool_groups=(4,), sweep_order="bias_major"),
+    # Mixed K in one run: every block gets a 2, a 4 and an 8, so the K-dependence of
+    # the pooled faint end comes out of the array itself, not only the bench rig.
+    "Full array, 36 singles + 36 each of K=2,4,8": dict(
         roi="FULL", sweep_select="blocks", block_size=102, pixels_per_block=1,
-        pool_clusters=50, pool_size=4, sweep_order="bias_major"),
+        pool_groups=(2, 4, 8), sweep_order="bias_major"),
     "Full array, 1000 singles": dict(
         roi="FULL", sweep_select="blocks", block_size=52, pixels_per_block=10,
-        pool_clusters=0, sweep_order="bias_major"),
+        sweep_order="bias_major"),
     "Quick check, 16x16 ROI": dict(
         roi=(0, 0, 15, 15), sweep_select="blocks", block_size=8, pixels_per_block=1,
-        pool_clusters=0, n_fine=6),
+        n_fine=6),
 }
 
 
@@ -425,16 +431,19 @@ class App(ttk.Frame):
         except Exception:
             self._say(r.stdout.strip()[:400])
             return
-        npool = int(d.get("pool_clusters") or 0)
+        pg = tuple(d.get("pool_groups") or ())
         self._say(f"config OK: roi={d.get('roi')} select={d.get('sweep_select')} "
                   f"block={d.get('block_size')} singles/block={d.get('pixels_per_block')} "
-                  f"pooled={npool}x{d.get('pool_size')} n_fine={d.get('n_fine')} "
+                  f"pool_groups={pg or '()'} n_fine={d.get('n_fine')} "
                   f"order={d.get('sweep_order')} dir={d.get('sweep_direction')}")
-        if npool:
-            self._say(f"   pooled rows carry POOL_K and the SUM of their members. EQE is "
-                      f"unaffected; per-pixel current is not. The "
-                      f"{d.get('pixels_per_block')}/block singles are measured too and "
-                      f"are what grounds them.")
+        if pg:
+            self._say(f"   every block adds {len(pg)} group(s) of {list(pg)}, formed "
+                      f"inside that block. Pooled rows carry POOL_K and the SUM of "
+                      f"their members: EQE is unaffected, per-pixel current is not. "
+                      f"The {d.get('pixels_per_block')}/block singles are measured too "
+                      f"and are what grounds them"
+                      + (", and each group shares one of them so the comparison is "
+                         "paired." if d.get("pool_include_singles") else "."))
 
     def _enqueue(self) -> None:
         argv = self.argv()

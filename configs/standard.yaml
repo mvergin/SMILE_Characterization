@@ -60,27 +60,37 @@ block_seed: 0   # blocks mode: RNG seed (vary across runs to sample new pixels)
 # the pooled groups are added on top, so the singles ground the pooled numbers under
 # the same lamp, thermal history and instrument state. For example 20 singles plus 50
 # pooled groups:
-#     --set pixels_per_block=1 --set block_size=114 --set pool_clusters=50
+#     --set pixels_per_block=2 --set block_size=52 --set pool_groups='[4]'
 #
 # Pooled EQE = sum(P)/sum(I) is a CURRENT-WEIGHTED mean of the members, not the mean of
 # their EQEs. The two differ whenever brightness and current correlate across members.
-pool_clusters: 0   # pooled groups swept IN ADDITION to the single pixels. 0 = off.
-pool_size: 4       # members per group. 4, not 16, for two measured reasons.
-                   # DETECTION: a dead or dim member is a 1/K deficit against a sum
-                   # whose own spread is 16.4%/sqrt(K) (the array's measured alive-pixel
-                   # brightness spread, 52.21 +- 8.55 nW over 261 441 pixels, run
-                   # 261015-0015). That is 3.0 sigma at K=4 and 1.5 sigma at K=16, so
-                   # above ~4 a pooled reading cannot tell "one member died" from "these
-                   # members are dim".
-                   # COMPLIANCE, the harder cap: K members draw K x the current and
-                   # pick_limit's ladder stops at vramp_highv_limit_a. At the measured
-                   # 117.7 uA per pixel at -2.60 V a 1 mA ceiling clamps at K=8, and a
-                   # clamped point is the instrument's current, not the device's. The
-                   # selection estimates this from the fast scan and warns before the
-                   # sweep starts.
-pool_seed: 1       # separate RNG stream from block_seed, so the pooled members are
-                   # never the single pixels. Sharing one would make the grounding
-                   # comparison circular.
+pool_groups: []    # per-block pooled group sizes. [] = OFF, the default.
+                   # [4] adds one 4-pixel group to every block. [2, 4, 8] adds three
+                   # groups of different K to every block, which gives the
+                   # K-dependence of the pooled faint end across the array for free.
+                   # A group is formed INSIDE one block from that block's own draw, so
+                   # it measures that block and not the whole quadrant. An earlier
+                   # array-wide draw put 291 of 300 member pairs in different blocks,
+                   # a median of 152 px apart, which averaged away the +3.7 % spatial
+                   # gradient of section 16.
+                   # Two measured ceilings on any entry. DETECTION: a dead member is a
+                   # 1/K deficit against a sum whose own spread is 16.4%/sqrt(K) --
+                   # 3.0 sigma at K=4, 1.5 at K=16. COMPLIANCE, harder: K members draw
+                   # K x the current against vramp_highv_limit_a, so at the measured
+                   # 117.7 uA per pixel at -2.60 V a 1 mA ceiling clamps at K=8. The
+                   # selection estimates both from the fast scan before the sweep runs.
+pool_include_singles: true
+                   # each group takes one of its OWN block's single pixels as a member,
+                   # so P(group) - P(single) is the rest of the group measured on the
+                   # same silicon. That makes an additivity loss separable from
+                   # pixel-to-pixel variation. false keeps the sets disjoint, which is
+                   # the better independent sample but cannot separate those two.
+pool_pm_range: 0.0 # W, the PM400 range for pooled targets. 0 = use pm_range. A single
+                   # pixel spans 0.2 nW at -0.8 V to 257 nW at -2.6 V (run 261016-2252)
+                   # and pm_range=1e-7 covers it. A K=4 target spans 0.8 nW to ~1 uW,
+                   # so the bright end may need headroom the faint end should not pay
+                   # for. The realised range is logged at startup -- set it, do not
+                   # guess it.
 min_pixel_separation: 2   # blocks mode: no two measured pixels may sit closer than this (Chebyshev, so 2 = never ...
 sweep_fraction: 0.1   # spatial mode: fraction of ALIVE pixels to sweep
 min_sweep_pixels: 6   # spatial mode: floor on the count (so tiny ROIs still map)

@@ -274,9 +274,9 @@ runs that pinned each value.
 | `block_size` | `int` | `8` | blocks mode: block edge in pixels (ROI → ~ROI/BLOCK_SIZE blocks/axis) |
 | `pixels_per_block` | `int` | `4` | blocks mode: alive pixels sampled per block |
 | `block_seed` | `int` | `0` | blocks mode: RNG seed (vary across runs to sample new pixels) blocks mode: no two measured pixels may sit closer than this (Chebyshev, so 2 = never sharing an edge or a corner). Without it, each block's farthest-point walk ran to the block's own border and the block next door did the same, so pairs of measured LEDs landed side by side across the shared edge — the sample looked stratified but was really clustered, and neighbouring blocks' statistics blurred into each other. Raise it to spread the sample further (thermal/optical crosstalk between nearby pixels is a physical question, so it is a knob); 1 disables the guard. A block too dead or too small to honour it falls back and says so in the log. |
-| `pool_clusters` | `int` | `0` | pooled groups swept **in addition** to the single pixels. 0 = off, and that is the default: a pooled row reports the SUM of K pixels' light and the SUM of their current, so it is not a pixel. See *Pooled clusters* below. |
-| `pool_size` | `int` | `4` | members per pooled group. 4, not 16: a dead member is a 1/K deficit against a sum whose own spread is 16.4 %/√K (measured, run 261015-0015), which is 3.0σ at K=4 and only 1.5σ at K=16. |
-| `pool_seed` | `int` | `1` | RNG stream for the pooled members, separate from `block_seed` so a pooled member is never also a single pixel. Sharing one would make the grounding comparison circular. |
+| `pool_groups` | `tuple[int,...]` | `()` | per-block pooled group sizes. `()` = off, and that is the default: a pooled row reports the SUM of K pixels' light and current, so it is not a pixel. `[4]` adds one group of 4 to every block; `[2,4,8]` adds three groups of different K. See *Pooled groups* below. |
+| `pool_include_singles` | `bool` | `true` | each group takes one of its **own block's** single pixels as a member, which makes the comparison paired: `P(group) − P(single)` is the rest of the group on the same silicon. `false` keeps the two sets disjoint. |
+| `pool_pm_range` | `float` | `0.0` | W. The PM400 range for pooled targets, `0` = use `pm_range`. The range is fixed, and a K-pixel group is K× brighter at the bright end. |
 | `min_pixel_separation` | `int` | `2` |  |
 | `sweep_fraction` | `float` | `0.1` | spatial mode: fraction of ALIVE pixels to sweep |
 | `min_sweep_pixels` | `int` | `6` | spatial mode: floor on the count (so tiny ROIs still map) |
@@ -546,15 +546,19 @@ compliance, and `nvled_range_i` / `probe_range_i` must be one of
   light is the limiting channel at low current, so spend on `*_n_pm` before
   `*_nplc`.
 
-### Pooled clusters: measuring K pixels as one target
+### Pooled groups: measuring K pixels as one target
 
-`pool_clusters` adds pooled groups to a sweep. **Off by default**, and it has to be:
+`pool_groups` adds pooled groups to a sweep. **Off by default**, and it has to be:
 a pooled row is not a pixel, it is the sum of K of them.
 
 ```bash
-# 20 single pixels, and 50 pooled groups of 4 on top of them
-python -m measure_iqe --set block_size=114 --set pixels_per_block=1 \
-                      --set pool_clusters=50 --set pool_size=4
+# 2 singles per block plus one pooled group of 4 per block.
+# block_size=52 gives 10 blocks per axis -> 200 singles and 100 groups.
+python -m measure_iqe --set block_size=52 --set pixels_per_block=2                       --set pool_groups='[4]'
+
+# mixed K: every block gets a 2, a 4 and an 8, so the K-dependence of the
+# pooled faint end falls out of the array itself
+python -m measure_iqe --set block_size=102 --set pixels_per_block=1                       --set pool_groups='[2,4,8]'
 ```
 
 The single pixels are unchanged, so a pooled run is a **superset** of the ordinary
@@ -563,46 +567,65 @@ lamp, the same thermal history and the same instrument state, so they **ground**
 pooled numbers. Wherever the singles are still above their own noise the two must
 agree, and where the singles fall into the noise the pooled groups keep going.
 
+**A group is formed inside one block, from that block's own draw.** An earlier
+version drew the members from a second array-wide sample. Measured on the full array:
+291 of 300 member pairs then landed in different blocks, a median of 152 px apart, so
+a group averaged over a whole quadrant and threw away the +3.7 % spatial gradient
+§16 measures. Block-local keeps the map's resolution at block scale, and it grounds
+each group against singles that share its row drivers and its thermal neighbourhood.
+Measured on the `block_size=52` preset, members are now a median of 27 px apart.
+
 `set_pixels` writes all K members in **one** frame instruction, so a pooled point
 costs what a single point costs — K pixels per dwell instead of one. The reference
 pools with it: the same K members at `leak_ref_bitval`, never a blanked frame, since
 a blanked frame conducts ~4× the bitval-0 level.
 
-Two measured things cap K, and `pool_size` defaults to 4 because of them:
+#### What caps K
 
 * **Detection.** A pooled reading is a sum, and a dead member is a `1/K` deficit
   against a sum whose own spread is `16.4 %/√K` — the array's measured alive-pixel
   brightness spread (52.21 ± 8.55 nW over 261 441 pixels, run 261015-0015). That is
   3.0σ at K = 4 and 1.5σ at K = 16. Above ~4, a pooled reading cannot tell *one member
   died* from *these members are dim*.
-* **Compliance, which is the harder cap.** K members draw K× the current, and
-  `pick_limit`'s ladder stops at `vramp_highv_limit_a`. At the measured 117.7 µA per
-  pixel at −2.60 V, a 1 mA ceiling clamps at **K = 8**, and a clamped point is the
-  instrument's current, not the device's. The selection estimates this from the fast
-  scan and says so before the sweep starts, rather than leaving it to
-  `NVLED_AT_COMPLIANCE` thirty hours later.
+* **Compliance, which is harder.** K members draw K× the current, and `pick_limit`'s
+  ladder stops at `vramp_highv_limit_a`. At the measured 117.7 µA per pixel at
+  −2.60 V, a 1 mA ceiling clamps at **K = 8**, and a clamped point is the instrument's
+  current, not the device's. Confirmed on the bench: run 261019-0914 at `--compliance
+  1e-5` drove K = 16 to exactly 10.000 µA and its per-pixel current collapsed from
+  1.78 to 0.61 µA.
+* **The PM400 range, which nothing used to check.** Autorange is off on purpose, so a
+  mid-sweep range switch cannot put a step in the data. A single pixel spans 0.2 nW at
+  −0.8 V to 257 nW at −2.6 V (run 261016-2252); a K = 4 group spans 0.8 nW to ~1 µW.
+  Set `pool_pm_range` if the bright end needs headroom the faint end should not pay
+  for. The realised range is logged at startup — it is not `pm_range`, which is only a
+  request.
 
-The detection cap lifts once each member's own brightness is known — which is exactly
-what the single pixels in the same run buy. The compliance cap does not.
+The selection estimates the last two from the members' own fast-scan readings and
+warns before the sweep starts, rather than leaving it to `NVLED_AT_COMPLIANCE` thirty
+hours later. The detection cap lifts once each member's own brightness is known —
+which is exactly what the single pixels in the same run buy. The other two do not.
 
-Three rules the selection enforces, each for a measured reason:
+#### Rules the selection enforces
 
 * **one quadrant per group** — the `tl_pixen`/`tr_pixen`/… enables live in the frame
   instruction, not in the pixel data, so a group across a 256 boundary would light the
-  near quadrant's mirror image instead of the far member.
-* **no member is also a single pixel** (`pool_seed` is a separate RNG stream) —
-  sharing one would make the grounding comparison circular.
+  near quadrant's mirror image instead of the far member. Blocks never straddle the
+  boundary (`block_edges`), so this holds by construction.
 * **members are separated** by the same `min_pixel_separation` the singles get, so
   crosstalk cannot masquerade as pooling gain.
+* **the head is never the shared single** — with `pool_include_singles` a group
+  carries one of its block's singles, but the row's `X`,`Y` is the first *fresh*
+  member, so every key in the selection stays unique.
 
 What the files carry: `POOL_K` and `POOL_MEMBERS`, with `X`,`Y` set to the first
 member so every `groupby(["X","Y"])` keeps working. EQE needs no correction — it is
 `P/I` and both are summed by the same K — but **current density does**, and
 `analyze_array.py` divides by `POOL_K` for exactly that reason. See `RUN_FORMAT.md`.
 
-`pool_clusters` is refused with `source_mode: current`: a current source sets one
+`pool_groups` is refused with `source_mode: current` (a current source sets one
 current for the whole frame, so the members would share it and no per-member
-operating point would be known.
+operating point would be known) and with any `sweep_select` other than `blocks`
+(a group is formed inside a block, so there must be blocks).
 
 ### How blocks mode samples
 

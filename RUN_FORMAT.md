@@ -159,7 +159,7 @@ point is **not usable**: the subtraction removes most of the signal.
 rate.** A reader must treat their absence as "unknown", not as "the write succeeded",
 and keep whatever contamination gate it already has.
 
-### Present only when `pool_clusters` is on (never by default)
+### Present only when `pool_groups` is on (never by default)
 
 A **pooled** target is K pixels lit together in one frame and measured as one point.
 Its row carries the **sum** of its members' light and the **sum** of their current.
@@ -183,7 +183,7 @@ What a reader must do with `POOL_K`:
 
 A reader that ignores the column entirely gets the right EQE and a wrong `J` --
 the safe direction, but still wrong. **Every run before 17 October 2026, and every
-run with `pool_clusters: 0`, lacks both columns, and absence means `POOL_K = 1`,
+run with `pool_groups: []`, lacks both columns, and absence means `POOL_K = 1`,
 not unknown.** Pooling is off by default, so an ordinary run's columns are exactly
 what they were.
 

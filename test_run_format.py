@@ -47,7 +47,7 @@ AGG_OPTIONAL = ["NVLED_CURR_MEDIAN", "NVLED_CURR_SAMPSTD", "NVLED_CURR_N",
                 "PM400_POWER_REF", "PM400_POWER_REF_STD", "LEAK_REF_BITVAL",
                 "LEAK_REF_TRIES", "LEAK_REF_FRAC", "LEAK_REF_CACHED",
                 "NVLED_LIMIT_A", "NVLED_AT_COMPLIANCE"]
-# Written ONLY when pool_clusters > 0, which is not the default. Listed apart
+# Written ONLY when pool_groups is non-empty, which is not the default. Listed apart
 # from AGG_OPTIONAL on purpose: an ordinary run must write the columns above and
 # no others, or every existing reader has to learn a column to read a run with no
 # pooled rows in it. test_measure_iqe.py pins the "off by default" half.

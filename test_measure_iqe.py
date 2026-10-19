@@ -1317,14 +1317,14 @@ def test_pooling_is_off_by_default_and_adds_no_columns():
     A flag nobody set must not change the run format, or every existing reader has to
     learn a column to read a run that has no pooled rows in it.
     """
-    assert IQEConfig().pool_clusters == 0, "pooling must default to off"
+    assert IQEConfig().pool_groups == (), "pooling must default to off"
     with tempfile.TemporaryDirectory() as tmp:
         res = run_iqe_measurement(IQEConfig(**FAST), simulate=True, base_dir=tmp,
                                   log=QUIET)
         rows = _agg_rows(res.run_dir)
     assert rows, "no sweep rows"
     for col in ("POOL_K", "POOL_MEMBERS"):
-        assert col not in rows[0], f"{col} written on a run with pool_clusters=0"
+        assert col not in rows[0], f"{col} written on a run with pool_groups=()"
 
 
 def test_a_pooled_target_lights_every_member_and_references_them_all():
@@ -1357,31 +1357,44 @@ def test_a_pooled_target_lights_every_member_and_references_them_all():
     try:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = IQEConfig(**{**FAST, "roi": (0, 0, 15, 15), "block_size": 8,
-                               "pool_clusters": 1, "pool_size": 4})
+                               "pool_groups": (4,)})
             res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
-            rows = [r for r in _agg_rows(res.run_dir) if r.get("POOL_K") not in (None, "", "nan")]
+            # read both here: tmp is gone once the with-block closes
+            allrows = _agg_rows(res.run_dir)
+            rows = [r for r in allrows if r.get("POOL_K") not in (None, "", "nan")]
     finally:
         acquire.connect_sim = real
 
     assert rows, "pooling was requested but no pooled row was written"
-    members = tuple(tuple(int(v) for v in m.split(":"))
-                    for m in rows[0]["POOL_MEMBERS"].split())
-    assert len(members) == 4 and int(float(rows[0]["POOL_K"])) == 4
-    assert (int(rows[0]["X"]), int(rows[0]["Y"])) == members[0], (
-        "a pooled row's X,Y must be its first member, or it has no unique key")
+    # pool_groups is PER BLOCK, so a 16x16 ROI in 8 px blocks gives one group per block.
+    groups = {tuple(tuple(int(v) for v in m.split(":")) for m in r["POOL_MEMBERS"].split())
+              for r in rows}
+    assert len(groups) == 4, f"2x2 blocks at pool_groups=(4,) is 4 groups, got {len(groups)}"
+    for r in rows:
+        g = tuple(tuple(int(v) for v in m.split(":")) for m in r["POOL_MEMBERS"].split())
+        assert len(g) == 4 and int(float(r["POOL_K"])) == 4
+        assert (int(r["X"]), int(r["Y"])) == g[0], (
+            "a pooled row's X,Y must be its first member, or it has no unique key")
     lit = [c for c in seen if c[0] == "many" and c[2] != 0]
     off = [c for c in seen if c[0] == "many" and c[2] == 0]
     assert lit, "the pooled target was never lit through set_pixels"
     assert off, "the pooled target was never referenced at bitval 0"
     for _t, coords, _b in lit + off:
-        assert coords == members, f"frame lit {coords}, members are {members}"
+        assert coords in groups, f"frame lit {coords}, which is no group of {groups}"
+    assert {c[1] for c in lit} == groups, "a group was never lit"
+    assert {c[1] for c in off} == groups, "a group was never referenced at bitval 0"
     # The fast scan legitimately lights every pixel on its own. What must not happen is
     # a member driven alone AFTER pooling starts -- that would be a different
-    # measurement reported under the pooled row's key.
+    # measurement reported under the pooled row's key. With pool_include_singles the
+    # SHARED member is a single pixel in its own right, so only the others are barred.
+    shared = {(int(r["X"]), int(r["Y"]))
+              for r in allrows if r.get("POOL_K") in (None, "", "nan")}
+    assert shared, "no single pixels in the run, so the check below proves nothing"
+    fresh = {m for g in groups for m in g} - shared
     first_pooled = next(i for i, c in enumerate(seen) if c[0] == "many")
     alone = {c[1][0] for c in seen[first_pooled:] if c[0] == "one" and c[2] != 0}
-    assert not (alone & set(members)), (
-        f"pooled members {alone & set(members)} were lit individually during the sweep")
+    assert not (alone & fresh), (
+        f"pooled members {alone & fresh} were lit individually during the sweep")
 
 
 def test_a_pooled_target_does_not_make_single_pixels_look_dead():
@@ -1399,7 +1412,7 @@ def test_a_pooled_target_does_not_make_single_pixels_look_dead():
     # and a run with both kinds must not kill the singles
     with tempfile.TemporaryDirectory() as tmp:
         cfg = IQEConfig(**{**FAST, "roi": (0, 0, 15, 15), "block_size": 8,
-                           "pool_clusters": 1, "pool_size": 4, "dead_abort": True})
+                           "pool_groups": (4,), "dead_abort": True})
         res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
         rows = _agg_rows(res.run_dir)
     per_target = {}
@@ -1424,7 +1437,7 @@ def test_the_pooled_members_column_survives_the_csv():
     """
     with tempfile.TemporaryDirectory() as tmp:
         cfg = IQEConfig(**{**FAST, "roi": (0, 0, 15, 15), "block_size": 8,
-                           "pool_clusters": 1, "pool_size": 4})
+                           "pool_groups": (4,)})
         res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
         rows = _agg_rows(res.run_dir)
         n_cols = len(acquire.agg_cols(cfg))
@@ -1442,9 +1455,11 @@ def test_the_pooled_members_column_survives_the_csv():
 
 def test_pooling_is_refused_where_it_cannot_mean_anything():
     for kwargs, why in [
-            (dict(pool_clusters=2, pool_size=1), "a group of one"),
-            (dict(pool_clusters=-1), "a negative count"),
-            (dict(pool_clusters=2, source_mode="current"), "a current source")]:
+            (dict(pool_groups=(1, 4)), "a group of one"),
+            (dict(pool_groups=(4,), source_mode="current"), "a current source"),
+            (dict(pool_groups=(4,), sweep_select="stride"), "no blocks to form it in"),
+            (dict(pool_groups=(4,), pixels_per_block=0), "no single to share"),
+            (dict(pool_pm_range=-1e-7), "a negative range")]:
         try:
             IQEConfig(**kwargs).validate()
         except ValueError:
@@ -1491,13 +1506,13 @@ def test_the_console_only_sends_what_the_operator_changed():
     assert build_argv(dict(d), d) == [sys.executable, "-m", "measure_iqe"], (
         "an untouched console must produce a bare command")
     v = dict(d)
-    v["pool_clusters"] = "50"
+    v["pool_groups"] = "[2,4,8]"
     v["roi"] = "FULL"
     argv = build_argv(v, d, simulate=True, array="Array42_IQE",
                       extra="# a comment\nn_fine=12\n\n")
     assert argv.count("--set") == 3, argv
     assert "--simulate" in argv and "--array" in argv
-    for want in ("roi=FULL", "pool_clusters=50", "n_fine=12"):
+    for want in ("roi=FULL", "pool_groups=[2,4,8]", "n_fine=12"):
         assert want in argv, f"{want} missing from {argv}"
 
 
@@ -1539,16 +1554,24 @@ def test_the_console_presets_describe_runs_that_actually_happen():
         IQEConfig(**over).validate()
 
     alive = [{"X": x, "Y": y} for x in range(512) for y in range(512)]
-    cfg = IQEConfig(**PRESETS["Full array, 36 singles + 50 pooled"]).validate()
-    singles = acquire.select_sweep_pixels(alive, cfg, QUIET)
-    groups = acquire.select_pool_clusters(alive, singles, cfg, QUIET)
+    sel = acquire.select_sweep_pixels(
+        alive, IQEConfig(**PRESETS["Full array, 200 singles + 100 pooled x4"]).validate(),
+        QUIET)
+    singles = [r for r in sel if "POOL_MEMBERS" not in r]
+    groups = [r for r in sel if "POOL_MEMBERS" in r]
+    assert len(singles) == 200, f"preset says 200 singles, got {len(singles)}"
+    assert len(groups) == 100, f"preset says 100 pooled groups, got {len(groups)}"
+    assert all(len(g["POOL_MEMBERS"]) == 4 for g in groups), "preset says groups of 4"
+
+    sel = acquire.select_sweep_pixels(
+        alive,
+        IQEConfig(**PRESETS["Full array, 36 singles + 36 each of K=2,4,8"]).validate(),
+        QUIET)
+    singles = [r for r in sel if "POOL_MEMBERS" not in r]
+    groups = [r for r in sel if "POOL_MEMBERS" in r]
     assert len(singles) == 36, f"preset says 36 singles, got {len(singles)}"
-    assert len(groups) == 50, f"preset says 50 pooled groups, got {len(groups)}"
-    # and the two draws must not overlap, or the grounding comparison is circular
-    s_set = {(r["X"], r["Y"]) for r in singles}
-    members = {m for g in groups for m in g["POOL_MEMBERS"]}
-    assert not (s_set & members), f"{len(s_set & members)} pixel(s) are both"
-    assert len(members) == 200, f"50 groups of 4 is 200 pixels, got {len(members)}"
+    by_k = {k: sum(1 for g in groups if len(g["POOL_MEMBERS"]) == k) for k in (2, 4, 8)}
+    assert by_k == {2: 36, 4: 36, 8: 36}, f"preset says 36 of each K, got {by_k}"
 
     cfg100 = IQEConfig(**PRESETS["Full array, 100 singles"]).validate()
     assert len(acquire.select_sweep_pixels(alive, cfg100, QUIET)) == 100
@@ -1570,11 +1593,11 @@ def test_a_pooled_group_that_will_clamp_says_so_before_the_sweep():
     seen = {}
     for k in (4, 8, 16):
         cfg = IQEConfig(roi=(0, 0, 63, 63), block_size=16, pixels_per_block=1,
-                        pool_clusters=2, pool_size=k).validate()
-        singles = acquire.select_sweep_pixels(alive, cfg, QUIET)
+                        pool_groups=(k,)).validate()
         msgs: list[str] = []
-        groups = acquire.select_pool_clusters(alive, singles, cfg, msgs.append)
-        assert groups, f"K={k}: nothing selected, the test measures nothing"
+        sel = acquire.select_sweep_pixels(alive, cfg, msgs.append)
+        assert [r for r in sel if "POOL_MEMBERS" in r], (
+            f"K={k}: nothing selected, the test measures nothing")
         seen[k] = " ".join(msgs)
     assert "CLAMPING EXPECTED" not in seen[4], (
         "K=4 draws ~471 uA against a 1 mA ceiling and must not warn")
@@ -1582,7 +1605,7 @@ def test_a_pooled_group_that_will_clamp_says_so_before_the_sweep():
         "K=8 draws ~942 uA: close, but not over")
     assert "CLAMPING EXPECTED" in seen[16], (
         "K=16 draws ~1.9 mA against a 1 mA ceiling and must warn")
-    assert "pool_size <= 8" in seen[16], (
+    assert "entry <= 8" in seen[16], (
         f"the warning must name a usable K, got: {seen[16]}")
 
 
@@ -1594,7 +1617,7 @@ def test_the_warmup_diagnostic_never_runs_on_a_pooled_target():
     """
     with tempfile.TemporaryDirectory() as tmp:
         cfg = IQEConfig(**{**FAST, "roi": (0, 0, 15, 15), "block_size": 8,
-                           "pool_clusters": 1, "pool_size": 4,
+                           "pool_groups": (4,),
                            "warmup_diag_n_pixels": 8, "warmup_diag_seconds": 0.01})
         res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET,
                                   warmup_diag=True)

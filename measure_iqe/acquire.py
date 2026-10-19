@@ -183,6 +183,44 @@ def block_edges(lo: int, hi: int, bs: int) -> np.ndarray:
     return np.unique(np.concatenate(out))
 
 
+def split_block(got: list[Row], cfg: IQEConfig) -> list[Row]:
+    """One block's draw -> its single pixels, then one head row per pooled group.
+
+    Groups are formed INSIDE the block, from the block's own well-separated draw, so a
+    pooled row measures its block and not the whole quadrant. The earlier array-wide
+    draw put 291 of 300 member pairs in different blocks, a median of 152 px apart,
+    which averaged away the +3.7 % spatial gradient section 16 measures.
+
+    The head row is the group's first FRESH member and never the shared single, so X,Y
+    stays unique across the selection and every ``groupby(["X","Y"])`` downstream keeps
+    working. With ``pool_include_singles`` the group also carries one of the block's own
+    single pixels, which makes the comparison paired: P(group) - P(single) is the rest
+    of the group measured on the same silicon, so an additivity loss is separable from
+    pixel-to-pixel variation.
+
+    Blocks never straddle the quadrant boundary (``block_edges``), so every member of a
+    group is in one quadrant by construction. The assert is cheap and says so.
+    """
+    if not cfg.pool_groups:
+        return got
+    singles = got[:cfg.pixels_per_block]
+    spare = list(got[cfg.pixels_per_block:])
+    out = list(singles)
+    for gi, k in enumerate(int(k) for k in cfg.pool_groups):
+        share = singles[gi % len(singles)] if (cfg.pool_include_singles and singles) else None
+        need = k - (share is not None)
+        if len(spare) < need:
+            break                 # this block had too few well-separated alive pixels
+        members = [spare.pop(0) for _ in range(need)] + ([share] if share else [])
+        coords = tuple((int(r["X"]), int(r["Y"])) for r in members)
+        assert len({(x >= 256, y >= 256) for x, y in coords}) == 1, (
+            f"group {coords} crosses a quadrant boundary")
+        head = dict(members[0])
+        head["POOL_MEMBERS"] = coords
+        out.append(head)
+    return out
+
+
 def select_sweep_pixels(alive: list[Row], cfg: IQEConfig, log: Logger) -> list[Row]:
     """Pick which alive pixels get the full IQE sweep — see SWEEP_SELECT."""
     if not alive:
@@ -203,6 +241,12 @@ def select_sweep_pixels(alive: list[Row], cfg: IQEConfig, log: Logger) -> list[R
         taken: list[tuple[int, int]] = []              # every pixel chosen so far, ALL blocks
         bs = cfg.block_size
         n_short = 0
+        # Pooled members come out of the SAME per-block draw as the singles, so they
+        # inherit min_pixel_separation and the avoid-set for free. With
+        # pool_include_singles a group of k needs only k-1 fresh pixels.
+        n_extra = sum(int(k) - bool(cfg.pool_include_singles and cfg.pixels_per_block)
+                      for k in cfg.pool_groups)
+        want = cfg.pixels_per_block + n_extra
         for bx in range(nbx):
             for by in range(nby):
                 block = [r for r in alive if xe[bx] <= r["X"] < xe[bx + 1]
@@ -215,13 +259,13 @@ def select_sweep_pixels(alive: list[Row], cfg: IQEConfig, log: Logger) -> list[R
                         and ye[by] - bs <= p[1] < ye[by + 1] + bs]
                 # RANDOM start per block → each block's FPS pattern differs → sampled
                 # rows/columns diversified across blocks (no repeating sub-lattice).
-                got = _fps_pick(block, cfg.pixels_per_block, int(rng.integers(len(block))),
+                got = _fps_pick(block, want, int(rng.integers(len(block))),
                                 avoid=near, min_sep=cfg.min_pixel_separation)
                 if not got:
                     continue
-                if len(got) < cfg.pixels_per_block:
+                if len(got) < want:
                     n_short += 1          # too few well-separated alive pixels in this block
-                picks.append(got)
+                picks.append(split_block(got, cfg))
                 taken.extend((r["X"], r["Y"]) for r in got)
         # Round-robin MEASUREMENT ORDER: pass 0 takes the 1st pixel of every block, pass 1 the
         # 2nd, etc. So consecutive measurements hop between blocks and each block's K pixels are
@@ -233,13 +277,15 @@ def select_sweep_pixels(alive: list[Row], cfg: IQEConfig, log: Logger) -> list[R
             for bp in picks:
                 if p < len(bp):
                     sel.append(bp[p])
-        log(f"  selected {len(sel)} pixels: {nbx}×{nby} blocks (~{cfg.block_size}px), "
-            f"{cfg.pixels_per_block}/block, {len(picks)} non-empty blocks, seed {cfg.block_seed} "
-            f"(randomized-start FPS, round-robin order → drift-decorrelated)")
+        log(f"  selected {len(sel)} targets: {nbx}×{nby} blocks (~{cfg.block_size}px), "
+            f"{cfg.pixels_per_block} single(s)/block, {len(picks)} non-empty blocks, "
+            f"seed {cfg.block_seed} (randomized-start FPS, round-robin order → "
+            f"drift-decorrelated)")
+        register_pools(sel, alive, cfg, log)
         # Report the realised spacing — this is the number that says whether the sample is
         # spatially spread or secretly clustered, so it belongs in the run log.
         log("  " + spacing_summary(sel, cfg.min_pixel_separation)
-            + (f"; {n_short} block(s) gave fewer than {cfg.pixels_per_block} "
+            + (f"; {n_short} block(s) gave fewer than {want} "
                f"well-separated alive pixels" if n_short else ""))
         return sel
 
@@ -476,7 +522,7 @@ def agg_cols(cfg: IQEConfig) -> list[str]:
         cols += _AGG_COLS_REF
     if cfg.fine_sweep_mode == "voltage":
         cols += _AGG_COLS_LIMIT
-    if cfg.pool_clusters:
+    if cfg.pool_groups:
         cols += _AGG_COLS_POOL
     return cols
 
@@ -1086,110 +1132,92 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
         sel = sel[k:] + sel[:k]
         log(f"  sweep_rotate={cfg.sweep_rotate}: same {len(sel)} pixels, order rotated by "
             f"{k}. Slot 0 is now ({sel[0]['X']},{sel[0]['Y']}).")
-    return sel + select_pool_clusters(alive, sel, cfg, log)
+    return sel
 
 
 # Measured on run 261015-0015: the median pixel draws 117.7 uA at -2.60 V and 33.3 uA
 # at the -1.35 V fast-scan bias. The ratio is what turns a fast-scan reading, which the
 # selection already has, into a bright-end estimate it does not.
 BRIGHT_OVER_FASTSCAN = 117.7 / 33.3
+# Same ratio for the optical channel, measured on the same run: the median pixel emits
+# 147.7 nW at -2.60 V and 51.6 nW at -1.35 V. Used to turn a fast-scan power into the
+# bright-end power a pooled group will ask the (fixed) PM400 range to hold.
+BRIGHT_OVER_PM_FASTSCAN = 147.7 / 51.6
 
 
-def select_pool_clusters(alive: list[Row], singles: list[Row], cfg: IQEConfig,
-                         log: Logger) -> list[Row]:
-    """Pick ``pool_clusters`` groups of ``pool_size`` alive pixels, each inside ONE quadrant.
+def register_pools(sel: list[Row], alive: list[Row], cfg: IQEConfig,
+                   log: Logger) -> int:
+    """Register every pooled head row so ``light()`` lights its members, and say so.
 
-    Returns selection rows keyed on the FIRST member, with ``POOL_MEMBERS`` attached, and
-    registers each group in ``_pool_members`` so ``light()`` finds it.
-
-    Three constraints, each for a measured reason:
-
-      * **one quadrant per group.** The ``tl_pixen``/``tr_pixen``/... enables live in the
-        frame instruction, not in the pixel data, so a group across a 256 boundary would
-        light the near quadrant's mirror image instead of the far member.
-      * **no member is a single pixel.** The singles are the ground truth the pooled rows
-        are checked against. Sharing a pixel between the two makes that check circular.
-      * **members are separated**, by the same ``min_pixel_separation`` the singles get.
-        Adjacent members would fold thermal and optical crosstalk into the pooled sum,
-        and the pooled number is already a sum -- there would be no way to see it.
+    Returns the number of groups. Also runs the compliance check, because selection is
+    where a doomed run can still be cancelled -- 30 hours later NVLED_AT_COMPLIANCE
+    says the same thing, far too late.
     """
-    if not cfg.pool_clusters:
-        return []
-    taken = {(int(r["X"]), int(r["Y"])) for r in singles}
-    pool = [r for r in alive if (int(r["X"]), int(r["Y"])) not in taken]
-    want = cfg.pool_clusters * cfg.pool_size
-    # Same sampler the singles use, so the members inherit the separation guarantee,
-    # and a different seed so the two draws do not land on the same pixels. The sampler
-    # returns nblocks x pixels_per_block, so ask for enough PER BLOCK to reach `want`
-    # -- deriving it from pool_clusters alone ignored the block count and came up
-    # short by exactly that factor.
-    x1, y1, x2, y2 = cfg.resolve_roi()
-    nblocks = ((len(block_edges(min(x1, x2), max(x1, x2), cfg.block_size)) - 1)
-               * (len(block_edges(min(y1, y2), max(y1, y2), cfg.block_size)) - 1))
-    # +1 block's worth of slack: the quadrant chunking below drops the remainder of
-    # each quadrant's list, so asking for exactly `want` reliably yields fewer groups.
-    per_block = max(1, -(-want // nblocks) + 1)
-    pcfg = dataclasses.replace(cfg, block_seed=cfg.pool_seed,
-                               pixels_per_block=per_block)
-    picks = select_sweep_pixels(pool, pcfg, lambda _s: None)
-    by_quad: dict[str, list[Row]] = {}
-    for r in picks:
-        q = ("TL", "TR", "BL", "BR")[(1 if int(r["X"]) >= 256 else 0)
-                                     + 2 * (1 if int(r["Y"]) >= 256 else 0)]
-        by_quad.setdefault(q, []).append(r)
-    groups: list[Row] = []
-    for q, rs in sorted(by_quad.items()):
-        for i in range(0, len(rs) - cfg.pool_size + 1, cfg.pool_size):
-            if len(groups) >= cfg.pool_clusters:
-                break
-            grp = rs[i:i + cfg.pool_size]
-            members = tuple((int(r["X"]), int(r["Y"])) for r in grp)
-            head = dict(grp[0])
-            head["POOL_MEMBERS"] = members
-            head["POOL_QUADRANT"] = q
-            _pool_members[members[0]] = members
-            groups.append(head)
+    _pool_members.clear()
+    groups = [r for r in sel if "POOL_MEMBERS" in r]
+    for g in groups:
+        _pool_members[(int(g["X"]), int(g["Y"]))] = g["POOL_MEMBERS"]
     if not groups:
-        log(f"  pooling: no group of {cfg.pool_size} separated alive pixels fits in one "
-            f"quadrant -- nothing pooled, the single pixels are unaffected")
-        return []
-    if len(groups) < cfg.pool_clusters:
-        log(f"  pooling: only {len(groups)} of {cfg.pool_clusters} requested group(s) "
-            f"could be formed from {len(picks)} picked pixel(s)")
-    # The OTHER cap on K, and a harder one than detection: K members draw K x the
-    # current, and pick_limit's ladder stops at vramp_highv_limit_a. At the measured
-    # 117.7 uA per pixel at -2.60 V, a 1 mA ceiling clamps at K = 8. A clamped point is
-    # the instrument's current, not the device's, and the EQE from it is meaningless --
-    # so say it here, at selection, and not 30 hours later in NVLED_AT_COMPLIANCE.
-    # Each member's own fast-scan current, by coordinate. .get() because a caller may
-    # hand in bare {X, Y} rows -- RUN_FORMAT.md's rule, and here it means the check
-    # quietly does not run rather than taking the selection down with it.
+        if cfg.pool_groups:
+            log(f"  pooling: pool_groups={tuple(cfg.pool_groups)} but no block gave "
+                f"enough well-separated alive pixels -- nothing pooled, the single "
+                f"pixels are unaffected")
+        return 0
+    sizes = sorted({len(g["POOL_MEMBERS"]) for g in groups})
+    n_px = sum(len(g["POOL_MEMBERS"]) for g in groups)
+    shared = sum(1 for g in groups
+                 if any((int(s_["X"]), int(s_["Y"])) in g["POOL_MEMBERS"]
+                        for s_ in sel if "POOL_MEMBERS" not in s_))
+    log(f"  pooling: {len(groups)} group(s), size(s) {sizes}, {n_px} pixel-slot(s) lit "
+        f"across {len(sel) - len(groups)} single(s). Each group is formed inside ONE "
+        f"block, so it measures that block and not the quadrant. {shared} group(s) "
+        f"share a member with a single pixel "
+        f"(pool_include_singles={cfg.pool_include_singles}) -- a shared member makes "
+        f"the comparison paired. A pooled row carries POOL_K and the SUM of its "
+        f"members: EQE is unaffected, per-pixel current is not.")
+
+    # The harder cap on K. Members draw K x the current and pick_limit's ladder stops
+    # at vramp_highv_limit_a, so at the measured 117.7 uA per pixel at -2.60 V a 1 mA
+    # ceiling clamps at K = 8. .get() because a caller may hand in bare {X, Y} rows --
+    # RUN_FORMAT.md's rule for readers, and here it means the check quietly does not
+    # run rather than taking the selection down with it.
     i_fs = {(int(r["X"]), int(r["Y"])): abs(float(r.get("NVLED_CURR_MEAN") or 0.0))
             for r in alive}
-    worst = max((sum(i_fs.get(m, 0.0) for m in g["POOL_MEMBERS"]) for g in groups),
-                default=0.0)
+    worst_g = max(groups, key=lambda g: sum(i_fs.get(m, 0.0) for m in g["POOL_MEMBERS"]),
+                  default=None)
+    worst = sum(i_fs.get(m, 0.0) for m in worst_g["POOL_MEMBERS"]) if worst_g else 0.0
     i_bright = worst * BRIGHT_OVER_FASTSCAN
+    k_worst = len(worst_g["POOL_MEMBERS"]) if worst_g else 1
     if i_bright > cfg.vramp_highv_limit_a:
-        log(f"  !! POOLED CLAMPING EXPECTED: the brightest group should draw "
-            f"~{i_bright*1e6:.0f} uA at {cfg.nvled_v_coarse_stop:g} V, over the "
+        per_px = max(i_bright / max(k_worst, 1), 1e-12)
+        log(f"  !! POOLED CLAMPING EXPECTED: the brightest group (K={k_worst}) should "
+            f"draw ~{i_bright*1e6:.0f} uA at {cfg.nvled_v_coarse_stop:g} V, over the "
             f"{cfg.vramp_highv_limit_a*1e6:.0f} uA ceiling of pick_limit's ladder. "
-            f"Those points will sit on the compliance limit and are NOT measurements "
-            f"-- they are flagged NVLED_AT_COMPLIANCE and dropped by the analysis. "
-            f"Use pool_size <= {max(1, int(cfg.vramp_highv_limit_a / max(i_bright / cfg.pool_size, 1e-12)))}, "
+            f"Those points sit on the compliance limit and are NOT measurements -- "
+            f"they are flagged NVLED_AT_COMPLIANCE and dropped by the analysis. Keep "
+            f"every pool_groups entry <= {max(1, int(cfg.vramp_highv_limit_a / per_px))}, "
             f"or raise vramp_highv_limit_a, or stop the sweep short of the bright end.")
     elif i_bright > 0.7 * cfg.vramp_highv_limit_a:
         log(f"  pooled bright-end estimate ~{i_bright*1e6:.0f} uA against a "
             f"{cfg.vramp_highv_limit_a*1e6:.0f} uA ceiling -- close, watch "
             f"NVLED_AT_COMPLIANCE.")
-    log(f"  pooling: {len(groups)} group(s) of {cfg.pool_size}, "
-        f"{len(groups) * cfg.pool_size} extra pixel(s) lit, swept as {len(groups)} "
-        f"target(s) on top of the {len(singles)} single pixel(s). A pooled row carries "
-        f"POOL_K and the SUM of its members -- EQE is unaffected, per-pixel current is "
-        f"not. Seed {cfg.pool_seed}.")
-    for g in groups:
-        log(f"    [{g['POOL_QUADRANT']}] "
-            + " ".join(f"({x},{y})" for x, y in g["POOL_MEMBERS"]))
-    return groups
+
+    # The OTHER ceiling, and the one nothing used to check: the PM400 range is FIXED
+    # (autorange off), so a group K x brighter than a single can run out of scale at
+    # the bright end. pm_range is only a request -- the realised range is logged at
+    # startup -- so this compares against what was asked for and says what to do.
+    p_fs = {(int(r["X"]), int(r["Y"])): abs(float(r.get("PM400_POWER_MEAN") or 0.0))
+            for r in alive}
+    p_worst = max((sum(p_fs.get(m, 0.0) for m in g["POOL_MEMBERS"]) for g in groups),
+                  default=0.0) * BRIGHT_OVER_PM_FASTSCAN
+    rng_w = cfg.pool_pm_range or cfg.pm_range
+    if p_worst > rng_w:
+        log(f"  !! POOLED OVER-RANGE LIKELY: the brightest group should emit "
+            f"~{p_worst*1e9:.0f} nW at {cfg.nvled_v_coarse_stop:g} V against a "
+            f"requested PM400 range of {rng_w*1e9:.0f} nW. The range is FIXED "
+            f"(autorange is off on purpose, so a mid-sweep switch cannot put a step "
+            f"in the data). Raise pool_pm_range, or use smaller groups.")
+    return len(groups)
 
 
 def run_sweep_current(pm, smu, smile, selected: list[Row], run_dir: Path,

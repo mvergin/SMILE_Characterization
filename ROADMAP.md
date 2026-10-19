@@ -300,7 +300,7 @@ falls, and the run is the cheap half.
 
 ### Done, 17 October 2026 — pooling wired in, and the simulator corrected
 
-**`pool_clusters` sweeps pooled targets**, off by default and deliberately so. A
+**`pool_groups` sweeps pooled targets**, off by default and deliberately so. A
 pooled row is not a pixel: it carries `POOL_K` and the **sum** of its members' light
 and current. `X`,`Y` is the first member, so every `groupby(["X","Y"])` keeps working.
 EQE needs no correction, because both sums carry the same K; **current density does**,
@@ -308,8 +308,30 @@ and `analyze_array.py` divides by `POOL_K`.
 
 The shape it is built for is both at once — singles and pooled groups in the same
 session, the singles grounding the pooled numbers under the same lamp, thermal history
-and instrument state. `pool_seed` is a separate RNG stream so a pooled member is never
-also a single pixel, or the grounding comparison would be circular.
+and instrument state.
+
+> **Revised 19 October 2026 — the groups are now BLOCK-LOCAL, and `pool_clusters`,
+> `pool_size` and `pool_seed` are gone.** The first version drew the members from a
+> second array-wide sample with its own seed. Measured on the full array: 291 of 300
+> member pairs landed in **different blocks**, a median of **152 px** apart. A group
+> was therefore a quadrant-scale average, which throws away the +3.7 % spatial
+> gradient §16 measures, and the singles that were supposed to ground it sat somewhere
+> else entirely, under different row drivers.
+>
+> `pool_groups` is a per-block list of group sizes: `(4,)` adds one 4-pixel group to
+> every block, `(2, 4, 8)` adds three of different K — which gives the K-dependence of
+> the pooled faint end across the array for free, since `POOL_K` is already per CSV
+> row. Members come out of the **same per-block draw** as the singles, so they inherit
+> `min_pixel_separation` and the avoid-set, and the separate RNG stream is no longer
+> needed. Measured on the `block_size=52` preset, members are now a median of **27 px**
+> apart and every group is inside one block.
+>
+> `pool_include_singles` (default **on**) makes a group take one of its own block's
+> singles as a member. That makes the comparison **paired**: `P(group) − P(single)` is
+> the rest of the group measured on the same silicon, so an additivity loss is
+> separable from pixel-to-pixel variation — which run 261019-0914 showed is exactly
+> what the old disjoint design could not do. The head row is the first *fresh* member,
+> never the shared single, so `X`,`Y` stays unique.
 
 One defect this turned up and fixed: **both dead-pixel tests compare a target against
 the median of the others**, so an unscaled pooled target (K× the light) would have
@@ -342,9 +364,18 @@ Two things the correction added that matter more than the arithmetic:
 * **and the code review found a second cap, harder than both.** K members draw K× the
   current, and `pick_limit`'s ladder stops at `vramp_highv_limit_a`. At the measured
   117.7 µA per pixel at −2.60 V a 1 mA ceiling clamps at **K = 8**. Two independent
-  measurements therefore land on the same answer, and `pool_size` defaults to 4.
-  `select_pool_clusters` estimates the bright-end current from the members' own
-  fast-scan readings and warns at selection time; this one does not lift.
+  measurements therefore land on the same answer, and the presets use 4.
+  `register_pools` estimates the bright-end current from the members' own fast-scan
+  readings and warns at selection time; this one does not lift. **Confirmed on the
+  bench 19 October**: run 261019-0914 at `--compliance 1e-5` drove K = 16 to exactly
+  10.000 µA and its per-pixel current collapsed from 1.78 to 0.61 µA.
+* **and a third, found 19 October: the PM400 range.** Autorange is off on purpose, so
+  a mid-sweep switch cannot put a step in the data — which means a K-pixel group has
+  no room to range up. A single pixel spans 0.2 nW at −0.8 V to 257 nW at −2.6 V
+  (run 261016-2252), so a K = 4 group spans 0.8 nW to ~1 µW. `pool_pm_range` is the
+  knob, `register_pools` warns, and the **realised** range is now logged at startup:
+  `pm_range` is only a request, and `SENS:POW:RANG` picks the smallest hardware range
+  that covers it.
 
 `yieldsimu.py` has a `_selfcheck()` on both claims and runs it before plotting.
 
