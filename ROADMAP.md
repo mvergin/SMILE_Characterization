@@ -331,8 +331,16 @@ capacitance on one row driver should do. So `pool_groups` must not inherit the
 single-pixel dwell. The old verdict called K = 1 the best-settled and K = 8 "the
 slowest", which inverts the answer.
 
-What is still missing is the dwell itself: one probe time says the group is not settled,
-not how long it needs. `--cluster-probe-s` has to be swept.
+**And the scan is automated.** `--cluster-probe-s` takes a list, the probes are
+cumulative inside one settle window, and the run writes `cluster_settling.csv` plus a
+verdict that names the dwell. Two fixes were needed first: the settled reference has to
+sit past the last probe (it divided by the reading taken *at* `cluster_settle_s`, which
+reads 1.0 by construction if that settle is not itself enough -- and nobody had checked
+the 2 s), and a probe shorter than one acquisition averages over the transient instead
+of sampling it, so the run warns below `cluster_n_pm x 4 ms`. `settling_verdict()` is
+extracted and tested on the measured numbers plus its three branches: an upper bound
+when nothing resolves, a named dwell when a quiet probe follows a significant one, and a
+refusal to name one when every probe is still moving.
 
 **And averaging is the expensive lever.** Run 261019-1056, `optfloor` on the 470 nW
 range: 24.95 pW at `n_pm = 4` down to 2.74 pW at 512, going as `N^-0.455` -- close to

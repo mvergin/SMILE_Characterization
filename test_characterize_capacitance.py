@@ -272,6 +272,54 @@ def _cluster_run(ks, n_members=16):
     return rows, smile.frames
 
 
+def test_the_settling_verdict_weighs_sigma_and_never_guesses_a_dwell():
+    """Run 261019-1057's real numbers, and the three branches of the conclusion.
+
+    The first version of this verdict ranked PERCENTAGES. A single pixel emitting
+    455 pW deviated 7.70 % at 50 ms -- but that is 35 pW against a 31 pW per-rep
+    scatter, 1.1 sigma, nothing. A K=16 group emitting 5863 pW deviated only 2.70 %,
+    which is 159 pW against 35.5 pW, 4.5 sigma, real. Ranking by percentage called the
+    single pixel best-settled and inverted the answer.
+    """
+    from characterize_capacitance import settling_verdict
+
+    def row(k, t, dev_frac, p, sd):
+        dev = dev_frac * p
+        return dict(k=k, probe_s=t, p_settled_W=p, dev_W=dev, dev_frac=dev_frac,
+                    dev_sigma=abs(dev) / sd)
+
+    # the measured run: K=1 unresolved, K=16 real at 50 ms
+    srows = [row(1, 0.05, 0.0770, 454.7e-12, 31.1e-12),
+             row(16, 0.05, 0.0270, 5863.0e-12, 35.5e-12)]
+    out = "\n".join(settling_verdict(srows, {1, 16}, 2.0))
+    assert "nothing resolved at K=1" in out, out
+    assert "NOT settled at 50 ms" in out and "+2.70%" in out, out
+    # and it must not name a dwell it has not seen
+    assert "Extend --cluster-probe-s past 2000 ms" in out, out
+    assert "Settled by" not in out, "named a dwell from a scan that never settles"
+
+    # a scan that DOES settle: the last significant probe has a quiet one after it
+    # 0.025 at 200 ms is 4.1 sigma, so it IS significant; 0.001 at 500 ms is 0.2
+    srows = [row(16, 0.05, 0.0270, 5863e-12, 35.5e-12),
+             row(16, 0.20, 0.0250, 5863e-12, 35.5e-12),
+             row(16, 0.50, 0.0010, 5863e-12, 35.5e-12)]
+    out = "\n".join(settling_verdict(srows, {16}, 1.0))
+    assert "NOT settled at 200 ms" in out, out
+    assert "Settled by 500 ms" in out, out
+
+    # an unordered scan must give the same answer as an ordered one
+    assert settling_verdict(srows, {16}, 1.0) == settling_verdict(
+        list(reversed(srows)), {16}, 1.0), "the verdict depends on row order"
+
+    # an upper bound is not a zero, and it is quoted
+    srows = [row(1, 0.05, 0.005, 454.7e-12, 31.1e-12)]
+    out = "\n".join(settling_verdict(srows, {1}, 2.0))
+    assert "NOT shown to be zero" in out and "under ~6.8%" in out, out
+
+    # no scan for a K means no line for it, never a crash
+    assert settling_verdict([], {1, 8}, 2.0) == []
+
+
 def test_the_cluster_reference_pools_and_is_never_a_blank_frame():
     """Section 6: an all-off frame conducts ~4x the bitval-0 level.
 

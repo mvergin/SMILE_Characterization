@@ -394,6 +394,10 @@ _TRACES: list = []
 # everything a run measured.
 _PTRACES: list = []
 
+# Extra CSVs an experiment wants beside its own, keyed by file stem. The settling scan
+# needs one row per (K, probe time), which does not fit cluster.csv's one row per K.
+_EXTRA_ROWS: dict = {}
+
 
 def keep_power_trace(tag, t, p):
     """Stash one ``P(t)`` beside the current trace of the same tag."""
@@ -1210,6 +1214,57 @@ def _quadrant_of(x, y):
     return ("TL", "TR", "BL", "BR")[(1 if x >= 256 else 0) + 2 * (1 if y >= 256 else 0)]
 
 
+def settling_verdict(srows: list[dict], ks: set, settle_s: float) -> list[str]:
+    """Read a probe scan and say what dwell each K needs.
+
+    Significance, not percentage. A probe is ONE reading, so its uncertainty is the
+    per-rep scatter -- and at the faint end that scatter IS the ~30 pW optical floor. A
+    single pixel emitting 455 pW cannot resolve a 7 % deviation, while a K=16 group
+    emitting 5863 pW resolves 2.7 % at 4.5 sigma. Ranking by percentage inverts the
+    answer, which is what the first version of this did (run 261019-1057).
+
+    Three outcomes per K, and the middle one is the only useful one:
+
+      * nothing above 3 sigma -> an UPPER BOUND, not a zero. Said as such.
+      * the last significant probe has a later, insignificant one after it -> that
+        later time is the dwell this K needs.
+      * every probe is still moving -> the dwell is past the end of the scan, and the
+        scan has to be extended. Reporting a number here would be a guess.
+    """
+    out = []
+    for k in sorted(ks):
+        scan = [r for r in srows if r["k"] == k and np.isfinite(r["dev_sigma"])]
+        if not scan:
+            continue
+        scan.sort(key=lambda r: r["probe_s"])
+        out.append(
+            f"    settling K={k}, probe minus settled against the per-rep scatter: "
+            + ", ".join(f"{r['probe_s']*1e3:.0f}ms:{100*r['dev_frac']:+.2f}%"
+                        f"({r['dev_sigma']:.1f}s)" for r in scan))
+        sig = [r for r in scan if r["dev_sigma"] >= 3.0]
+        if not sig:
+            res = [abs(r["dev_W"]) / r["dev_sigma"] / r["p_settled_W"]
+                   for r in scan if r["dev_sigma"] > 0]
+            out.append(
+                f"      -> nothing resolved at K={k}. A probe is one reading and its "
+                f"noise is the floor, so the deviation is under "
+                f"~{100 * max(res, default=float('nan')):.1f}% and NOT shown to be "
+                f"zero. Pool harder or raise --cluster-n-pm.")
+            continue
+        worst = max(sig, key=lambda r: r["probe_s"])
+        after = [r for r in scan if r["probe_s"] > worst["probe_s"]]
+        out.append(
+            f"      -> NOT settled at {worst['probe_s']*1e3:.0f} ms "
+            f"({100*worst['dev_frac']:+.2f}%). "
+            + (f"Settled by {min(r['probe_s'] for r in after)*1e3:.0f} ms, so that is "
+               f"the dwell K={k} needs -- not the single-pixel one."
+               if after else
+               f"Every probe up to the last one is still moving, so the dwell is ABOVE "
+               f"{worst['probe_s']*1e3:.0f} ms and this scan does not reach it. Extend "
+               f"--cluster-probe-s past {settle_s*1e3:.0f} ms."))
+    return out
+
+
 def exp_cluster(pm, smu, smile, cfg, args, log):
     """Pooled K-pixel measurement. Does the faint-end scatter fall as 1/sqrt(K)?
 
@@ -1290,6 +1345,19 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
     if max(args.cluster_k) > len(members):
         log(f"    only {len(members)} alive pixel(s) in {quads[0]}, K capped at {max(ks)}")
 
+    # The settled reference must sit PAST the last probe, or settled_frac divides by a
+    # reading taken at the same moment and reads 1.0 by construction. 1.5x the last
+    # probe, and never less than what was asked for.
+    probe_ts = sorted(t for t in args.cluster_probe_s if t > 0)
+    if probe_ts:
+        args.cluster_settle_s = max(args.cluster_settle_s, 1.5 * probe_ts[-1])
+        acq_ms = args.cluster_n_pm * 4.0
+        if probe_ts[0] * 1e3 < acq_ms:
+            log(f"    note: the first probe is at {probe_ts[0]*1e3:.0f} ms but one "
+                f"acquisition takes about {acq_ms:.0f} ms at cluster_n_pm="
+                f"{args.cluster_n_pm}, so it averages over the transient rather than "
+                f"sampling it. Lower --cluster-n-pm or drop that point.")
+
     m.configure_voltage_source_b(smu, cfg, log)
     smu.set_voltage("b", args.cluster_v)
     # The bias is set once and never moves, so the charge-limited wait is paid once.
@@ -1310,13 +1378,22 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
         spans more rows, so there is no reason to assume a group settles like a single
         pixel. One extra reading per K is what it costs to find out.
         """
-        states, probe = {}, None
+        states, probes = {}, []
         for state, bv in (("lit", cfg.bitvals[0]), ("off", cfg.leak_ref_bitval)):
             smile.set_pixels(group, bv)
-            if state == "lit" and args.cluster_probe_s > 0:
-                time.sleep(args.cluster_probe_s)
-                probe = m.acquire_point(pm, smu, args.cluster_n_smu, args.cluster_n_pm)
-                time.sleep(max(0.0, args.cluster_settle_s - args.cluster_probe_s))
+            if state == "lit" and probe_ts:
+                # Walk the probe times in order, sleeping only the gap to the next, so
+                # the whole scan costs the one settle it was always going to pay plus
+                # one acquisition per time. t is the moment the acquisition STARTS: it
+                # lasts about cluster_n_pm x 4 ms, so a probe much under that smears
+                # the transient it is trying to sample and the log says so.
+                t0_frame = time.perf_counter()
+                for t in probe_ts:
+                    time.sleep(max(0.0, t - (time.perf_counter() - t0_frame)))
+                    probes.append((t, m.acquire_point(pm, smu, args.cluster_n_smu,
+                                                      args.cluster_n_pm)))
+                time.sleep(max(0.0, args.cluster_settle_s
+                               - (time.perf_counter() - t0_frame)))
             else:
                 time.sleep(args.cluster_settle_s)
             states[state] = [m.acquire_point(pm, smu, args.cluster_n_smu,
@@ -1324,7 +1401,7 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
                              for _ in range(args.cluster_reps)]
         p = np.array([r[0] for r in states["lit"]]) - np.array([r[0] for r in states["off"]])
         i = np.array([r[4] for r in states["lit"]]) - np.array([r[4] for r in states["off"]])
-        return p, i, states, probe
+        return p, i, states, probes
 
     # Each member alone, before any group. Same protocol and same rep count, so the
     # single scatter and the pooled scatter are the same quantity.
@@ -1338,11 +1415,13 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
     log(f"    {len(singles)} member(s) alone: P {np.mean(sp)*1e12:.1f} pW "
         f"+-{100*spread:.1f}% member-to-member")
 
-    rows = []
+    rows: list[dict] = []
+    srows: list[dict] = []          # one row per (K, probe time) -> cluster_settling.csv
     base = None
     for k in ks:
         grp = members[:k]
-        p, i, states, probe = measure(grp)
+        p, i, states, probes = measure(grp)
+        off_mean = float(np.mean([r[0] for r in states["off"]]))
         p_sing = sum(singles[t][0] for t in grp)
         i_sing = sum(singles[t][1] for t in grp)
         sd_pred = math.sqrt(sum(singles[t][2] ** 2 for t in grp))
@@ -1362,11 +1441,12 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
                          additivity_p=p_m / p_sing if p_sing else float("nan"),
                          additivity_i=i_m / i_sing if i_sing else float("nan"),
                          p_sd_pred_W=sd_pred,
-                         # settling: the early reading over the settled one. 1.0 means
-                         # K settles as fast as a single pixel at this probe time.
-                         p_probe_W=(float(probe[0] - np.mean([r[0] for r in states["off"]]))
-                                    if probe is not None else float("nan")),
-                         probe_s=args.cluster_probe_s,
+                         # settling: the FIRST probe, kept here so cluster.csv keeps
+                         # its shape. The whole scan is in cluster_settling.csv, one
+                         # row per (K, probe time), which is what a dwell needs.
+                         p_probe_W=(float(probes[0][1][0] - off_mean)
+                                    if probes else float("nan")),
+                         probe_s=(probes[0][0] if probes else float("nan")),
                          scatter_vs_pred=p_sd / sd_pred if sd_pred else float("nan"),
                          singles_rel_spread=spread,
                          i_led_A=i_m, i_led_sd_A=float(abs(i).std(ddof=1)) if i.size > 1 else float("nan"),
@@ -1388,6 +1468,17 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
                          led_current_physical=ok,
                          smu_errors=drain_errors(smu)))
         rows[-1]["settled_frac"] = (rows[-1]["p_probe_W"] / p_m if p_m else float("nan"))
+        for t, pr in probes:
+            dev = float(pr[0] - off_mean) - p_m
+            srows.append(dict(k=k, quadrant=quads[0], v=args.cluster_v, probe_s=t,
+                              p_probe_W=float(pr[0] - off_mean), p_settled_W=p_m,
+                              settled_frac=((pr[0] - off_mean) / p_m if p_m
+                                            else float("nan")),
+                              dev_W=dev, dev_frac=dev / p_m if p_m else float("nan"),
+                              # the per-rep scatter IS this one reading's uncertainty,
+                              # and at the faint end it is the ~30 pW optical floor
+                              dev_sigma=abs(dev) / p_sd if p_sd else float("nan"),
+                              settle_ref_s=args.cluster_settle_s))
         if base is None:
             base = rel
         log(f"    K={k:>3}: P {p_m*1e12:9.1f} pW +-{p_sd*1e12:7.1f}  "
@@ -1396,12 +1487,14 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
             + (f"  EQE {100*rows[-1]['pooled_eqe']:6.3f}%" if ok else "  << NON-PHYSICAL")
             + f"  add {rows[-1]['additivity_p']:5.3f}"
             + f"  sd/pred {rows[-1]['scatter_vs_pred']:5.2f}"
-            + (f"  settled@{args.cluster_probe_s*1e3:.0f}ms "
+            + (f"  settled@{rows[-1]['probe_s']*1e3:.0f}ms "
                f"{100*rows[-1]['settled_frac']:5.1f}%"
                if np.isfinite(rows[-1]["settled_frac"]) else "")
             + ("  << AT COMPLIANCE, NOT A MEASUREMENT"
                if rows[-1]["at_compliance"] else ""))
     smile.blank_frame()
+    if srows:
+        _EXTRA_ROWS.setdefault("cluster_settling", []).extend(srows)
 
     clamped = [r for r in rows if r["at_compliance"]]
     if clamped:
@@ -1440,33 +1533,14 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
             f"what tells additive noise from proportional")
         log(f"    K={first['k']} -> K={last['k']}: relative scatter fell {gain:.2f}x "
             f"(1/sqrt(K) predicts {math.sqrt(ratio):.2f}x, 1/K predicts {ratio:.2f}x)")
-        # Significance, not percentage. The probe is ONE reading, so its own
-        # uncertainty is the per-rep scatter -- and at the faint end that scatter IS
-        # the ~30 pW optical floor. A single pixel emitting 455 pW therefore cannot
-        # resolve a 7 % deviation, while a K=16 group emitting 5863 pW resolves 2.7 %
-        # at 4.5 sigma. Ranking by percentage inverts the answer.
-        sf = [(r["k"], r["p_probe_W"] - r["p_led_W"], r["p_led_sd_W"], r["p_led_W"])
-              for r in rows_ok
-              if np.isfinite(r.get("p_probe_W", float("nan"))) and r["p_led_sd_W"] > 0]
-        if sf:
-            parts = [f"K={k}:{100*dev/p:+.2f}% ({abs(dev)/sd:.1f}sigma)"
-                     for k, dev, sd, p in sf]
-            sig = [(k, dev, sd, p) for k, dev, sd, p in sf if abs(dev) / sd >= 3.0]
-            log(f"    settling at {args.cluster_probe_s*1e3:.0f} ms, early reading "
-                f"minus settled, against the per-rep scatter: " + ", ".join(parts))
-            if not sig:
-                log(f"    -> nothing resolved. The probe is one reading and its own "
-                    f"noise is the floor, so this says the deviation is under "
-                    f"~{max(100*sd/p for _k, _d, sd, p in sf):.1f}% and not that it "
-                    f"is zero. Raise --cluster-reps or pool harder to resolve less.")
-            else:
-                k, dev, sd, p = max(sig, key=lambda t: abs(t[1]) / t[2])
-                log(f"    -> REAL: K={k} is {100*dev/p:+.2f}% from settled at "
-                    f"{args.cluster_probe_s*1e3:.0f} ms ({abs(dev)/sd:.1f} sigma), "
-                    f"{'above' if dev > 0 else 'below'} its settled value. A pooled "
-                    f"sweep needs its OWN dwell calibration, not the single-pixel one. "
-                    f"Sweep --cluster-probe-s to find where it flattens -- one value "
-                    f"says the group is not settled yet, not how long it needs.")
+        # Significance, not percentage. A probe is ONE reading, so its uncertainty is
+        # the per-rep scatter -- and at the faint end that scatter IS the ~30 pW optical
+        # floor. A single pixel emitting 455 pW cannot resolve a 7 % deviation, while a
+        # K=16 group emitting 5863 pW resolves 2.7 % at 4.5 sigma. Ranking by percentage
+        # inverts the answer, which is what the first version of this did.
+        for line in settling_verdict(srows, {r["k"] for r in rows_ok},
+                                     args.cluster_settle_s):
+            log(line)
         add = last["additivity_p"]
         if np.isfinite(add) and abs(add - 1) > 0.03:
             log(f"    !! K={last['k']} emits {100*add:.1f}% of its members' own sum, "
@@ -1544,8 +1618,13 @@ def estimate_seconds(what, cfg, args, n_pixels):
         # the per-member singles run the same protocol, and each lit state pays one
         # extra probe reading
         n_states = (len(args.cluster_k) + max(args.cluster_k)) * 2
-        total += n_states * (args.cluster_settle_s + args.cluster_reps * per_rep)
-        total += (len(args.cluster_k) + max(args.cluster_k)) * per_rep
+        # the settled reference is pushed out to 1.5x the last probe
+        settle = max(args.cluster_settle_s,
+                     1.5 * max([t for t in args.cluster_probe_s if t > 0], default=0.0))
+        total += n_states * (settle + args.cluster_reps * per_rep)
+        # plus one acquisition per probe time, for every lit state
+        total += ((len(args.cluster_k) + max(args.cluster_k))
+                  * max(1, len([t for t in args.cluster_probe_s if t > 0])) * per_rep)
     if not args.pixels:
         total += len(args.quadrants) * args.quadrant_window ** 2 * 0.21
     return total
@@ -1696,10 +1775,16 @@ def build_parser():
     ap.add_argument("--cluster-settle-s", type=float, default=2.0,
                     help="wait after a frame change at the held bias. The bias itself "
                          "is charged once, before the first K")
-    ap.add_argument("--cluster-probe-s", type=float, default=0.05,
-                    help="take one EARLY reading this long after the frame changes, "
-                         "before it has settled, so the run can say whether K pixels "
-                         "settle like one. 0 disables it")
+    ap.add_argument("--cluster-probe-s", nargs="+", type=float, default=[0.05],
+                    help="probe time(s) in seconds after the frame changes, before it "
+                         "has settled. One value says whether K pixels settle like one; "
+                         "a LIST gives the dwell curve a pooled sweep needs, e.g. "
+                         "--cluster-probe-s 0.05 0.1 0.2 0.5 1 2 3. The settled "
+                         "reference is pushed out to 1.5x the last probe, because "
+                         "dividing by a reading taken at the same moment reads 1.0 by "
+                         "construction. One acquisition takes about cluster_n_pm x 4 ms, "
+                         "so probes much under that average over the transient. 0 "
+                         "disables the probe entirely")
     ap.add_argument("--cluster-n-pm", type=int, default=8)
     ap.add_argument("--cluster-n-smu", type=int, default=16)
     return ap
@@ -1811,6 +1896,8 @@ def main(argv=None):
             log(f"wrote {npz} ({len(_TRACES)} traces"
                 + (f" + {len(_PTRACES)} P(t)" if _PTRACES else "")
                 + f", {npz.stat().st_size / 1e6:.1f} MB)")
+        for name, rs in _EXTRA_ROWS.items():
+            collected.setdefault(name, []).extend(rs)
         wrote = [p for p in (write_csv(out_dir, n, r) for n, r in collected.items()) if p]
         for p in wrote:
             log(f"wrote {p}")

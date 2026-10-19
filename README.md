@@ -616,6 +616,45 @@ warns before the sweep starts, rather than leaving it to `NVLED_AT_COMPLIANCE` t
 hours later. The detection cap lifts once each member's own brightness is known —
 which is exactly what the single pixels in the same run buy. The other two do not.
 
+#### The dwell a pooled target needs is not the single-pixel one
+
+Measured, runs 261019-1057 and -1031: the reading 50 ms after the frame changes is
+**+2.70 % above settled at K = 16 (4.5σ)** and **+2.12 % at K = 4 (4.3σ)**, in two
+different quadrants. K members are K× the switched capacitance on one row driver, and
+`set_pixels` emits a frame instruction spanning every row up to the highest member, so
+a group's frame write is longer too. An overshoot that is still decaying is what that
+should look like.
+
+`--what cluster` measures the curve. `--cluster-probe-s` takes a list of probe times,
+each one reading taken on the way to the settled reference:
+
+```bash
+python characterize_capacitance.py --what cluster --highc --compliance 1e-5   --cluster-v -0.82 --cluster-k 16   --cluster-probe-s 0.05 0.1 0.2 0.5 1 2 3
+```
+
+That writes `cluster_settling.csv`, one row per (K, probe time) with the deviation in
+σ, and the run names the dwell:
+
+```
+settling K=16, probe minus settled against the per-rep scatter:
+  50ms:+2.70%(4.5s), 200ms:+1.80%(3.0s), 500ms:+0.10%(0.2s)
+  -> NOT settled at 200 ms (+1.80%). Settled by 500 ms, so that is the dwell K=16
+     needs -- not the single-pixel one.
+```
+
+Three things it will not do. It will not rank by **percentage**: a probe is one reading,
+so its uncertainty is the per-rep scatter, and at the faint end that scatter *is* the
+30 pW optical floor — a single pixel's 7.70 % deviation is 35 pW against 31 pW, which is
+nothing, while a K=16 group's 2.70 % is 159 pW against 35.5 pW, which is real. It will
+not call an unresolved deviation **zero**: it quotes the upper bound instead. And it
+will not name a dwell it has not seen — if every probe is still moving it says the dwell
+is past the end of the scan and to extend it.
+
+The settled reference is pushed out to **1.5× the last probe**, because dividing by a
+reading taken at the same moment gives 1.0 by construction. One acquisition takes about
+`cluster_n_pm × 4 ms`, so a probe much under that averages over the transient instead of
+sampling it, and the run says so.
+
 #### Rules the selection enforces
 
 * **one quadrant per group** — the `tl_pixen`/`tr_pixen`/… enables live in the frame
