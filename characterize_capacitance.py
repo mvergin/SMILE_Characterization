@@ -1219,14 +1219,31 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
     not the method. Lighting K pixels multiplies the light by K and leaves the drift
     where it is.
 
-    The verdict is one number, ``rel_scatter * sqrt(K)``:
+    MEASURED, run 261019-0952 at -0.82 V: the scatter is the meter, and it is
+    ADDITIVE. The number that says so is the ABSOLUTE scatter, ``p_led_sd_W``, which
+    was flat at 30.3 pW while the signal grew 12.7x from K=1 to K=16 (exponent
+    K^-0.10). Relative scatter therefore falls as K^-1.02 -- a factor of K, not
+    sqrt(K): 8.52 % at one pixel, 1.76 % at K=4, 0.52 % at K=8.
 
-      * constant across K  -> the scatter is meter noise, and a 16-pixel cluster
-        buys a 4x cleaner faint end. Pooled EQE = sum(P)/sum(I) is a
-        current-weighted mean of the members, which is arguably the right array
-        figure anyway.
-      * rising with K      -> the scatter is the array, and a cluster buys nothing
-        but a loss of per-pixel resolution.
+    So read the columns in this order:
+
+      * ``p_led_sd_W`` FLAT across K   -> additive noise in the meter. Pooling buys a
+        factor of K. This is what the array does.
+      * ``p_led_sd_W`` rising as sqrt(K) -> independent per-member noise. Pooling buys
+        sqrt(K), which is what averaging already buys more cheaply.
+      * ``p_led_sd_W`` rising as K     -> the scatter is proportional to the signal and
+        pooling buys nothing.
+
+    ``rel_scatter_x_sqrt_k`` is kept for continuity and because it separates the middle
+    case from the other two: it is flat only for independent per-member noise. An
+    earlier version of this docstring called that flatness the meter-noise signature,
+    which was the sqrt(K) hypothesis and is wrong. On the real array the column FALLS
+    (0.0852, 0.0485, 0.0352, 0.0147, 0.0253), and falling is the stronger result.
+
+    ``scatter_vs_pred`` is the same statement from the other side: measured scatter
+    over the quadrature sum of the members own scatter. It fell as 1/sqrt(K)
+    (1.55, 0.88, 0.56, 0.20, 0.32), which is one SHARED additive term averaging down
+    rather than K independent ones.
 
     Two things this must not get wrong:
 
@@ -1285,23 +1302,35 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
     time.sleep(max(charge, args.cluster_settle_s))
 
     def measure(group):
-        """Lit minus the SAME pixels at leak_ref_bitval -- section 6, never blanked."""
-        states = {}
+        """Lit minus the SAME pixels at leak_ref_bitval -- section 6, never blanked.
+
+        Returns (p, i, states, probe) where ``probe`` is ONE early reading taken
+        cluster_probe_s after the frame changed, before it has settled. K members are
+        K x the switched capacitance on the same row driver and the frame instruction
+        spans more rows, so there is no reason to assume a group settles like a single
+        pixel. One extra reading per K is what it costs to find out.
+        """
+        states, probe = {}, None
         for state, bv in (("lit", cfg.bitvals[0]), ("off", cfg.leak_ref_bitval)):
             smile.set_pixels(group, bv)
-            time.sleep(args.cluster_settle_s)
+            if state == "lit" and args.cluster_probe_s > 0:
+                time.sleep(args.cluster_probe_s)
+                probe = m.acquire_point(pm, smu, args.cluster_n_smu, args.cluster_n_pm)
+                time.sleep(max(0.0, args.cluster_settle_s - args.cluster_probe_s))
+            else:
+                time.sleep(args.cluster_settle_s)
             states[state] = [m.acquire_point(pm, smu, args.cluster_n_smu,
                                              args.cluster_n_pm)
                              for _ in range(args.cluster_reps)]
         p = np.array([r[0] for r in states["lit"]]) - np.array([r[0] for r in states["off"]])
         i = np.array([r[4] for r in states["lit"]]) - np.array([r[4] for r in states["off"]])
-        return p, i, states
+        return p, i, states, probe
 
     # Each member alone, before any group. Same protocol and same rep count, so the
     # single scatter and the pooled scatter are the same quantity.
     singles = {}
     for t in members[:max(ks)]:
-        p1, i1, _ = measure([t])
+        p1, i1, _, _ = measure([t])
         singles[t] = (float(p1.mean()), float(abs(i1).mean()),
                       float(p1.std(ddof=1)) if p1.size > 1 else float("nan"))
     sp = [v[0] for v in singles.values()]
@@ -1313,7 +1342,7 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
     base = None
     for k in ks:
         grp = members[:k]
-        p, i, states = measure(grp)
+        p, i, states, probe = measure(grp)
         p_sing = sum(singles[t][0] for t in grp)
         i_sing = sum(singles[t][1] for t in grp)
         sd_pred = math.sqrt(sum(singles[t][2] ** 2 for t in grp))
@@ -1333,6 +1362,11 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
                          additivity_p=p_m / p_sing if p_sing else float("nan"),
                          additivity_i=i_m / i_sing if i_sing else float("nan"),
                          p_sd_pred_W=sd_pred,
+                         # settling: the early reading over the settled one. 1.0 means
+                         # K settles as fast as a single pixel at this probe time.
+                         p_probe_W=(float(probe[0] - np.mean([r[0] for r in states["off"]]))
+                                    if probe is not None else float("nan")),
+                         probe_s=args.cluster_probe_s,
                          scatter_vs_pred=p_sd / sd_pred if sd_pred else float("nan"),
                          singles_rel_spread=spread,
                          i_led_A=i_m, i_led_sd_A=float(abs(i).std(ddof=1)) if i.size > 1 else float("nan"),
@@ -1345,6 +1379,7 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
                                      / (i_m / 1.602176634e-19)) if ok else float("nan"),
                          led_current_physical=ok,
                          smu_errors=drain_errors(smu)))
+        rows[-1]["settled_frac"] = (rows[-1]["p_probe_W"] / p_m if p_m else float("nan"))
         if base is None:
             base = rel
         log(f"    K={k:>3}: P {p_m*1e12:9.1f} pW +-{p_sd*1e12:7.1f}  "
@@ -1352,18 +1387,44 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
             f"I {i_m*1e9:8.1f} nA  J/px {to_j(i_m/k, cfg):6.3f}"
             + (f"  EQE {100*rows[-1]['pooled_eqe']:6.3f}%" if ok else "  << NON-PHYSICAL")
             + f"  add {rows[-1]['additivity_p']:5.3f}"
-            + f"  sd/pred {rows[-1]['scatter_vs_pred']:5.2f}")
+            + f"  sd/pred {rows[-1]['scatter_vs_pred']:5.2f}"
+            + (f"  settled@{args.cluster_probe_s*1e3:.0f}ms "
+               f"{100*rows[-1]['settled_frac']:5.1f}%"
+               if np.isfinite(rows[-1]["settled_frac"]) else ""))
     smile.blank_frame()
 
     if len(rows) > 1:
         first, last = rows[0], rows[-1]
         gain = first["rel_scatter"] / last["rel_scatter"] if last["rel_scatter"] else float("nan")
-        ideal = math.sqrt(last["k"] / first["k"])
-        log(f"    K={first['k']} -> K={last['k']}: scatter fell {gain:.2f}x, "
-            f"1/sqrt(K) predicts {ideal:.2f}x -> "
-            + ("METER NOISE, a cluster buys a cleaner faint end"
-               if gain >= 0.7 * ideal else
-               "NOT meter noise, the scatter is the array"))
+        ratio = last["k"] / first["k"]
+        # The verdict is the slope of the ABSOLUTE scatter, because that is what tells
+        # additive noise from proportional noise. 0 = additive (pooling buys K),
+        # +0.5 = independent per member (buys sqrt(K)), +1 = proportional (buys none).
+        ks = np.array([r["k"] for r in rows], float)
+        sds = np.array([r["p_led_sd_W"] for r in rows], float)
+        ok_sd = np.isfinite(sds) & (sds > 0)
+        slope = (float(np.polyfit(np.log(ks[ok_sd]), np.log(sds[ok_sd]), 1)[0])
+                 if ok_sd.sum() > 1 else float("nan"))
+        kind = ("ADDITIVE -- the noise is in the METER, and pooling buys a factor of K"
+                if slope < 0.25 else
+                "INDEPENDENT PER MEMBER -- pooling buys sqrt(K), which averaging buys "
+                "more cheaply" if slope < 0.75 else
+                "PROPORTIONAL TO THE SIGNAL -- pooling buys nothing")
+        log(f"    absolute scatter goes as K^{slope:+.2f} -> {kind}")
+        log(f"    K={first['k']} -> K={last['k']}: relative scatter fell {gain:.2f}x "
+            f"(1/sqrt(K) predicts {math.sqrt(ratio):.2f}x, 1/K predicts {ratio:.2f}x)")
+        sf = [(r["k"], r["settled_frac"]) for r in rows
+              if np.isfinite(r.get("settled_frac", float("nan")))]
+        if len(sf) > 1:
+            worst_k, worst = min(sf, key=lambda kv: kv[1])
+            spans = max(v for _k, v in sf) - min(v for _k, v in sf)
+            log(f"    settling at {args.cluster_probe_s*1e3:.0f} ms: "
+                + ", ".join(f"K={k}:{100*v:.1f}%" for k, v in sf)
+                + f" -> spans {100*spans:.1f} pp"
+                + ("; FLAT, so a group settles like a single pixel and needs no "
+                   "separate dwell" if spans < 0.05 else
+                   f"; K={worst_k} is the slowest at {100*worst:.1f}% -- a pooled "
+                   f"sweep needs its OWN dwell calibration, not the single-pixel one"))
         add = last["additivity_p"]
         if np.isfinite(add) and abs(add - 1) > 0.03:
             log(f"    !! K={last['k']} emits {100*add:.1f}% of its members' own sum. "
@@ -1371,7 +1432,8 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
                 f"members' EQE. Suspect supply droop at {args.cluster_v:+.2f} V.")
         if args.simulate:
             log("    (the sim rig has no additive optical floor -- its PM noise is "
-                "purely relative, so it CANNOT average down. Ignore this verdict.)")
+                "purely relative, so it CANNOT average down. Ignore this verdict, and "
+                "the additivity one: both need real hardware.)")
     return rows
 
 
@@ -1434,8 +1496,11 @@ def estimate_seconds(what, cfg, args, n_pixels):
     if "cluster" in what:
         # two frame states per K, each one settle plus reps x (PM reads || SMU burst)
         per_rep = max(args.cluster_n_pm * 4e-3, args.cluster_n_smu * 2 / 50.0)
-        total += len(args.cluster_k) * 2 * (args.cluster_settle_s
-                                            + args.cluster_reps * per_rep)
+        # the per-member singles run the same protocol, and each lit state pays one
+        # extra probe reading
+        n_states = (len(args.cluster_k) + max(args.cluster_k)) * 2
+        total += n_states * (args.cluster_settle_s + args.cluster_reps * per_rep)
+        total += (len(args.cluster_k) + max(args.cluster_k)) * per_rep
     if not args.pixels:
         total += len(args.quadrants) * args.quadrant_window ** 2 * 0.21
     return total
@@ -1586,6 +1651,10 @@ def build_parser():
     ap.add_argument("--cluster-settle-s", type=float, default=2.0,
                     help="wait after a frame change at the held bias. The bias itself "
                          "is charged once, before the first K")
+    ap.add_argument("--cluster-probe-s", type=float, default=0.05,
+                    help="take one EARLY reading this long after the frame changes, "
+                         "before it has settled, so the run can say whether K pixels "
+                         "settle like one. 0 disables it")
     ap.add_argument("--cluster-n-pm", type=int, default=8)
     ap.add_argument("--cluster-n-smu", type=int, default=16)
     return ap

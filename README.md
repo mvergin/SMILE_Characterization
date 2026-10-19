@@ -496,6 +496,9 @@ Two later results matter for anyone using the corrected number:
 | parameter | type | default | meaning |
 |---|---|---|---|
 | `nvled_v_fastscan` | `float` | `-1.35` | single fast-scan bias — does DOUBLE duty. At −1.35 V the pixels sit at J≈25 A/cm², on the droop side of a plateau that is **wider than it is flat**: measured over the 100 swept pixels of 261015-0015, median EQE runs 93.7 % to 99.7 % of peak across J≈8–30, a 6.3 % spread, and the peak itself is at −1.05 V (J = 7.2). −1.35 V sits at ~92 % of peak, so the fast-scan EQE=P/I here is a good **rank** proxy (Spearman 0.934 against the sweep at its own bias) but **not** each pixel's peak EQE. Use `fastscan_voltages` to add −1.05 V if the peak is what you want. The earlier claim of ~1 % across J≈8–30 is withdrawn. That turns the fast scan into a full-coverage peak-IQE proxy for all 65 536 pixels (calibrated to the sweep in analysis), while still emitting ~22 nW for the alive/dead classification — ~1000× the MEASURED optical floor (3σ = 23 pW at n_pm 32; see the optfloor run of 261013, σ ∝ N^-0.499 from n_pm 4 to 512). J≈25 keeps ~5 A/cm² of margin before the droop starts (~J30). The current there (~25 µA) is high enough for a fast (NPLC 0.01) read. (Was −2.6 V / J≈95 — the droop side at only ~78% of peak.) |
+| `fastscan_pool` | `int` | `0` | K for the fast-scan group-test **screen**. 0 = off, and the ordinary scan measures every pixel. See *The pooled fast-scan screen* below. |
+| `fastscan_pool_rescan_frac` | `float` | `0.05` | **cap** on the fraction of groups rescanned pixel by pixel. Not the rule: the rule is a detrended reading at or below `1 − 0.5/K`. The run says loudly when the cap binds. |
+| `fastscan_pool_detrend` | `int` | `15` | window, in groups, of the local median the flag is taken against. Measured, detrending lifts K=4 recall from 85.5 % to 91.8 %. |
 | `fastscan_voltages` | `tuple[float, ...]` | `()` | EXTRA fast-scan biases. `nvled_v_fastscan` is always first and is the **only** one alive/dead classification and sweep-pixel selection read, so adding biases cannot change which pixels get swept. Each extra bias is another full pass over the ROI, sharing the one `fastscan_limit_a`. Worth setting because −1.35 V is 0.30 V off the measured peak. Over the 100 pixels of 261015-0015 median EQE peaks at −1.05 V (J = 7.2) and is 93.7 % of that at −1.30 V, ~92 % at −1.35 V. The −1.35 V proxy *ranks* pixels well — Spearman 0.934 against the sweep at −1.30 V, best 0.940 at −1.244 V — but it agrees best near its own bias and only 0.873 at −1.05 V, so it cannot see the peak. (An earlier version of this row claimed 0.890 and 0.989; neither reproduces and both are withdrawn.) `--set "fastscan_voltages=[-1.05,-1.65]"` measures the peak and both shoulders in one run. |
 | `dead_threshold_frac` | `float` | `0.2` | a pixel is alive if P ≥ this × the "typical lit" level |
 | `fastscan_alive_pctl` | `int` | `90` | "typical lit" level = this percentile of the fast-scan power. NOT the median: the median collapses to the noise floor on a majority-DEAD ROI (then ~everything is mislabelled alive — e.g. quadrant 260703-1307 was 57% dark, median 0.08 nW → 84% "alive"). A high percentile tracks the lit population as long as the lit fraction exceeds (100−pctl)% = 10%. |
@@ -626,6 +629,50 @@ member so every `groupby(["X","Y"])` keeps working. EQE needs no correction — 
 current for the whole frame, so the members would share it and no per-member
 operating point would be known) and with any `sweep_select` other than `blocks`
 (a group is formed inside a block, so there must be blocks).
+
+### The pooled fast-scan screen
+
+`fastscan_pool` turns the fast scan into a **group test**: light K pixels at a time,
+flag the suspicious groups, and rescan only those members one by one. **Off by
+default.**
+
+```bash
+python -m measure_iqe --set fastscan_pool=4
+```
+
+Replayed on the real 262 144-pixel scan of run 261016-2252 (1116 dead, 99.574 %
+yield) with the rule this code ships:
+
+| K | groups | detrended spread | recall | speedup | 2.15 h becomes |
+|---|---|---|---|---|---|
+| 2 | 131 072 | 11.4 % | **97.5 %** | 1.94× | 66 min |
+| 4 | 65 536 | 8.6 % | **91.8 %** | 3.46× | **37 min** |
+| 8 | 32 768 | 6.5 % | 75.0 % | 5.71× | 23 min (cap binds) |
+| 16 | 16 384 | 5.2 % | 52.7 % | 8.89× | 15 min (cap binds) |
+
+**It is a screen, not a census.** A group that is not flagged is never measured per
+pixel: its members enter the sweep selection with the group's per-member estimate and
+`SCREENED=1`, and 8.2 % of the dead pixels are missed at K=4. The run says so every
+time. If every dead pixel must be named, leave `fastscan_pool` at 0.
+
+**The flag is physical, and the budget is only a cap on it.** A dead member is a
+`1/K` deficit on the group sum, so a group at or below `1 − 0.5/K` — half a member's
+worth — is worth a closer look. `fastscan_pool_rescan_frac` bounds the bench time, and
+when it binds the run says so loudly, because a screen that silently ignores groups it
+knows are suspicious is the one failure it may not have. At K=4 on the measured array
+the cut selects 2545 of 65 536 groups, under the 3277 the default cap allows, so it
+does not bind. On a much deader array it will, and then the run tells you what to set.
+
+**The median is local, not global.** The array has a real +3.7 % spatial gradient and a
+row-driver signature (§16), so a global median flags one corner wholesale. Detrending
+against a `fastscan_pool_detrend`-group neighbourhood lifts K=4 recall from 85.5 % to
+91.8 % at the same cost.
+
+Tiles never cross the quadrant boundary at 256, since the `tl_pixen`/… enables live in
+the frame instruction and a tile across it would light the near quadrant's mirror
+image. The screen writes its own `FastScan/<prefix>screen_bitval=*.csv` with one row
+per group carrying `POOL_K`, `POOL_MEMBERS` and `SCREEN_FLAGGED`; the ordinary
+aggregated CSV then covers the rescanned subset only.
 
 ### How blocks mode samples
 

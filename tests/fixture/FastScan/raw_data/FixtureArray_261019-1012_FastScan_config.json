@@ -1,7 +1,7 @@
 {
   "settings": {
     "sample_name": "FixtureArray",
-    "base_dir": "/c/Users/vergin/AppData/Local/Temp/claude/C---D-programs-SMILE-Characterization/42e1b466-ca98-42a2-a0bb-82ba1b1426c1/scratchpad/fx",
+    "base_dir": "results",
     "roi": [
       0,
       0,
@@ -22,6 +22,9 @@
     "fastscan_bitval": 15,
     "pool_groups": [],
     "pool_include_singles": true,
+    "fastscan_pool": 0,
+    "fastscan_pool_rescan_frac": 0.05,
+    "fastscan_pool_detrend": 15,
     "pool_pm_range": 0.0,
     "source_mode": "voltage",
     "current_sweep_low_a": 3e-07,
@@ -141,21 +144,23 @@
     "smu_display_off": false
   },
   "provenance": {
-    "commit": "76ddfdb91d3a7d5dba16ea6823cd7b95940a0c07",
-    "commit_short": "76ddfdb",
+    "commit": "31137abdf77a3301473741ac1c1ce02e14b7493c",
+    "commit_short": "31137ab",
     "branch": "main",
-    "committed": "2026-10-19T09:44:57+02:00",
-    "describe": "v0.2-124-g76ddfdb-dirty",
+    "committed": "2026-10-19T09:56:41+02:00",
+    "describe": "v0.2-125-g31137ab-dirty",
     "dirty": true,
     "changed": [
+      "RUN_FORMAT.md",
+      "characterize_capacitance.py",
+      "configs/standard.yaml",
       "measure_iqe/acquire.py",
       "measure_iqe/config.py",
-      "measure_iqe/gui.py",
       "test_measure_iqe.py",
       "uv.lock"
     ],
-    "diff_sha256": "37c05ca8e0d90925",
-    "started": "2026-10-19T09:49:01+02:00",
+    "diff_sha256": "0865320bf8e13f8e",
+    "started": "2026-10-19T10:12:35+02:00",
     "host": "IHT-RE316",
     "python": "3.10.5",
     "platform": "Windows-10-10.0.26100-SP0"

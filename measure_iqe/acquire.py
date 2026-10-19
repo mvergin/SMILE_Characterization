@@ -539,13 +539,19 @@ def agg_field(v) -> str:
     return v if isinstance(v, str) else repr(v)
 
 
-def write_aggregated_one(path: str | Path, rows: list[Row]) -> None:
+# The screen's own file: the fast-scan columns plus what makes a group a group.
+_SCREEN_COLS = _AGG_COLS + ["POOL_K", "POOL_MEMBERS", "SCREEN_FLAGGED"]
+
+
+def write_aggregated_one(path: str | Path, rows: list[Row],
+                         cols: list[str] | None = None) -> None:
+    cols = list(cols or _AGG_COLS)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
-        f.write(",".join(_AGG_COLS) + "\n")
+        f.write(",".join(cols) + "\n")
         for r in rows:
-            f.write(",".join(agg_field(r[c]) for c in _AGG_COLS) + "\n")
+            f.write(",".join(agg_field(r[c]) for c in cols) + "\n")
 
 
 def write_aggregated_per_bitval(folder: str | Path, rows: list[Row],
@@ -1047,6 +1053,158 @@ def connect_sim(cfg: IQEConfig, log: Logger):
 #  Phases
 # =====================================================================
 
+def local_median(a: np.ndarray, w: int) -> np.ndarray:
+    """Median over a w x w neighbourhood of ``a``, edges padded by repetition.
+
+    numpy only -- scipy is an optional extra for the analysis side and the measurement
+    side must run without it.
+    """
+    r = w // 2
+    win = np.lib.stride_tricks.sliding_window_view(np.pad(a, r, mode="edge"), (w, w))
+    return np.median(win, axis=(2, 3))
+
+
+def pool_tiles(x1: int, y1: int, x2: int, y2: int, k: int):
+    """Tile the ROI into k-pixel groups, each inside ONE quadrant.
+
+    Square tiles when k is a perfect square, 1 x k strips otherwise -- that is the
+    shape the replay in ``fastscan_pool`` measured. Returns (tiles, leftover) where
+    ``tiles`` is a list of (quadrant_index, iy, ix, members) and ``leftover`` is every
+    pixel the tiling could not cover, which the caller scans one by one.
+
+    One quadrant per tile, because the tl_pixen/tr_pixen/... enables live in the frame
+    instruction and not in the pixel data: a tile across 256 would light the near
+    quadrant's mirror image instead of the far member.
+    """
+    side = int(round(k ** 0.5))
+    h, w = (side, side) if side * side == k else (1, k)
+    tiles, leftover = [], []
+    qi = 0
+    for qx0, qx1 in ((x1, min(x2, 255)), (max(x1, 256), x2)):
+        for qy0, qy1 in ((y1, min(y2, 255)), (max(y1, 256), y2)):
+            if qx0 > qx1 or qy0 > qy1:
+                continue
+            nx, ny = (qx1 - qx0 + 1) // w, (qy1 - qy0 + 1) // h
+            for iy in range(ny):
+                for ix in range(nx):
+                    tiles.append((qi, iy, ix, tuple(
+                        (qx0 + ix * w + dx, qy0 + iy * h + dy)
+                        for dy in range(h) for dx in range(w))))
+            # The far edge of each quadrant, where a whole tile does not fit: two
+            # strips, derived from the tile counts rather than by differencing sets.
+            leftover += [(px, py) for px in range(qx0 + nx * w, qx1 + 1)
+                         for py in range(qy0, qy1 + 1)]
+            leftover += [(px, py) for px in range(qx0, qx0 + nx * w)
+                         for py in range(qy0 + ny * h, qy1 + 1)]
+            qi += 1
+    return tiles, leftover
+
+
+def screen_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
+                     cfg: IQEConfig, log: Logger, t0: float):
+    """Group-test screen: light K pixels at once, rescan only the suspicious groups.
+
+    Returns (order, rows): the pixels still to be scanned one by one, and one row per
+    group. A group row carries POOL_K, POOL_MEMBERS and SCREEN_FLAGGED, and its power
+    and current are the SUM over its members.
+
+    The flag is taken against a LOCAL median (fastscan_pool_detrend), because the array
+    has a real +3.7 % gradient and a row-driver signature: a global median flags one
+    corner wholesale. Replayed on run 261016-2252's 262 144 pixels, detrending lifts
+    K=4 recall from 85.5 % to 91.8 % at the same bench cost.
+
+    This is a SCREEN. The groups it does not flag are never measured per pixel, so the
+    missed fraction is real -- 8.2 % of the dead pixels at K=4 on that run -- and the
+    log says so every time.
+    """
+    k = int(cfg.fastscan_pool)
+    tiles, leftover = pool_tiles(x1, y1, x2, y2, k)
+    if not tiles:
+        log(f"  screen: no {k}-pixel tile fits in the ROI -- scanning every pixel")
+        return list(roi_pixels(x1, y1, x2, y2)), []
+    # The screen runs BEFORE the bias loop, so it has to set its own bias and pay its
+    # own settle. Reading at whatever ch B happened to hold would flag groups by where
+    # the source was left, not by how bright they are.
+    v = cfg.fastscan_v_list()[0]
+    smu.set_voltage("b", float(v))
+    time.sleep(max(cfg.fastscan_settle_ms, cfg.thermal_settle_ms) / 1000.0)
+    log(f"  screen @ {v:g} V: {len(tiles)} group(s) of {k}"
+        + (f" plus {len(leftover)} edge pixel(s) scanned singly" if leftover else "")
+        + f", rescanning the dimmest {cfg.fastscan_pool_rescan_frac*100:g}% against a "
+          f"{cfg.fastscan_pool_detrend}-group local median")
+    rows = []
+    for (_qi, _iy, _ix, members) in tiles:
+        if cfg.fastscan_blank_between:
+            smile.blank_frame()
+        smile.set_pixels(members, cfg.fastscan_bitval)
+        if cfg.fastscan_settle_ms:
+            time.sleep(cfg.fastscan_settle_ms / 1000.0)
+        p, ps, iv, ivs, inv, invs, _, _ = acquire_point(pm, smu, cfg.fastscan_n_smu, 3)
+        rows.append(dict(X=members[0][0], Y=members[0][1], BITVAL=cfg.fastscan_bitval,
+                         NVLED_V=v, TIME_START=time.perf_counter() - t0,
+                         TIME_END=time.perf_counter() - t0,
+                         NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
+                         VLED_CURR_MEAN=iv, VLED_CURR_STD=ivs,
+                         PM400_POWER_MEAN=p, PM400_POWER_STD=ps,
+                         POOL_K=len(members),
+                         POOL_MEMBERS=" ".join(f"{mx}:{my}" for mx, my in members)))
+    # Detrend inside each quadrant's own tile grid, then flag on one global quantile so
+    # the rescan budget is the budget the operator asked for.
+    rel = np.ones(len(rows))
+    for qi in {t[0] for t in tiles}:
+        idx = [i for i, t in enumerate(tiles) if t[0] == qi]
+        ny = max(tiles[i][1] for i in idx) + 1
+        nx = max(tiles[i][2] for i in idx) + 1
+        grid = np.full((ny, nx), np.nan)
+        for i in idx:
+            grid[tiles[i][1], tiles[i][2]] = abs(rows[i]["PM400_POWER_MEAN"])
+        ref = local_median(grid, min(cfg.fastscan_pool_detrend, max(3, 2 * (min(ny, nx) // 2) - 1)))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            r = np.where(ref > 0, grid / ref, 1.0)
+        for i in idx:
+            rel[i] = r[tiles[i][1], tiles[i][2]]
+    # The rule is physical, and the budget is only a CAP on it. A dead member is a
+    # 1/K deficit on the group sum, so anything at or below half a member's worth of
+    # deficit is worth a closer look. A FIXED quantile was the first version and it is
+    # wrong: on an array with a high dead rate it rescans the budget and silently
+    # ignores the rest, which is the one failure a screen must not have quietly.
+    cut = 1.0 - 0.5 / k
+    want = rel <= cut
+    cap = max(1, int(np.ceil(cfg.fastscan_pool_rescan_frac * len(rows))))
+    capped = int(want.sum()) > cap
+    if capped:
+        thr = float(np.partition(rel, cap - 1)[cap - 1])
+        flag = rel <= thr
+    else:
+        thr, flag = cut, want
+    order = list(leftover)
+    for i, t in enumerate(tiles):
+        rows[i]["SCREEN_FLAGGED"] = int(flag[i])
+        if flag[i]:
+            order += list(t[3])
+    n_flag = int(flag.sum())
+    npx = (x2 - x1 + 1) * (y2 - y1 + 1)
+    log(f"  screen: {n_flag}/{len(tiles)} group(s) flagged at rel <= {thr:.3f} "
+        f"(physical cut {cut:.3f} = half a member; group spread "
+        f"{np.nanstd(rel)*100:.1f}% after detrending) -> {len(order)} of {npx} "
+        f"pixel(s) rescanned singly, {len(tiles) + len(order)} test(s) instead of "
+        f"{npx} ({npx / max(1, len(tiles) + len(order)):.2f}x)")
+    if capped:
+        log(f"  !! THE RESCAN CAP IS BINDING: {int(want.sum())} group(s) are below the "
+            f"physical cut but only {cap} fit in "
+            f"fastscan_pool_rescan_frac={cfg.fastscan_pool_rescan_frac:g}. The screen "
+            f"is looking at an array far dimmer or far deader than the 99.57 % yield "
+            f"it was sized for, so its recall here is LOW and unknown. Raise "
+            f"fastscan_pool_rescan_frac to "
+            f"{min(1.0, round(1.3 * want.sum() / len(rows), 2)):g}, lower "
+            f"fastscan_pool, or set fastscan_pool=0 and scan every pixel.")
+    log(f"  !! the {len(tiles) - n_flag} unflagged group(s) are NOT measured per pixel. "
+        f"Their members enter the sweep selection with the group's per-member estimate "
+        f"and SCREENED=1. Replayed on run 261016-2252 at 99.57 % yield this shape "
+        f"missed 8.2 % of the dead pixels at K=4. Set fastscan_pool=0 for a census.")
+    return order, rows
+
+
 def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
                   run_dir: Path, cfg: IQEConfig, log: Logger) -> list[Row]:
     volts = cfg.fastscan_v_list()
@@ -1064,11 +1222,19 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
         smu, dataclasses.replace(cfg, nvled_compliance=cfg.fastscan_limit_a), log)
     set_nplc(smu, cfg.fastscan_nplc)
     fs_rows = []
-    order = list(roi_pixels(x1, y1, x2, y2))
+    t0 = time.perf_counter()
+    screen_rows: list[Row] = []
+    if cfg.fastscan_pool:
+        # The screen narrows `order` once, at volts[0]. Extra biases then cover the
+        # same narrowed set, which is the only coherent choice: a bias pass over
+        # pixels the screen never kept would have nothing to compare against.
+        order, screen_rows = screen_fast_scan(pm, smu, smile, x1, y1, x2, y2,
+                                              cfg, log, t0)
+    else:
+        order = list(roi_pixels(x1, y1, x2, y2))
     if cfg.fastscan_random_order:
         np.random.default_rng(cfg.fastscan_order_seed).shuffle(order)
         log(f"  visiting {len(order)} pixels in randomized order (seed {cfg.fastscan_order_seed})")
-    t0 = time.perf_counter()
     # Bias on the outside, pixels on the inside: the bias is set once per pass instead
     # of once per pixel, and each pass keeps the single-bias scan's exact sequence --
     # same randomized order, same blank-then-light, same settle. volts[0] runs first,
@@ -1101,6 +1267,11 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
         fs_rows)
     raw = IncrementalRaw(run_dir / "FastScan" / "raw_data" / f"{pfx}FastScan.csv")
     raw.append(fs_rows); raw.close()
+    if screen_rows:
+        write_aggregated_one(
+            run_dir / "FastScan"
+            / f"{pfx}screen_bitval={cfg.fastscan_bitval}_mean_std.csv", screen_rows,
+            cols=_SCREEN_COLS)
     (run_dir / "FastScan" / "raw_data" / f"{pfx}FastScan_config.json").write_text(
         json.dumps({"settings": cfg.to_dict(), "provenance": provenance()}, indent=2),
         encoding="utf-8")
@@ -1109,6 +1280,23 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
     # pixel at -1.05 V against the -1.35 V population and call half the array dead, and
     # it would make the swept pixel set depend on which extra biases were requested.
     sel_rows = [r for r in fs_rows if r["NVLED_V"] == volts[0]]
+    # A screened group that was NOT flagged is never measured per pixel, so its members
+    # enter the population with the group's PER-MEMBER estimate and SCREENED=1 saying
+    # so. They have to be here: the measured rows are the flagged, dim ones, and a
+    # percentile over that biased sample would put the alive threshold in the wrong
+    # place entirely.
+    for r in screen_rows:
+        if r["SCREEN_FLAGGED"]:
+            continue
+        k = int(r["POOL_K"])
+        for m in r["POOL_MEMBERS"].split():
+            mx, my = (int(c) for c in m.split(":"))
+            sel_rows.append(dict(X=mx, Y=my, BITVAL=cfg.fastscan_bitval,
+                                 NVLED_V=volts[0],
+                                 NVLED_CURR_MEAN=r["NVLED_CURR_MEAN"] / k,
+                                 VLED_CURR_MEAN=r["VLED_CURR_MEAN"] / k,
+                                 PM400_POWER_MEAN=r["PM400_POWER_MEAN"] / k,
+                                 SCREENED=1))
     P = np.array([abs(r["PM400_POWER_MEAN"]) for r in sel_rows])
     med = np.nanmedian(P)
     # "Typical lit" reference = a HIGH percentile, so the threshold survives a majority-dead ROI
@@ -1116,6 +1304,10 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
     bright = float(np.nanpercentile(P, cfg.fastscan_alive_pctl))
     thr = cfg.dead_threshold_frac * bright
     alive = [r for r, p in zip(sel_rows, P) if p >= thr]
+    if screen_rows:
+        n_est = sum(1 for r in sel_rows if r.get("SCREENED"))
+        log(f"  classification population: {len(sel_rows) - n_est} measured pixel(s) "
+            f"plus {n_est} screened estimate(s)")
     log(f"  alive {len(alive)}/{len(sel_rows)} @ {volts[0]:g} V "
         f"(lit~{bright*1e9:.1f} nW @ p{cfg.fastscan_alive_pctl}, "
         f"thr {thr*1e9:.1f} nW, median {med*1e9:.2f} nW)")

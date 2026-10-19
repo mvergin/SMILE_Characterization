@@ -182,7 +182,21 @@ What a reader must do with `POOL_K`:
 * **Pixel counts do.** A pooled target is one row and K pixels.
 
 A reader that ignores the column entirely gets the right EQE and a wrong `J` --
-the safe direction, but still wrong. **Every run before 17 October 2026, and every
+the safe direction, but still wrong.
+
+### `FastScan/<prefix>screen_bitval=*.csv`, only when `fastscan_pool` is on
+
+The pooled fast-scan **screen** writes one row per group of K pixels, with the same
+columns as the fast scan plus `POOL_K`, `POOL_MEMBERS` and `SCREEN_FLAGGED` (1 = its
+members were rescanned one by one). Power and current are the **sum** over the members.
+
+**When this file exists, the ordinary `FastScan/<prefix>aggregated_*.csv` no longer
+covers every pixel in the ROI.** It covers the rescanned subset: the members of
+flagged groups plus any edge pixels no whole tile fit. A pixel in an unflagged group
+is never measured on its own, and the only number for it is its group's sum divided by
+`POOL_K`. A reader that needs per-pixel coverage must check for this file first and
+refuse, or treat the screened members as estimates. `fastscan_pool` is 0 by default,
+so an ordinary run has no screen file and the fast scan covers every pixel as before. **Every run before 17 October 2026, and every
 run with `pool_groups: []`, lacks both columns, and absence means `POOL_K = 1`,
 not unknown.** Pooling is off by default, so an ordinary run's columns are exactly
 what they were.

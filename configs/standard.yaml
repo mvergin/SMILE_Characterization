@@ -64,6 +64,30 @@ block_seed: 0   # blocks mode: RNG seed (vary across runs to sample new pixels)
 #
 # Pooled EQE = sum(P)/sum(I) is a CURRENT-WEIGHTED mean of the members, not the mean of
 # their EQEs. The two differ whenever brightness and current correlate across members.
+fastscan_pool: 0   # K for the fast-scan group-test SCREEN. 0 = OFF, the default, and
+                   # the ordinary scan then measures every pixel. With K > 1 the scan
+                   # lights K pixels at a time, flags the suspicious groups against a
+                   # LOCAL median, and rescans only those members one by one.
+                   # Replayed on the real 262 144-pixel scan of run 261016-2252
+                   # (1116 dead, 99.574 % yield) with the rule this code ships: K=4
+                   # finds 91.8 % of the dead pixels for 3.46x less bench time,
+                   # 2.15 h -> 37 min. K=2 finds 97.5 % for 1.94x. It is a SCREEN and
+                   # not a census -- the groups it does not flag are never measured
+                   # per pixel, so 8.2 % of the dead pixels are missed at K=4 and the
+                   # run says so. Leave this at 0 if every dead pixel must be named.
+fastscan_pool_rescan_frac: 0.05
+                   # CAP on the fraction of groups rescanned pixel by pixel, not the
+                   # rule. A group is flagged when its detrended reading is at or below
+                   # 1 - 0.5/K, half a member's worth of deficit, which is physical.
+                   # The cap only bounds bench time, and the run says loudly when it
+                   # binds -- a screen that silently ignores groups it knows are
+                   # suspicious is the one failure it may not have.
+fastscan_pool_detrend: 15
+                   # window, in GROUPS, of the local median the flag is taken against.
+                   # The array has a real +3.7 % spatial gradient and a row-driver
+                   # signature (section 16), so a GLOBAL median flags one corner
+                   # wholesale: measured, detrending lifts K=4 recall from 85.5 % to
+                   # 91.8 % at the same bench cost.
 pool_groups: []    # per-block pooled group sizes. [] = OFF, the default.
                    # [4] adds one 4-pixel group to every block. [2, 4, 8] adds three
                    # groups of different K to every block, which gives the

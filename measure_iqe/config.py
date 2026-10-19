@@ -158,6 +158,37 @@ class IQEConfig:
                             # disjoint, which is the better independent sample but
                             # cannot separate those two. The single is never the
                             # group's FIRST member, so X,Y stays unique per row.
+    fastscan_pool: int = 0  # K for the fast-scan group-test SCREEN. 0 = off, and off
+                            # is the default: the ordinary scan measures every pixel.
+                            # With K > 1 the scan lights K pixels at a time, flags the
+                            # dimmest fastscan_pool_rescan_frac of groups against a
+                            # LOCAL median, and rescans only those members one by one.
+                            # Replayed on the real 262 144-pixel scan of run
+                            # 261016-2252 (1116 dead, 99.574 % yield) with the rule
+                            # this code ships: at K=4 it finds 91.8 % of the dead
+                            # pixels for 3.46x less bench time, 2.15 h -> 37 min. K=2
+                            # finds 97.5 % for 1.94x. K=8 and K=16 buy 5.71x and 8.89x
+                            # but their physical cut selects more groups than the 5 %
+                            # cap allows, so recall falls to 75 % and 53 % and the run
+                            # says the cap is binding. It is a SCREEN, not a census --
+                            # if every dead pixel must be named, leave this at 0.
+    fastscan_pool_rescan_frac: float = 0.05
+                            # CAP on the fraction of groups rescanned pixel by pixel.
+                            # It is not the rule: a group is flagged when its detrended
+                            # reading is at or below 1 - 0.5/K, half a member's worth
+                            # of deficit, which is physical. The cap only bounds the
+                            # bench time, and the run says loudly when it binds --
+                            # because a screen that silently ignores groups it knows
+                            # are suspicious is the one failure it must not have. At
+                            # K=4 on the measured array the cut selects 2545 of 65 536
+                            # groups, under the 3277 this cap allows, so it does not
+                            # bind.
+    fastscan_pool_detrend: int = 15
+                            # window, in GROUPS, of the local median the flag is taken
+                            # against. The array has a real +3.7 % spatial gradient and
+                            # a row-driver signature (section 16), so a GLOBAL median
+                            # flags one corner wholesale: measured, detrending lifts
+                            # K=4 recall at a 5 % budget from 85.5 % to 93.5 %.
     pool_pm_range: float = 0.0
                             # W, the PM400 range for pooled targets. 0 = use pm_range.
                             # A single pixel spans 0.2 nW at -0.8 V to 257 nW at -2.6 V
@@ -816,6 +847,19 @@ class IQEConfig:
                     "pool_include_singles needs pixels_per_block >= 1: there has to be "
                     "a single in the block for the group to share. Set "
                     "pool_include_singles=False for disjoint groups.")
+        if self.fastscan_pool:
+            if self.fastscan_pool < 2:
+                raise ValueError(
+                    f"fastscan_pool={self.fastscan_pool}: a group of one IS the "
+                    f"ordinary scan. Use 0 to turn the screen off.")
+            if not 0 < self.fastscan_pool_rescan_frac <= 1:
+                raise ValueError(
+                    f"fastscan_pool_rescan_frac={self.fastscan_pool_rescan_frac}; "
+                    f"expected a fraction in (0, 1]")
+            if self.fastscan_pool_detrend < 3 or self.fastscan_pool_detrend % 2 == 0:
+                raise ValueError(
+                    f"fastscan_pool_detrend={self.fastscan_pool_detrend}; expected an "
+                    f"odd window of at least 3 groups")
         if self.pool_pm_range and self.pool_pm_range <= 0:
             raise ValueError(f"pool_pm_range={self.pool_pm_range}; expected 0 (use "
                              f"pm_range) or a positive power in W")

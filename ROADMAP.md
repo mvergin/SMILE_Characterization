@@ -298,6 +298,48 @@ Still open, and deliberately not built: the pooled path is **not** wired into
 `measure_iqe`'s sweep. That is only worth doing if the bench run says the scatter
 falls, and the run is the cheap half.
 
+### Done, 19 October 2026 — the bench answered it: the floor is the meter
+
+Run **261019-0952** (`--what cluster --highc --compliance 1e-5 --cluster-v -0.82
+--cluster-k 1 2 4 8 16`) closes the question every item below was waiting on.
+
+**The faint-end scatter is the power meter, and it is additive.** The number that says
+so is the **absolute** scatter, not the relative one:
+
+| K | P | σ(P) | relative |
+|---|---|---|---|
+| 1 | 462.6 pW | 39.4 pW | 8.52 % |
+| 2 | 868.5 pW | 29.8 pW | 3.43 % |
+| 4 | 1603.8 pW | 28.3 pW | 1.76 % |
+| 8 | 3219.7 pW | 16.8 pW | **0.52 %** |
+| 16 | 5875.7 pW | 37.1 pW | 0.63 % |
+
+The signal grows 12.7× and σ does not move — mean 30.3 pW, exponent `K^-0.10`. So
+relative scatter falls as `K^-1.02` and **pooling buys K, not √K**: a 16.4× cleaner
+faint end at K = 8. The “prize is ~2×” estimate below assumed `1/√K` and is withdrawn.
+
+Two corrections to what this file used to say:
+
+* **`rel_scatter_x_sqrt_k` flat does NOT mean meter noise.** Flat was the `1/√K`
+  hypothesis. The column falls, and falling is the stronger result. The verdict in
+  `characterize_capacitance.py` now fits the slope of the absolute scatter instead:
+  `K^0` additive, `K^0.5` independent per member, `K^1` proportional.
+* **There was no supply droop.** Run 261019-0914 showed per-pixel power falling 9 %
+  from K = 1 to K = 4 and could not say why. `additivity_p` — pooled P over the sum of
+  the members' own singles, which that run never measured — reads 0.998, 0.987, 0.991,
+  1.002, 1.002. The pool is the sum of its parts, and the 9 % was member variation
+  against a measured 13.7 % member-to-member spread.
+
+**The caps on K bound a different thing.** Detection, compliance and the PM400 range
+all bound the K at which a pooled reading can still identify a *dead member* or stay
+inside an instrument limit. None bounds the K at which pooling *reduces scatter*. A run
+can want both, which is why `pool_groups` takes a list: `[4, 8]`.
+
+What is still open is narrower, and is questions 20 and 21 in the report: whether
+30.3 pW is the floor at the other faint biases and in another quadrant, and whether a
+group settles like a single pixel. `--what cluster` now answers the second for free
+(`--cluster-probe-s`, `settled_frac`).
+
 ### Done, 17 October 2026 — pooling wired in, and the simulator corrected
 
 **`pool_groups` sweeps pooled targets**, off by default and deliberately so. A
@@ -378,6 +420,38 @@ Two things the correction added that matter more than the arithmetic:
   that covers it.
 
 `yieldsimu.py` has a `_selfcheck()` on both claims and runs it before plotting.
+
+### Done, 19 October 2026 — the fast scan can be a group test too
+
+`fastscan_pool` makes the fast scan a **screen**: light K pixels, flag the suspicious
+groups, rescan only those members one by one. **Off by default.** Replayed on run
+261016-2252's own 262 144 measured pixels against the 1116 it classifies dead — a group
+reading is the exact sum of its members' measured power, not a model:
+
+| K | groups | detrended spread | recall | speedup | 2.15 h becomes |
+|---|---|---|---|---|---|
+| 2 | 131 072 | 11.4 % | 97.5 % | 1.94× | 66 min |
+| 4 | 65 536 | 8.6 % | **91.8 %** | **3.46×** | **37 min** |
+| 8 | 32 768 | 6.5 % | 75.0 % | 5.71× | cap binds |
+| 16 | 16 384 | 5.2 % | 52.7 % | 8.89× | cap binds |
+
+Three things it got wrong first and now gets right:
+
+* **the median has to be local.** A global one condemns one corner wholesale, because
+  the array has the §16 gradient and a row-driver signature. Detrending against a
+  15-group neighbourhood lifts K = 4 recall from 85.5 % to 91.8 % at no extra cost.
+* **the flag has to be physical, and the budget only a cap on it.** A dead member is a
+  `1/K` deficit, so the cut is `1 - 0.5/K`. A fixed quantile was the first version and
+  it is the one failure a screen may not have: on a deader array it rescans the budget
+  and silently ignores every other suspicious group. The run now says loudly when the
+  cap binds.
+* **it is a screen, not a census.** An unflagged group is never measured per pixel, so
+  **8.2 % of the dead pixels are missed at K = 4**, and the ordinary FastScan CSV no
+  longer covers every pixel in the ROI. Both facts are in the run log and in
+  `RUN_FORMAT.md`. `fastscan_pool=0` is still the default and still a census.
+
+Note this is the **detection** use of pooling, so the detection cap applies and recall
+collapses above K = 4 — unlike the scatter gain above, which runs to K = 8.
 
 ## 6. GUI — last
 

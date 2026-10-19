@@ -1516,6 +1516,82 @@ def test_the_console_only_sends_what_the_operator_changed():
         assert want in argv, f"{want} missing from {argv}"
 
 
+def test_the_fast_scan_screen_tiles_the_roi_without_gaps_or_crossings():
+    """Every pixel is in exactly one tile or in the leftover list, and no tile crosses 256.
+
+    A gap means a pixel is never tested at all -- the one thing a screen may not do
+    quietly. A crossing means the frame lights the near quadrant's mirror image,
+    because the pixel-enable bits are per quadrant and live in the frame instruction.
+    """
+    for roi, k in (((0, 0, 511, 511), 2), ((0, 0, 511, 511), 4), ((0, 0, 511, 511), 8),
+                   ((0, 0, 511, 511), 16), ((0, 0, 15, 15), 4), ((32, 32, 63, 63), 4),
+                   ((0, 0, 510, 510), 4), ((250, 250, 265, 265), 4)):
+        tiles, leftover = acquire.pool_tiles(*roi, k)
+        members = [m for _q, _iy, _ix, ms in tiles for m in ms]
+        allpx = set(acquire.roi_pixels(*roi))
+        assert len(members) == len(set(members)), f"{roi} k={k}: a pixel is in two tiles"
+        assert set(members) | set(leftover) == allpx, (
+            f"{roi} k={k}: {len(allpx - set(members) - set(leftover))} pixel(s) never tested")
+        assert not (set(members) & set(leftover))
+        for _q, _iy, _ix, ms in tiles:
+            assert len(ms) == k, f"{roi} k={k}: tile of {len(ms)}"
+            assert len({(x >= 256, y >= 256) for x, y in ms}) == 1, f"{ms} crosses 256"
+    # the whole array divides exactly at every K the screen is sized for
+    for k, want in ((2, 131072), (4, 65536), (8, 32768), (16, 16384)):
+        tiles, leftover = acquire.pool_tiles(0, 0, 511, 511, k)
+        assert (len(tiles), len(leftover)) == (want, 0), (k, len(tiles), len(leftover))
+
+    # local_median is the detrending the recall depends on
+    a = np.arange(25.0).reshape(5, 5)
+    assert acquire.local_median(a, 3).shape == a.shape
+    assert acquire.local_median(a, 3)[2, 2] == 12.0
+    assert np.allclose(acquire.local_median(np.ones((7, 7)), 5), 1.0)
+
+
+def test_the_screen_rescans_what_it_flags_and_says_what_it_skipped():
+    """The screen must narrow the per-pixel pass, cover the classification, and shout.
+
+    Three things it may not do: leave a flagged group unmeasured, judge alive/dead on
+    the flagged (dim) rows alone -- which would put the percentile threshold in the
+    wrong place -- or let the rescan cap bind in silence.
+    """
+    msgs: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = IQEConfig(**{**FAST, "roi": (0, 0, 31, 31), "block_size": 8,
+                           "pixels_per_block": 1, "fastscan_pool": 4})
+        res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=msgs.append)
+        fs = sorted((Path(res.run_dir) / "FastScan").glob("*screen_bitval=*.csv"))
+        assert fs, "the screen wrote no CSV"
+        import csv as _csv
+        with fs[0].open() as f:
+            rows = list(_csv.DictReader(f))
+        single = sorted((Path(res.run_dir) / "FastScan").glob(
+            "*aggregated_bitval=*.csv"))[0]
+        with single.open() as f:
+            scanned = {(int(r["X"]), int(r["Y"])) for r in _csv.DictReader(f)}
+    assert len(rows) == 256, f"32x32 in 4-pixel tiles is 256 groups, got {len(rows)}"
+    assert all(int(r["POOL_K"]) == 4 for r in rows)
+    flagged = [r for r in rows if int(r["SCREEN_FLAGGED"])]
+    assert flagged, "nothing was flagged, so the rescan path never ran"
+    assert len(flagged) < len(rows), "everything was flagged, so the screen saved nothing"
+    # every member of a flagged group was rescanned, and nothing else was
+    want = {tuple(int(c) for c in m.split(":"))
+            for r in flagged for m in r["POOL_MEMBERS"].split()}
+    assert want == scanned, (
+        f"{len(want - scanned)} flagged member(s) never rescanned, "
+        f"{len(scanned - want)} pixel(s) rescanned without being flagged")
+    text = " ".join(msgs)
+    assert "are NOT measured per pixel" in text, (
+        "the screen must say that the unflagged groups were never measured")
+    # the simulator kills ~1 pixel in 13, far deader than the array this was sized for,
+    # so the cap MUST bind here and MUST say so
+    assert "RESCAN CAP IS BINDING" in text, (
+        "the cap bound without the run saying so -- a screen that silently ignores "
+        "groups it knows are suspicious is the one failure it may not have")
+    # and the classification saw the screened estimates, not just the dim rows
+    assert "screened estimate(s)" in text
+
+
 def test_no_block_ever_straddles_the_quadrant_boundary():
     """The pixel-enable bits are per quadrant and live in the FRAME instruction.
 
