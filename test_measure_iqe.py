@@ -1592,6 +1592,67 @@ def test_the_screen_rescans_what_it_flags_and_says_what_it_skipped():
     assert "screened estimate(s)" in text
 
 
+def test_the_ramp_never_goes_past_the_stop_it_was_asked_for():
+    """A knee outside the ramp cannot split it, and must not extend it.
+
+    Run 261019-1537 asked for -0.8..-1.1 V and measured -0.8..-1.3 V. The split is
+    start -> vramp_knee_v -> stop, so with the default knee at -1.3 V the rising leg
+    overshot the stop and the droop leg came back up: 8 points over 6 distinct biases
+    with -1.1 and -1.2 measured twice. A pooled sweep deliberately stopped short of
+    the compliance and range ceilings went straight past both.
+    """
+    for stop, n in ((-1.1, 8), (-1.2, 8), (-1.4, 8), (-2.6, 30), (-1.3, 8)):
+        cfg = IQEConfig(nvled_v_coarse_stop=stop, n_fine=n).validate()
+        msgs: list[str] = []
+        V = [v for v, _ in acquire.build_fine_voltages(None, None, cfg, msgs.append)]
+        lo = min(cfg.nvled_v_coarse_start, stop)
+        assert len(V) == n, f'stop={stop}: {len(V)} points, asked for {n}'
+        assert min(V) >= lo - 1e-9, f'stop={stop}: swept to {min(V)}, past {lo}'
+        assert max(V) <= max(cfg.nvled_v_coarse_start, stop) + 1e-9, V
+        assert len(set(V)) == len(V), f'stop={stop}: duplicate biases in {sorted(V)}'
+        # and the log says which shape it used, because that changes where the
+        # points are spent
+        inside = lo < cfg.vramp_knee_v < max(cfg.nvled_v_coarse_start, stop)
+        assert ('split:' in msgs[0]) == inside, msgs[0]
+        if not inside:
+            assert 'OUTSIDE this ramp' in msgs[0], msgs[0]
+
+
+def test_the_bright_end_estimate_follows_the_sweeps_actual_stop():
+    """It scaled a fast-scan reading by a FIXED -2.60 V ratio whatever the stop.
+
+    Run 261019-1537 stopped at -1.1 V and was warned its brightest group would emit
+    757 nW against a 470 nW range. The groups measured 188 nW at the -1.3 V the ramp
+    bug actually reached, and would have been 72 nW at the -1.1 V requested. The
+    message even printed the real stop while using the -2.60 V number.
+    """
+    # the curve must be usable by np.interp, which needs ascending x. Reversing it
+    # was a bug that silently made every scale factor 1.000.
+    xs = [c[0] for c in acquire.BIAS_CURVE]
+    assert xs == sorted(xs), 'BIAS_CURVE must ascend in V for np.interp'
+
+    # a round trip is exactly 1, and the fast-scan bias is a measured point
+    for v in (-2.6, -1.35, -1.1, -0.8):
+        p, i = acquire.bias_scale(v, v)
+        assert abs(p - 1) < 1e-9 and abs(i - 1) < 1e-9, (v, p, i)
+
+    # monotonic: deeper bias means more light and more current
+    prev = None
+    for v in (-0.8, -0.9, -1.1, -1.3, -1.65, -2.6):
+        p, i = acquire.bias_scale(v, -1.35)
+        if prev is not None:
+            assert p > prev[0] and i > prev[1], f'not monotonic at {v}'
+        prev = (p, i)
+
+    # against the run: members reading 51.6 nW each at -1.35 V, K=4, stop -1.3 V,
+    # measured 188.2 nW. 15 % is plenty for a warning threshold.
+    p, _ = acquire.bias_scale(-1.3, -1.35)
+    pred = 4 * 51.6e-9 * p
+    assert abs(pred - 188.2e-9) / 188.2e-9 < 0.15, f'{pred*1e9:.0f} nW vs 188.2 nW'
+    # and the old fixed ratio must no longer be reachable at a shallow stop
+    p11, _ = acquire.bias_scale(-1.1, -1.35)
+    assert 4 * 51.6e-9 * p11 < 150e-9, 'a -1.1 V stop must not predict a bright end'
+
 def test_no_block_ever_straddles_the_quadrant_boundary():
     """The pixel-enable bits are per quadrant and live in the FRAME instruction.
 

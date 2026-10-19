@@ -409,7 +409,15 @@ def build_fine_voltages(pm, smu, cfg: IQEConfig, log: Logger,
     if cfg.fine_sweep_mode == "voltage":
         # Voltage ramp — no coarse map. Densify the rising-side/peak window (split at the
         # knee); targets None so the points are taken as-is.
-        if cfg.vramp_low_frac and 0.0 < cfg.vramp_low_frac < 1.0 and cfg.vramp_knee_v is not None:
+        # The knee only splits a ramp it is INSIDE. With nvled_v_coarse_stop=-1.1 V and
+        # the default knee at -1.3 V the first leg overshot the stop and the second came
+        # back up: run 261019-1537 asked for -0.8..-1.1 V and measured -0.8..-1.3 V,
+        # 8 points over 6 distinct biases with -1.1 and -1.2 duplicated. A knee outside
+        # the ramp carries no information about where to spend points, so fall back to
+        # uniform and say which happened.
+        lo, hi = sorted((cfg.nvled_v_coarse_start, cfg.nvled_v_coarse_stop))
+        knee_inside = (cfg.vramp_knee_v is not None and lo < cfg.vramp_knee_v < hi)
+        if cfg.vramp_low_frac and 0.0 < cfg.vramp_low_frac < 1.0 and knee_inside:
             n_low = max(2, int(round(cfg.n_fine * cfg.vramp_low_frac)))
             n_high = max(2, cfg.n_fine - n_low)
             V = np.concatenate([
@@ -417,6 +425,11 @@ def build_fine_voltages(pm, smu, cfg: IQEConfig, log: Logger,
                 np.linspace(cfg.vramp_knee_v, cfg.nvled_v_coarse_stop, n_high)])
             dens = (f"split: {n_low} pts {cfg.nvled_v_coarse_start}→{cfg.vramp_knee_v} V (rising), "
                     f"{n_high} pts {cfg.vramp_knee_v}→{cfg.nvled_v_coarse_stop} V (droop)")
+        elif cfg.vramp_low_frac and cfg.vramp_knee_v is not None and not knee_inside:
+            V = np.linspace(cfg.nvled_v_coarse_start, cfg.nvled_v_coarse_stop, cfg.n_fine)
+            dens = (f"uniform {cfg.n_fine} pts {cfg.nvled_v_coarse_start}→"
+                    f"{cfg.nvled_v_coarse_stop} V -- vramp_knee_v={cfg.vramp_knee_v} is "
+                    f"OUTSIDE this ramp, so it cannot split it")
         else:
             V = np.linspace(cfg.nvled_v_coarse_start, cfg.nvled_v_coarse_stop, cfg.n_fine)
             dens = f"uniform {cfg.n_fine} pts {cfg.nvled_v_coarse_start}→{cfg.nvled_v_coarse_stop} V"
@@ -1337,14 +1350,47 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
     return sel
 
 
-# Measured on run 261015-0015: the median pixel draws 117.7 uA at -2.60 V and 33.3 uA
-# at the -1.35 V fast-scan bias. The ratio is what turns a fast-scan reading, which the
-# selection already has, into a bright-end estimate it does not.
-BRIGHT_OVER_FASTSCAN = 117.7 / 33.3
-# Same ratio for the optical channel, measured on the same run: the median pixel emits
-# 147.7 nW at -2.60 V and 51.6 nW at -1.35 V. Used to turn a fast-scan power into the
-# bright-end power a pooled group will ask the (fixed) PM400 range to hold.
-BRIGHT_OVER_PM_FASTSCAN = 147.7 / 51.6
+# The median pixel's power and current against bias, over the 1200 swept pixels of run
+# 261016-2252. The selection has a fast-scan reading at nvled_v_fastscan and needs the
+# reading at the sweep's STOP, which it does not have, so it scales by the ratio of these
+# two. A single fixed -2.60 V ratio was the first version and it is wrong for any sweep
+# that stops short: run 261019-1537 stopped at -1.1 V and was told its groups would emit
+# 757 nW when they measured 188 nW.
+#   (bias V, median |P| nW, median |I| uA)
+BIAS_CURVE = [
+    (-2.6000, 147.7, 117.5), (-2.4818, 146.5, 116.2), (-2.3636, 144.9, 114.8),
+    (-2.2455, 142.7, 112.5), (-2.1273, 138.7, 108.7), (-2.0091, 132.0, 102.0),
+    (-1.8909, 121.7, 92.24), (-1.7727, 108.7, 80.28), (-1.6545, 93.82, 67.10),
+    (-1.5364, 77.52, 53.56), (-1.4182, 60.58, 40.25), (-1.3000, 43.51, 27.88),
+    (-1.2722, 39.53, 25.18), (-1.2444, 35.69, 22.54), (-1.2167, 31.95, 20.03),
+    (-1.1889, 28.28, 17.63), (-1.1611, 24.73, 15.32), (-1.1333, 21.37, 13.16),
+    (-1.1056, 18.16, 11.17), (-1.0778, 15.16, 9.332), (-1.0500, 12.40, 7.665),
+    (-1.0222, 9.870, 6.155), (-0.9944, 7.642, 4.849), (-0.9667, 5.704, 3.727),
+    (-0.9389, 4.064, 2.782), (-0.9111, 2.721, 2.006), (-0.8833, 1.682, 1.392),
+    (-0.8556, 0.9446, 0.9385), (-0.8278, 0.4632, 0.6326), (-0.8000, 0.2031, 0.4523),
+]
+
+
+def bias_scale(v_to: float, v_from: float) -> tuple[float, float]:
+    """(power, current) scale factors from bias ``v_from`` to bias ``v_to``.
+
+    Log-interpolated on BIAS_CURVE, because both quantities span three decades over the
+    sweep and a linear interpolation between -0.9 V and -1.3 V would be badly wrong in
+    the middle. Clamped at the ends: outside the measured span the nearest point is the
+    honest answer, and the curve covers the whole sweep range.
+    """
+    # BIAS_CURVE runs -2.6 -> -0.8 V, which is already ASCENDING in V, and np.interp
+    # silently returns nonsense on a descending x. Reversing it was a bug that made
+    # every scale factor 1.000.
+    xs = [c[0] for c in BIAS_CURVE]
+
+    def at(col):
+        ys = [np.log(c[col]) for c in BIAS_CURVE]
+        return (float(np.exp(np.interp(v_to, xs, ys))),
+                float(np.exp(np.interp(v_from, xs, ys))))
+    p_to, p_from = at(1)
+    i_to, i_from = at(2)
+    return (p_to / p_from if p_from else 1.0), (i_to / i_from if i_from else 1.0)
 
 
 def register_pools(sel: list[Row], alive: list[Row], cfg: IQEConfig,
@@ -1383,12 +1429,15 @@ def register_pools(sel: list[Row], alive: list[Row], cfg: IQEConfig,
     # ceiling clamps at K = 8. .get() because a caller may hand in bare {X, Y} rows --
     # RUN_FORMAT.md's rule for readers, and here it means the check quietly does not
     # run rather than taking the selection down with it.
+    # To the sweep's ACTUAL stop, not a fixed -2.60 V. A truncated sweep was being
+    # warned about currents and powers it never reaches.
+    p_scale, i_scale = bias_scale(cfg.nvled_v_coarse_stop, cfg.nvled_v_fastscan)
     i_fs = {(int(r["X"]), int(r["Y"])): abs(float(r.get("NVLED_CURR_MEAN") or 0.0))
             for r in alive}
     worst_g = max(groups, key=lambda g: sum(i_fs.get(m, 0.0) for m in g["POOL_MEMBERS"]),
                   default=None)
     worst = sum(i_fs.get(m, 0.0) for m in worst_g["POOL_MEMBERS"]) if worst_g else 0.0
-    i_bright = worst * BRIGHT_OVER_FASTSCAN
+    i_bright = worst * i_scale
     k_worst = len(worst_g["POOL_MEMBERS"]) if worst_g else 1
     if i_bright > cfg.vramp_highv_limit_a:
         per_px = max(i_bright / max(k_worst, 1), 1e-12)
@@ -1411,7 +1460,7 @@ def register_pools(sel: list[Row], alive: list[Row], cfg: IQEConfig,
     p_fs = {(int(r["X"]), int(r["Y"])): abs(float(r.get("PM400_POWER_MEAN") or 0.0))
             for r in alive}
     p_worst = max((sum(p_fs.get(m, 0.0) for m in g["POOL_MEMBERS"]) for g in groups),
-                  default=0.0) * BRIGHT_OVER_PM_FASTSCAN
+                  default=0.0) * p_scale
     # The realised scale if this run asked the meter, else the measured default for a
     # 1e-7 request, else the request itself. pm_range is only a request: SENS:POW:RANG
     # picks the smallest hardware range that covers it.
