@@ -1241,6 +1241,19 @@ def settling_verdict(srows: list[dict], ks: set, settle_s: float) -> list[str]:
             f"    settling K={k}, probe minus settled against the per-rep scatter: "
             + ", ".join(f"{r['probe_s']*1e3:.0f}ms:{100*r['dev_frac']:+.2f}%"
                         f"({r['dev_sigma']:.1f}s)" for r in scan))
+        # Drift first, because it decides whether a settling time can be read at all.
+        # A transient decays; a persistent offset does not, and no dwell fixes it. Test
+        # the tail's MEAN against its own spread, not each point against the per-rep
+        # scatter. Run 261019-1147: every probe from 2 s to 20 s reads high, mean
+        # +0.77 %, 6.4 sigma on the mean.
+        tail = scan[len(scan) // 2:]
+        drift = None
+        if len(tail) >= 4:
+            fr = np.array([r["dev_frac"] for r in tail], float)
+            sem = fr.std(ddof=1) / np.sqrt(len(fr))
+            if sem > 0 and abs(fr.mean()) / sem >= 3.0:
+                drift = (fr.mean(), abs(fr.mean()) / sem)
+
         sig = [r for r in scan if r["dev_sigma"] >= 3.0]
         if not sig:
             res = [abs(r["dev_W"]) / r["dev_sigma"] / r["p_settled_W"]
@@ -1250,18 +1263,39 @@ def settling_verdict(srows: list[dict], ks: set, settle_s: float) -> list[str]:
                 f"noise is the floor, so the deviation is under "
                 f"~{100 * max(res, default=float('nan')):.1f}% and NOT shown to be "
                 f"zero. Pool harder or raise --cluster-n-pm.")
-            continue
-        worst = max(sig, key=lambda r: r["probe_s"])
-        after = [r for r in scan if r["probe_s"] > worst["probe_s"]]
-        out.append(
-            f"      -> NOT settled at {worst['probe_s']*1e3:.0f} ms "
-            f"({100*worst['dev_frac']:+.2f}%). "
-            + (f"Settled by {min(r['probe_s'] for r in after)*1e3:.0f} ms, so that is "
-               f"the dwell K={k} needs -- not the single-pixel one."
-               if after else
-               f"Every probe up to the last one is still moving, so the dwell is ABOVE "
-               f"{worst['probe_s']*1e3:.0f} ms and this scan does not reach it. Extend "
-               f"--cluster-probe-s past {settle_s*1e3:.0f} ms."))
+        else:
+            # The dwell is the first time whose WHOLE TAIL is quiet, and the tail needs
+            # at least two probes -- one quiet point at the end of the scan has nothing
+            # after it to confirm. Taking the last significant probe and the next one
+            # after it reads noise around a floor as a settling time: run 261019-1147
+            # has 500 ms at 2.0 sigma and 1000 ms at 3.2 sigma.
+            dwell = next((r["probe_s"] for i, r in enumerate(scan)
+                          if len(scan) - i >= 2
+                          and all(q["dev_sigma"] < 3.0 for q in scan[i:])), None)
+            worst = max(sig, key=lambda r: r["probe_s"])
+            out.append(
+                f"      -> NOT settled at {worst['probe_s']*1e3:.0f} ms "
+                f"({100*worst['dev_frac']:+.2f}%). "
+                + (f"Drift dominates past that (see below), so this scan cannot give a "
+                   f"settling time: a transient under a {100*abs(drift[0]):.2f}% offset "
+                   f"is not resolvable. Shorten the scan and raise --cluster-reps to "
+                   f"separate them."
+                   if drift is not None else
+                   f"Quiet from {dwell*1e3:.0f} ms on, so that is the dwell K={k} "
+                   f"needs -- not the single-pixel one."
+                   if dwell is not None else
+                   f"No probe time has two quiet probes after it, so this scan does "
+                   f"not reach the dwell. Extend --cluster-probe-s past "
+                   f"{settle_s*1e3:.0f} ms."))
+        if drift is not None:
+            out.append(
+                f"      -> and it does NOT decay: the last {len(tail)} probe(s), "
+                f"{tail[0]['probe_s']*1e3:.0f}-{tail[-1]['probe_s']*1e3:.0f} ms, sit "
+                f"{100*drift[0]:+.2f}% from settled ({drift[1]:.1f} sigma on the mean). "
+                f"That is DRIFT, not a transient -- the reference was taken at "
+                f"{tail[-1]['settle_ref_s']:.0f} s and every probe before it is on the "
+                f"same side. No dwell removes it; it is what warmup_ms and the "
+                f"round-robin measurement order are for.")
     return out
 
 
@@ -1509,6 +1543,11 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
             f"or a fainter bias. In High-C the compliance also sets the measure range, "
             f"so raising it costs current resolution: prefer the fainter bias.")
     rows_ok = [r for r in rows if not r["at_compliance"]]
+    # The settling scan is PER K, so it must not sit behind the K-to-K comparison
+    # below. --cluster-k 16 wrote the scan and printed no conclusion until this moved.
+    for line in settling_verdict(srows, {r["k"] for r in rows_ok},
+                                 args.cluster_settle_s):
+        log(line)
     if len(rows_ok) > 1:
         first, last = rows_ok[0], rows_ok[-1]
         gain = first["rel_scatter"] / last["rel_scatter"] if last["rel_scatter"] else float("nan")
@@ -1538,9 +1577,6 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
         # floor. A single pixel emitting 455 pW cannot resolve a 7 % deviation, while a
         # K=16 group emitting 5863 pW resolves 2.7 % at 4.5 sigma. Ranking by percentage
         # inverts the answer, which is what the first version of this did.
-        for line in settling_verdict(srows, {r["k"] for r in rows_ok},
-                                     args.cluster_settle_s):
-            log(line)
         add = last["additivity_p"]
         if np.isfinite(add) and abs(add - 1) > 0.03:
             log(f"    !! K={last['k']} emits {100*add:.1f}% of its members' own sum, "

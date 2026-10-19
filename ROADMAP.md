@@ -298,6 +298,58 @@ Still open, and deliberately not built: the pooled path is **not** wired into
 `measure_iqe`'s sweep. That is only worth doing if the bench run says the scatter
 falls, and the run is the cheap half.
 
+### Done, 19 October 2026 — the range belongs to the segment, and the group's "settling" is drift
+
+Two runs closed two open questions and reopened one as a design decision.
+
+**Question 22: the floor scales with full scale, as `range^0.74`.** Runs 261019-1056 and
+-1212, the same `optfloor` sweep at both ranges. A `1e-6` request realises as 4697 nW,
+so the hardware ranges are decades:
+
+| n_pm | 470 nW | 4697 nW | ratio |
+|---|---|---|---|
+| 8 | 17.72 pW | 96.26 pW | 5.43 |
+| 128 | 3.68 pW | 19.04 pW | 5.17 |
+| 512 | 2.74 pW | 14.95 pW | 5.45 |
+
+A 9.99x range increase costs 5.45x in floor. So at `n_pm = 8`, counting the sqrt(2) of a
+lit-minus-dark difference: K = 16 on the faint end reads **0.43 %** on the fine range and
+**2.32 %** on the coarse one, while K = 4 at the bright end **over-ranges** on the fine
+one and reads **0.023 %** on the coarse one.
+
+**Neither range works for the whole sweep**, so the earlier guess -- stay on the faint
+segment with the fine range -- was half right. The answer is a per-segment range change,
+the pattern `pick_limit` already uses for the SMU current range. Both objections are
+answered: the coarse range's -1.17 nW dark offset is constant across `n_pm` so the
+per-point reference subtracts it, and a switch at a fixed known bias is not the
+unpredictable mid-sweep switch autorange was disabled to prevent. **Not built** -- that
+is new open question 23.
+
+**Question 21: there is no settling time, because it is drift.** Run 261019-1147, K = 16,
+eleven probe times from 50 ms to 20 s. A fast transient falls from +2.15 % at 50 ms to
+about +1.1 % by 200 ms and then stops: the last six probes, 2-20 s, sit **+0.77 % from
+settled at 6.4 sigma on the mean**, all on the same side. The reference was taken at 30 s
+and everything before it reads high, so the output drifts down over tens of seconds. No
+dwell removes that, and it masks the transient -- a sub-1 % tail is not resolvable under
+a 0.77 % offset. Whether the drift is worse for a group than a single pixel is not
+answerable from these runs: at K = 1 the per-rep scatter is 6.8 % against a 0.77 %
+effect.
+
+**Three defects in tooling written the same morning, all found by that one run:**
+
+* **the verdict never printed.** It sat inside `if len(rows_ok) > 1`, which exists for
+  the K-to-K scatter comparison. A settling scan is per K, so `--cluster-k 16` wrote the
+  CSV and said nothing -- and one K is exactly what the recommended command asked for.
+* **"settled by X" read noise as a settling time.** It took the last significant probe
+  and the next one after it. This scan is not monotonic (500 ms at 2.0 sigma, 1000 ms at
+  3.2 sigma), so it answered "settled by 20 s" off the final point with nothing after it
+  to confirm. A dwell now needs a quiet tail of at least two probes.
+* **it could not say "this does not decay".** It now tests the tail's mean against its
+  own spread, names drift, and refuses to name a dwell while drift dominates.
+
+`settling_verdict()` carries the run's eleven points as a regression test, asserting
+that no dwell is named from them.
+
 ### Done, 19 October 2026 — a pooled group does NOT settle like a single pixel
 
 Run **261019-1057**, TL at −0.82 V, `--cluster-k 1 8 16`, with headroom: K = 16 drew

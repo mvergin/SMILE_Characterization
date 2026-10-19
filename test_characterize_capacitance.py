@@ -291,21 +291,24 @@ def test_the_settling_verdict_weighs_sigma_and_never_guesses_a_dwell():
     # the measured run: K=1 unresolved, K=16 real at 50 ms
     srows = [row(1, 0.05, 0.0770, 454.7e-12, 31.1e-12),
              row(16, 0.05, 0.0270, 5863.0e-12, 35.5e-12)]
-    out = "\n".join(settling_verdict(srows, {1, 16}, 2.0))
+    out = chr(10).join(settling_verdict(srows, {1, 16}, 2.0))
     assert "nothing resolved at K=1" in out, out
     assert "NOT settled at 50 ms" in out and "+2.70%" in out, out
     # and it must not name a dwell it has not seen
     assert "Extend --cluster-probe-s past 2000 ms" in out, out
     assert "Settled by" not in out, "named a dwell from a scan that never settles"
 
-    # a scan that DOES settle: the last significant probe has a quiet one after it
-    # 0.025 at 200 ms is 4.1 sigma, so it IS significant; 0.001 at 500 ms is 0.2
+    # a scan that DOES settle: the last significant probe is followed by TWO quiet
+    # ones. 0.025 at 200 ms is 4.1 sigma and significant; 0.001 and 0.002 are not.
+    # Two are needed because one quiet probe at the end of a scan has nothing after
+    # it to confirm -- run 261019-1147's last point looked quiet and was noise.
     srows = [row(16, 0.05, 0.0270, 5863e-12, 35.5e-12),
              row(16, 0.20, 0.0250, 5863e-12, 35.5e-12),
-             row(16, 0.50, 0.0010, 5863e-12, 35.5e-12)]
-    out = "\n".join(settling_verdict(srows, {16}, 1.0))
+             row(16, 0.50, 0.0010, 5863e-12, 35.5e-12),
+             row(16, 1.00, 0.0020, 5863e-12, 35.5e-12)]
+    out = chr(10).join(settling_verdict(srows, {16}, 2.0))
     assert "NOT settled at 200 ms" in out, out
-    assert "Settled by 500 ms" in out, out
+    assert "Quiet from 500 ms" in out, out
 
     # an unordered scan must give the same answer as an ordered one
     assert settling_verdict(srows, {16}, 1.0) == settling_verdict(
@@ -313,11 +316,33 @@ def test_the_settling_verdict_weighs_sigma_and_never_guesses_a_dwell():
 
     # an upper bound is not a zero, and it is quoted
     srows = [row(1, 0.05, 0.005, 454.7e-12, 31.1e-12)]
-    out = "\n".join(settling_verdict(srows, {1}, 2.0))
+    out = chr(10).join(settling_verdict(srows, {1}, 2.0))
     assert "NOT shown to be zero" in out and "under ~6.8%" in out, out
 
     # no scan for a K means no line for it, never a crash
     assert settling_verdict([], {1, 8}, 2.0) == []
+
+    # a scan that ends on its only quiet probe has nothing after it to confirm
+    srows = [row(16, 0.05, 0.0270, 5863e-12, 35.5e-12),
+             row(16, 0.20, 0.0250, 5863e-12, 35.5e-12)]
+    out = chr(10).join(settling_verdict(srows, {16}, 1.0))
+    assert "does not reach the dwell" in out, out
+    assert "Quiet from" not in out, "named a dwell with no quiet tail"
+
+    # run 261019-1147, K=16: the deviation never decays, so NO dwell may be named.
+    # 11 probes from 50 ms to 20 s, P=5800.8 pW, per-rep scatter 20.1 pW. The tail
+    # sits +0.77 % from settled at 6.4 sigma on the mean -- drift, not a transient,
+    # and a 20 s dwell would fix none of it.
+    real = [(0.05, 0.0215), (0.1, 0.0125), (0.2, 0.0110), (0.5, 0.0069),
+            (1.0, 0.0110), (2.0, 0.0104), (3.0, 0.0052), (5.0, 0.0050),
+            (8.0, 0.0097), (10.0, 0.0110), (20.0, 0.0050)]
+    srows = [dict(row(16, t, f, 5800.8e-12, 20.1e-12), settle_ref_s=30.0)
+             for t, f in real]
+    out = chr(10).join(settling_verdict(srows, {16}, 30.0))
+    assert "does NOT decay" in out and "DRIFT" in out, out
+    assert "+0.77%" in out, out
+    assert "cannot give a settling time" in out, out
+    assert "Quiet from" not in out, "named a dwell under a non-decaying offset"
 
 
 def test_the_cluster_reference_pools_and_is_never_a_blank_frame():
