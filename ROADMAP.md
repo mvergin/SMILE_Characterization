@@ -298,6 +298,51 @@ Still open, and deliberately not built: the pooled path is **not** wired into
 `measure_iqe`'s sweep. That is only worth doing if the bench run says the scatter
 falls, and the run is the cheap half.
 
+### Done, 19 October 2026 — a pooled group does NOT settle like a single pixel
+
+Run **261019-1057**, TL at −0.82 V, `--cluster-k 1 8 16`, with headroom: K = 16 drew
+5.155 µA, 52 % of the limit, so nothing clamped.
+
+**Three confirmations.** Absolute scatter 31.1, 29.7, 35.5 pW -- mean **32.1 pW**,
+exponent `K^+0.03`. With 30.3 pW (TL, −0.82 V) and 30.4 pW (BR, −0.90 V) that is three
+independent measurements of the same additive floor. Relative scatter falls **11.3x**
+from K = 1 to K = 16. And **additivity is 0.994 at K = 16** with no clamp, so the 0.390
+of the previous run was entirely the compliance limit and there is no supply droop at
+any K this experiment reaches.
+
+**The correction.** The settling verdict ranked percentages. It has to test
+significance, because the probe is ONE reading and its uncertainty is the per-rep
+scatter -- which at the faint end IS the 30 pW floor:
+
+| run | K | deviation at 50 ms | sigma |
+|---|---|---|---|
+| 261019-1057 | 1 | +7.70 % (+35 pW) | 1.1 |
+| | 8 | +1.92 % (+62 pW) | 2.1 |
+| | 16 | **+2.70 %** (+159 pW) | **4.5** |
+| 261019-1031 | 1 | +3.03 % (+53 pW) | 1.4 |
+| | 2 | +1.20 % (+44 pW) | 2.7 |
+| | 4 | **+2.12 %** (+163 pW) | **4.3** |
+
+The single pixel's big percentage is 35 pW against a 31 pW scatter -- noise. The
+groups' small percentages are real, because a 16x brighter target resolves far less.
+**Significant from K = 4 up, in both quadrants, at about +2 % above settled**: an
+overshoot still decaying 50 ms after the frame changes, which is what K x the switched
+capacitance on one row driver should do. So `pool_groups` must not inherit the
+single-pixel dwell. The old verdict called K = 1 the best-settled and K = 8 "the
+slowest", which inverts the answer.
+
+What is still missing is the dwell itself: one probe time says the group is not settled,
+not how long it needs. `--cluster-probe-s` has to be swept.
+
+**And averaging is the expensive lever.** Run 261019-1056, `optfloor` on the 470 nW
+range: 24.95 pW at `n_pm = 4` down to 2.74 pW at 512, going as `N^-0.455` -- close to
+ideal, and consistent with the `-0.499` measured at a different time. An 11x gain, for
+**64x the time per point**. Pooling buys 11.3x at K = 16 for nothing. The two levers are
+independent and multiply, so: pool first, average only as far as the time budget allows.
+That run does **not** answer open question 22, because `optfloor` sweeps `n_pm` at one
+range and every row reads `pm_range = 1e-07`. The missing half is
+`--what optfloor --highc --pm-range 1e-6`.
+
 ### Done, 19 October 2026 — confirmed in a second quadrant, and three lessons on clamping
 
 Run **261019-1031**: same experiment in **BR** at **−0.90 V**, `--compliance 1e-5`.
@@ -306,9 +351,10 @@ Run **261019-1031**: same experiment in **BR** at **−0.90 V**, `--compliance 1
 16.0 and 37.9 pW — mean **30.4 pW**, exponent `K^+0.01` — against **30.3 pW** in TL at
 −0.82 V. Two quadrants, two biases, 0.3 % apart. The floor is the meter, not the array.
 
-**A group settles like a single pixel, to K = 4.** `settled_frac` at 50 ms: 103.0 %,
-101.2 %, 102.1 %, a spread of 1.8 pp. `pool_groups` may inherit the single-pixel dwell
-at those K.
+**On settling this entry first said a group settles like a single pixel. That was
+wrong** -- see the 19 October entry below on run 261019-1057. It compared the spread of
+percentages, 1.8 pp, instead of weighing each deviation against its own noise. Done
+properly, K = 4 here is **+2.12 % from settled at 50 ms, 4.3 sigma**.
 
 **But K = 8 and K = 16 sat ON the 10 µA limit**, at exactly 10.000 µA. At −0.90 V a
 member draws 1.33 µA against 0.30 µA at −0.82 V, so K = 8 needs 10.6 µA and there was

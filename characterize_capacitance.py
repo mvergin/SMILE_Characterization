@@ -1440,18 +1440,33 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
             f"what tells additive noise from proportional")
         log(f"    K={first['k']} -> K={last['k']}: relative scatter fell {gain:.2f}x "
             f"(1/sqrt(K) predicts {math.sqrt(ratio):.2f}x, 1/K predicts {ratio:.2f}x)")
-        sf = [(r["k"], r["settled_frac"]) for r in rows_ok
-              if np.isfinite(r.get("settled_frac", float("nan")))]
-        if len(sf) > 1:
-            worst_k, worst = min(sf, key=lambda kv: kv[1])
-            spans = max(v for _k, v in sf) - min(v for _k, v in sf)
-            log(f"    settling at {args.cluster_probe_s*1e3:.0f} ms: "
-                + ", ".join(f"K={k}:{100*v:.1f}%" for k, v in sf)
-                + f" -> spans {100*spans:.1f} pp"
-                + ("; FLAT, so a group settles like a single pixel and needs no "
-                   "separate dwell" if spans < 0.05 else
-                   f"; K={worst_k} is the slowest at {100*worst:.1f}% -- a pooled "
-                   f"sweep needs its OWN dwell calibration, not the single-pixel one"))
+        # Significance, not percentage. The probe is ONE reading, so its own
+        # uncertainty is the per-rep scatter -- and at the faint end that scatter IS
+        # the ~30 pW optical floor. A single pixel emitting 455 pW therefore cannot
+        # resolve a 7 % deviation, while a K=16 group emitting 5863 pW resolves 2.7 %
+        # at 4.5 sigma. Ranking by percentage inverts the answer.
+        sf = [(r["k"], r["p_probe_W"] - r["p_led_W"], r["p_led_sd_W"], r["p_led_W"])
+              for r in rows_ok
+              if np.isfinite(r.get("p_probe_W", float("nan"))) and r["p_led_sd_W"] > 0]
+        if sf:
+            parts = [f"K={k}:{100*dev/p:+.2f}% ({abs(dev)/sd:.1f}sigma)"
+                     for k, dev, sd, p in sf]
+            sig = [(k, dev, sd, p) for k, dev, sd, p in sf if abs(dev) / sd >= 3.0]
+            log(f"    settling at {args.cluster_probe_s*1e3:.0f} ms, early reading "
+                f"minus settled, against the per-rep scatter: " + ", ".join(parts))
+            if not sig:
+                log(f"    -> nothing resolved. The probe is one reading and its own "
+                    f"noise is the floor, so this says the deviation is under "
+                    f"~{max(100*sd/p for _k, _d, sd, p in sf):.1f}% and not that it "
+                    f"is zero. Raise --cluster-reps or pool harder to resolve less.")
+            else:
+                k, dev, sd, p = max(sig, key=lambda t: abs(t[1]) / t[2])
+                log(f"    -> REAL: K={k} is {100*dev/p:+.2f}% from settled at "
+                    f"{args.cluster_probe_s*1e3:.0f} ms ({abs(dev)/sd:.1f} sigma), "
+                    f"{'above' if dev > 0 else 'below'} its settled value. A pooled "
+                    f"sweep needs its OWN dwell calibration, not the single-pixel one. "
+                    f"Sweep --cluster-probe-s to find where it flattens -- one value "
+                    f"says the group is not settled yet, not how long it needs.")
         add = last["additivity_p"]
         if np.isfinite(add) and abs(add - 1) > 0.03:
             log(f"    !! K={last['k']} emits {100*add:.1f}% of its members' own sum, "
