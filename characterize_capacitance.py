@@ -1240,6 +1240,21 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
 
     K is nested: K=4 is the first four members of the K=16 set, so the comparison
     across K is the same pixels plus more, never a different sample.
+
+    Every member is ALSO measured alone first. Without that, run 261019-0914's 9 %
+    drop in per-pixel power from K=1 to K=4 is either an IR drop on the shared
+    supply or just different pixels, and nothing in the data separates the two.
+    The singles give three things the groups cannot:
+
+      * ``additivity_p`` = pooled P / sum of the members' own P. 1.0 means the
+        pool is the sum of its parts. Below 1 means lighting K together costs
+        something -- supply droop is the suspect.
+      * ``p_sd_pred_W`` = the pooled scatter you would see if each member's noise
+        were independent, quadrature-summed from the members' own scatter.
+        ``scatter_vs_pred`` near 1 means independent noise, below 1 means a
+        shared term averaging down, above 1 means a shared term adding up.
+      * ``singles_rel_spread`` = the member-to-member brightness spread, measured
+        on these pixels rather than assumed from the array median.
     """
     members = [(p["X"], p["Y"]) for p in
                select_pixels(pm, smu, smile, cfg,
@@ -1269,19 +1284,39 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
     smile.set_pixels(members[:1], cfg.bitvals[0])
     time.sleep(max(charge, args.cluster_settle_s))
 
-    rows = []
-    base = None
-    for k in ks:
-        grp = members[:k]
+    def measure(group):
+        """Lit minus the SAME pixels at leak_ref_bitval -- section 6, never blanked."""
         states = {}
         for state, bv in (("lit", cfg.bitvals[0]), ("off", cfg.leak_ref_bitval)):
-            smile.set_pixels(grp, bv)
+            smile.set_pixels(group, bv)
             time.sleep(args.cluster_settle_s)
             states[state] = [m.acquire_point(pm, smu, args.cluster_n_smu,
                                              args.cluster_n_pm)
                              for _ in range(args.cluster_reps)]
         p = np.array([r[0] for r in states["lit"]]) - np.array([r[0] for r in states["off"]])
         i = np.array([r[4] for r in states["lit"]]) - np.array([r[4] for r in states["off"]])
+        return p, i, states
+
+    # Each member alone, before any group. Same protocol and same rep count, so the
+    # single scatter and the pooled scatter are the same quantity.
+    singles = {}
+    for t in members[:max(ks)]:
+        p1, i1, _ = measure([t])
+        singles[t] = (float(p1.mean()), float(abs(i1).mean()),
+                      float(p1.std(ddof=1)) if p1.size > 1 else float("nan"))
+    sp = [v[0] for v in singles.values()]
+    spread = float(np.std(sp, ddof=1) / np.mean(sp)) if len(sp) > 1 and np.mean(sp) else float("nan")
+    log(f"    {len(singles)} member(s) alone: P {np.mean(sp)*1e12:.1f} pW "
+        f"+-{100*spread:.1f}% member-to-member")
+
+    rows = []
+    base = None
+    for k in ks:
+        grp = members[:k]
+        p, i, states = measure(grp)
+        p_sing = sum(singles[t][0] for t in grp)
+        i_sing = sum(singles[t][1] for t in grp)
+        sd_pred = math.sqrt(sum(singles[t][2] ** 2 for t in grp))
         p_m, i_m = float(p.mean()), float(abs(i).mean())
         p_sd = float(p.std(ddof=1)) if p.size > 1 else float("nan")
         rel = abs(p_sd / p_m) if p_m else float("nan")
@@ -1293,6 +1328,13 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
                          # the verdict column: flat across K means meter noise
                          rel_scatter_x_sqrt_k=rel * math.sqrt(k),
                          p_per_pixel_W=p_m / k,
+                         # the additivity block: pooled against the members' own singles
+                         p_sum_singles_W=p_sing, i_sum_singles_A=i_sing,
+                         additivity_p=p_m / p_sing if p_sing else float("nan"),
+                         additivity_i=i_m / i_sing if i_sing else float("nan"),
+                         p_sd_pred_W=sd_pred,
+                         scatter_vs_pred=p_sd / sd_pred if sd_pred else float("nan"),
+                         singles_rel_spread=spread,
                          i_led_A=i_m, i_led_sd_A=float(abs(i).std(ddof=1)) if i.size > 1 else float("nan"),
                          i_per_pixel_A=i_m / k, j_per_pixel=to_j(i_m / k, cfg),
                          p_lit_W=float(np.mean([r[0] for r in states["lit"]])),
@@ -1308,7 +1350,9 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
         log(f"    K={k:>3}: P {p_m*1e12:9.1f} pW +-{p_sd*1e12:7.1f}  "
             f"({100*rel:5.2f}% scatter, x sqrt(K) = {100*rel*math.sqrt(k):5.2f}%)  "
             f"I {i_m*1e9:8.1f} nA  J/px {to_j(i_m/k, cfg):6.3f}"
-            + (f"  EQE {100*rows[-1]['pooled_eqe']:6.3f}%" if ok else "  << NON-PHYSICAL"))
+            + (f"  EQE {100*rows[-1]['pooled_eqe']:6.3f}%" if ok else "  << NON-PHYSICAL")
+            + f"  add {rows[-1]['additivity_p']:5.3f}"
+            + f"  sd/pred {rows[-1]['scatter_vs_pred']:5.2f}")
     smile.blank_frame()
 
     if len(rows) > 1:
@@ -1320,6 +1364,11 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
             + ("METER NOISE, a cluster buys a cleaner faint end"
                if gain >= 0.7 * ideal else
                "NOT meter noise, the scatter is the array"))
+        add = last["additivity_p"]
+        if np.isfinite(add) and abs(add - 1) > 0.03:
+            log(f"    !! K={last['k']} emits {100*add:.1f}% of its members' own sum. "
+                f"The pool is NOT the sum of its parts, so pooled EQE is not the "
+                f"members' EQE. Suspect supply droop at {args.cluster_v:+.2f} V.")
         if args.simulate:
             log("    (the sim rig has no additive optical floor -- its PM noise is "
                 "purely relative, so it CANNOT average down. Ignore this verdict.)")

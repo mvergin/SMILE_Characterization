@@ -1501,10 +1501,34 @@ def test_the_console_only_sends_what_the_operator_changed():
         assert want in argv, f"{want} missing from {argv}"
 
 
+def test_no_block_ever_straddles_the_quadrant_boundary():
+    """The pixel-enable bits are per quadrant and live in the FRAME instruction.
+
+    A block spanning x=256 therefore mixes two quadrants' row drivers into one block
+    median, and a pooled group drawn from it would light the near quadrant's mirror
+    image instead of the far member. linspace over the whole ROI did straddle it: at
+    block_size=102 the edges fell on 0, 102.4, 204.8, 307.2, 409.6, 512, so 9 of 25
+    blocks crossed.
+    """
+    for lo, hi, bs in ((0, 511, 52), (0, 511, 102), (0, 511, 8), (0, 15, 8),
+                       (32, 63, 8), (0, 255, 102), (256, 511, 102), (200, 300, 20)):
+        e = acquire.block_edges(lo, hi, bs)
+        assert e[0] == lo and e[-1] == hi + 1, f"{lo}..{hi} bs={bs}: {e} misses the ROI"
+        assert all(a < b for a, b in zip(e, e[1:])), f"{e} is not increasing"
+        assert not any(a < 256 < b for a, b in zip(e, e[1:])), f"{e} crosses 256"
+    # and every selected pixel's block really is inside one quadrant
+    alive = [{"X": x, "Y": y} for x in range(0, 512, 2) for y in range(0, 512, 2)]
+    cfg = IQEConfig(roi=(0, 0, 511, 511), sweep_select="blocks", block_size=102,
+                    pixels_per_block=1).validate()
+    xe = acquire.block_edges(0, 511, 102)
+    assert len(xe) - 1 == 6, f"102 px blocks over 512 should give 6 per axis, got {len(xe)-1}"
+    assert len(acquire.select_sweep_pixels(alive, cfg, QUIET)) == 36
+
+
 def test_the_console_presets_describe_runs_that_actually_happen():
     """Each preset must name the number of targets it really produces.
 
-    A preset labelled "25 singles + 50 pooled" that yields 16 and 25 is worse than no
+    A preset labelled "36 singles + 50 pooled" that yields 16 and 25 is worse than no
     preset: the operator reads the label, not the selection log.
     """
     from measure_iqe.gui import PRESETS
@@ -1515,10 +1539,10 @@ def test_the_console_presets_describe_runs_that_actually_happen():
         IQEConfig(**over).validate()
 
     alive = [{"X": x, "Y": y} for x in range(512) for y in range(512)]
-    cfg = IQEConfig(**PRESETS["Full array, 25 singles + 50 pooled"]).validate()
+    cfg = IQEConfig(**PRESETS["Full array, 36 singles + 50 pooled"]).validate()
     singles = acquire.select_sweep_pixels(alive, cfg, QUIET)
     groups = acquire.select_pool_clusters(alive, singles, cfg, QUIET)
-    assert len(singles) == 25, f"preset says 25 singles, got {len(singles)}"
+    assert len(singles) == 36, f"preset says 36 singles, got {len(singles)}"
     assert len(groups) == 50, f"preset says 50 pooled groups, got {len(groups)}"
     # and the two draws must not overlap, or the grounding comparison is circular
     s_set = {(r["X"], r["Y"]) for r in singles}

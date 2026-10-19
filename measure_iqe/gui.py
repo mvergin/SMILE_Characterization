@@ -79,9 +79,11 @@ PRESETS: dict[str, dict] = {
     "Full array, 100 singles": dict(
         roi="FULL", sweep_select="blocks", block_size=52, pixels_per_block=1,
         pool_clusters=0, sweep_order="bias_major"),
-    # 25 and not 20: the block grid is square, so round(512/102)=5 gives 5x5 blocks
-    # at one single each. 20 is not a square number and the sampler cannot make one.
-    "Full array, 25 singles + 50 pooled": dict(
+    # 36 and not 20: the block grid is square AND never crosses the quadrant edge at
+    # 256, so each 256 px half takes round(256/102)=3 blocks and the axis takes 6.
+    # 6x6 blocks at one single each is 36. 20 is not reachable -- the count is always
+    # (2*round(256/block_size))^2.
+    "Full array, 36 singles + 50 pooled": dict(
         roi="FULL", sweep_select="blocks", block_size=102, pixels_per_block=1,
         pool_clusters=50, pool_size=4, sweep_order="bias_major"),
     "Full array, 1000 singles": dict(

@@ -281,8 +281,14 @@ def test_the_cluster_reference_pools_and_is_never_a_blank_frame():
     rows, frames = _cluster_run([1, 4])
     lit = [f for f in frames if f[0] == "many" and f[2] != 0]
     off = [f for f in frames if f[0] == "many" and f[2] == 0]
-    assert len(off) == len(rows), f"expected one reference frame per K, got {len(off)}"
-    # lit[0] is the charge frame before the first K, so pair from lit[1:]
+    # lit[0] is the charge frame before the first measurement, so pair from lit[1:].
+    # Every lit frame after it -- the per-member singles as well as the groups -- owes
+    # a reference frame over exactly the same pixels.
+    assert len(lit) - 1 == len(off), (
+        f"{len(lit)-1} lit frame(s) but {len(off)} reference frame(s)")
+    assert len(off) > len(rows), (
+        "the per-member singles did not run: without them an additivity loss cannot "
+        "be told apart from pixel-to-pixel variation")
     for (_t, members, _b), (_t2, ref, _b2) in zip(lit[1:], off):
         assert members == ref, f"the reference lit {ref}, the measurement lit {members}"
     assert not [f for f in frames[:-1] if f[0] == "blank"], (

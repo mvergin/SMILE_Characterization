@@ -154,6 +154,35 @@ def _fps_pick(rows, k, start_idx, avoid=None, min_sep=0):
     return [rows[i] for i in chosen]
 
 
+QUADRANT_EDGE = 256          # the 512x512 array is four mirrored 256x256 quadrants
+
+
+def block_edges(lo: int, hi: int, bs: int) -> np.ndarray:
+    """Block edges over [lo, hi] that never straddle the quadrant boundary.
+
+    ``linspace`` over the whole ROI does straddle it. At the full array with
+    ``block_size=102`` the edges land on 0, 102.4, 204.8, 307.2, 409.6, 512, so the
+    middle block spans 204.8-307.2 and crosses 256 on both axes -- 9 of 25 blocks mix
+    two quadrants. That was wrong before pooling existed, for two reasons:
+
+      * the ``tl_pixen``/``tr_pixen``/... enables live in the FRAME instruction, not in
+        the pixel data, so a pooled group drawn from such a block lights the near
+        quadrant's mirror image instead of the far member;
+      * even for single pixels, a block median over two quadrants averages two
+        different sets of row drivers, which is the structure section 16 is measuring.
+
+    Tiling each side of the boundary separately removes the case and keeps
+    ``block_size`` a free knob. The block COUNT changes when ``block_size`` does not
+    divide 256 evenly -- 102 px gives 6 blocks per axis, not 5 -- which is the
+    correction, not a regression.
+    """
+    parts = ([(lo, hi)] if not (lo < QUADRANT_EDGE <= hi)
+             else [(lo, QUADRANT_EDGE - 1), (QUADRANT_EDGE, hi)])
+    out = [np.linspace(a, b + 1, max(1, int(round((b - a + 1) / bs))) + 1)
+           for a, b in parts]
+    return np.unique(np.concatenate(out))
+
+
 def select_sweep_pixels(alive: list[Row], cfg: IQEConfig, log: Logger) -> list[Row]:
     """Pick which alive pixels get the full IQE sweep — see SWEEP_SELECT."""
     if not alive:
@@ -166,10 +195,9 @@ def select_sweep_pixels(alive: list[Row], cfg: IQEConfig, log: Logger) -> list[R
     if cfg.sweep_select == "blocks":
         x1, y1, x2, y2 = cfg.resolve_roi()
         xlo, xhi, ylo, yhi = min(x1, x2), max(x1, x2), min(y1, y2), max(y1, y2)
-        nbx = max(1, int(round((xhi - xlo + 1) / cfg.block_size)))
-        nby = max(1, int(round((yhi - ylo + 1) / cfg.block_size)))
-        xe = np.linspace(xlo, xhi + 1, nbx + 1)
-        ye = np.linspace(ylo, yhi + 1, nby + 1)
+        xe = block_edges(xlo, xhi, cfg.block_size)
+        ye = block_edges(ylo, yhi, cfg.block_size)
+        nbx, nby = len(xe) - 1, len(ye) - 1
         rng = np.random.default_rng(cfg.block_seed)
         picks = []                                     # one list of K pixels per non-empty block
         taken: list[tuple[int, int]] = []              # every pixel chosen so far, ALL blocks
@@ -657,6 +685,17 @@ def configure_common(pm, smu, cfg: IQEConfig, log: Logger) -> None:
     pm.set_averaging(cfg.pm_averaging)
     if hasattr(pm, "inst"):
         pm.inst.write("INP:FILT 0")            # fast response (no low-pass settling)
+        # pm_range is a REQUEST: SENS:POW:RANG picks the smallest hardware range whose
+        # full scale covers it, so the realised scale is not cfg.pm_range. Measured on
+        # 261016-2252: single pixels read up to 257 nW with pm_range=1e-7 and no sign of
+        # clipping. Nothing recorded which range that was, so a pooled target had no way
+        # to know its headroom. Log it.
+        try:
+            got = float(pm.inst.query("SENS:POW:RANG?"))
+            log(f"  PM400 range {got*1e9:.0f} nW (autorange off, requested "
+                f"{cfg.pm_range*1e9:.0f} nW)")
+        except Exception as e:                 # a query failure must not end a 30 h run
+            log(f"  PM400 range query failed ({e}); headroom unknown")
     smu.configure_channel("a", cfg.vled_compliance, cfg.sweep_nplc, False, zero_delays=True,
                           range_i=cfg.vled_range_i)
     # ch B starts as a voltage source — the fast scan voltage-drives it. The
@@ -826,6 +865,7 @@ class _SimSMU:
         self._mode = "voltage"
         self._va = self._cfg.vled_voltage
         self._pixel_gain = 1.0
+        self._n_lit = 1           # pixels lit by the current frame -- see _SimPM.measure
         self._bit_scale = 1.0
         self._on = True
         self._rng = np.random.default_rng(0)
@@ -898,7 +938,11 @@ class _SimPM:
         I = s._led_current()
         if not s._on or I <= 0:
             return abs(self._rng.normal(0, 2e-12))
-        J = I / (self._cfg.pixel_area_um2 * 1e-8)
+        # Over the LIT area, not one pixel's. K pixels at the same bias each sit at
+        # the same J; dividing K x the current by one pixel's area put them K x up the
+        # ABC droop curve and made a pooled target emit less than its members' sum.
+        # The new additivity_p column in --what cluster is what caught it.
+        J = I / (getattr(s, "_n_lit", 1) * self._cfg.pixel_area_um2 * 1e-8)
         roots = np.roots([s.C, s.B, s.A, -J / (Q_E * 10e-7)])
         real = [r.real for r in roots if abs(r.imag) < 1e-6 * (abs(r.real) + 1e-30) and r.real > 0]
         if not real:
@@ -921,6 +965,7 @@ class _SimSmile:
     def set_pixel(self, x, y, bit):
         self._smu._on = True
         self._smu._pixel_gain = self._gain(x, y)
+        self._smu._n_lit = 1
         self._smu._bit_scale = max(1, int(bit)) / 15.0
         return time.perf_counter()
 
@@ -935,6 +980,7 @@ class _SimSmile:
             raise ValueError("coords is empty")
         self._smu._on = True
         self._smu._pixel_gain = sum(self._gain(x, y) for x, y in coords)
+        self._smu._n_lit = len(coords)
         self._smu._bit_scale = max(1, int(bit)) / 15.0
         return time.perf_counter()
 
@@ -1078,8 +1124,8 @@ def select_pool_clusters(alive: list[Row], singles: list[Row], cfg: IQEConfig,
     # -- deriving it from pool_clusters alone ignored the block count and came up
     # short by exactly that factor.
     x1, y1, x2, y2 = cfg.resolve_roi()
-    nblocks = (max(1, round((abs(x2 - x1) + 1) / cfg.block_size))
-               * max(1, round((abs(y2 - y1) + 1) / cfg.block_size)))
+    nblocks = ((len(block_edges(min(x1, x2), max(x1, x2), cfg.block_size)) - 1)
+               * (len(block_edges(min(y1, y2), max(y1, y2), cfg.block_size)) - 1))
     # +1 block's worth of slack: the quadrant chunking below drops the remainder of
     # each quadrant's list, so asking for exactly `want` reliably yields fewer groups.
     per_block = max(1, -(-want // nblocks) + 1)
