@@ -298,6 +298,50 @@ Still open, and deliberately not built: the pooled path is **not** wired into
 `measure_iqe`'s sweep. That is only worth doing if the bench run says the scatter
 falls, and the run is the cheap half.
 
+### Done, 19 October 2026 — the 1/K gain holds in a production sweep
+
+Run **261019-2229**, the one that closes the pooling work: a 64x64 ROI,
+`pool_groups=[4,8]`, stopped at -1.1 V, 33 minutes. Sixteen targets -- 8 singles, 4
+groups of four, 4 groups of eight -- and the first mixed-K run of any kind.
+
+Within-burst optical noise, by K:
+
+| bias | K=1 | K=4 | K=8 | rel K=1 | K=4 | K=8 |
+|---|---|---|---|---|---|---|
+| -1.1000 V | 19.155 nW / 13.3 pW | 73.261 / 12.9 | 158.438 / 15.5 | 0.07 % | 0.02 % | 0.01 % |
+| -0.8429 V | 0.770 / 13.5 | 3.129 / 13.0 | 6.516 / 13.9 | 1.75 % | 0.42 % | 0.21 % |
+| -0.8000 V | 0.235 / 14.4 | 0.941 / 13.9 | 1.943 / 12.7 | **6.15 %** | **1.48 %** | **0.66 %** |
+
+**The absolute noise is flat at 14.1 / 13.6 / 14.5 pW** while the signal grows 8x. At
+the faint end the relative noise falls 6.15 % -> 1.48 % -> 0.66 %: **4.16x at K=4 and
+9.32x at K=8**, against the 4 and 8 that pure 1/K predicts.
+
+Everything before this came from `--what cluster`, which lights one group at a time at
+one bias with no reference subtraction, no ramp and no measurement ordering. This is
+the same result **inside a real sweep**, and it agrees.
+
+Structurally clean: eight distinct biases with none past the stop, nothing clamped,
+every group inside one block, one of each size per block, and `analyze_array` read it
+unchanged -- "128 points, 128 reliable, 8 of the 16 are POOLED targets covering 48
+pixels". Two different POOL_K values in one file needed no format work.
+
+Both of the previous entry's fixes show in the log. The ramp reports "uniform 8 pts
+-0.8 to -1.1 V -- vramp_knee_v=-1.3 is OUTSIDE this ramp" and gives eight distinct
+biases instead of six with two duplicated. And no over-range warning fired: the
+bias-scaled estimate puts a K=8 group at ~154 nW against the 470 nW range, where the
+old fixed -2.60 V ratio would have predicted over 1 uW.
+
+The paired comparison, now at two sizes: per-member power is +2.9 % (K=4) and +2.1 %
+(K=8) against the shared single, and EQE is **+8.2 % and -1.9 %**. The EQE differences
+have **opposite signs**, so this is member variation and not a pooling artifact -- with
+a ~14 % member spread, one pixel sitting 8 % off its block's current-weighted mean is
+unremarkable. That is exactly why a pooled run is only interpretable beside singles.
+
+**What is left is one piece of engineering.** `pool_pm_range` is a single range per
+run. A per-segment switch is measured safe (gain agrees to 0.150 %, the 1154 pW offset
+cancels), and building it is what lets a pooled sweep reach the bright end. Everything
+else about pooling is measured, on hardware, in a production sweep.
+
 ### Done, 19 October 2026 — the range belongs to the segment, and the group's "settling" is drift
 
 Two runs closed two open questions and reopened one as a design decision.
