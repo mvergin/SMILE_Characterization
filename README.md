@@ -731,9 +731,32 @@ was taken on and the two differ 5.45× in floor.
 instead of once per bias, and refused if `pool_pm_range` is not coarser than
 `pm_range` — switching to a *finer* range at the bright end is backwards.
 
-**Every run verifies the switch.** Before the sweep, `pm_range_check_targets`
-pooled targets are read at the boundary bias on **both** ranges, and the run says
-whether the gains agree:
+**Every run verifies the switch, twice.** The real verification happens *inside* the
+sweep: at the grid point closest to the threshold, **every** pooled target is
+measured a second time on the other range, through the same dwell, NPLC and
+reference the sweep itself uses, so the two readings differ in nothing but the range.
+
+```
+range boundary: -1.820 V is the first bias past -1.60 V.
+  Every pooled target will be measured there on BOTH ranges.
+  range cross-check at -1.820 V: re-measuring 64 pooled target(s) on 100 nW
+    (they were on 1000 nW). Same dwell, same reference.
+  coarse/fine = 1.0012 over 64 target(s) at a REAL sweep point, spread 0.21 %
+  consistent with no step, measured on the sweep's own grid.
+```
+
+It picks the **least negative** bias past the threshold, not the deepest, and that
+is not a detail: the fine range has to still hold a pooled target there or the
+re-read is over-range and the comparison measures nothing. At K = 4 a group reads
+444 nW at −1.82 V against the 470 nW the fine range realises — it fits with 6 % to
+spare — and 586 nW at −2.6 V, which does not. The run checks the brightest target it
+actually measured and skips with an explanation rather than producing a meaningless
+number. **So set `pool_pm_range_below_v` where a pooled target still fits the fine
+range**, or you keep the switch and lose the verification.
+
+Before the sweep there is also a cheaper pre-flight check on
+`pm_range_check_targets` targets at the threshold bias itself, whose only job is to
+catch a gross failure before committing hours:
 
 ```
 PM400 range cross-check: 8 pooled target(s) at the boundary -1.60 V on both

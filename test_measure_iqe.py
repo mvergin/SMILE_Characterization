@@ -1592,6 +1592,38 @@ def test_the_screen_rescans_what_it_flags_and_says_what_it_skipped():
     assert "screened estimate(s)" in text
 
 
+def test_the_range_cross_check_picks_a_bias_the_fine_range_can_still_hold():
+    """The LEAST negative bias past the threshold, not the deepest.
+
+    The whole reason the switch exists is that the fine range cannot hold a pooled
+    target at the bright end, so re-reading one there is over-range and the
+    comparison measures nothing. At K=4 on the measured array a group reads 444 nW
+    at -1.82 V against the 470 nW the fine range realises, and 586 nW at -2.6 V,
+    which does not fit. Picking the deepest bias would have verified nothing.
+    """
+    base = dict(sweep_select='blocks', pool_groups=(4,), pool_pm_range=1e-6,
+                pool_pm_range_below_v=-1.6, sweep_order='bias_major')
+
+    def boundary(**over):
+        cfg = IQEConfig(**{**base, **over}).validate()
+        fine = acquire.build_fine_voltages(None, None, cfg, QUIET)
+        return acquire.range_boundary_bias(fine, cfg), [v for v, _ in fine]
+
+    b, V = boundary(n_fine=16, nvled_v_coarse_stop=-2.6)
+    past = [v for v in V if v <= -1.6]
+    assert b == max(past) == -1.82, (b, sorted(past))
+    assert b in V, 'the cross-check bias must be a REAL sweep point'
+    assert b > min(V), 'it must not be the deepest bias, where the fine range fails'
+
+    # a sweep that never passes the threshold has nothing to cross-check
+    b, _ = boundary(n_fine=16, nvled_v_coarse_stop=-1.55)
+    assert b is None, b
+
+    # and with the switch off there is no boundary at all
+    off = IQEConfig(n_fine=16).validate()
+    assert acquire.range_boundary_bias(
+        acquire.build_fine_voltages(None, None, off, QUIET), off) is None
+
 def test_the_pm_range_switches_only_for_pooled_targets_past_the_boundary():
     """The fine range is required where pooling pays; the coarse one only past it.
 

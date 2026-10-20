@@ -1994,9 +1994,116 @@ def completed_biases(run_dir: str | Path) -> set[float]:
     return {v for v, px in rows.items() if len(px) == full}
 
 
+def range_boundary_bias(fine, cfg: IQEConfig) -> float | None:
+    """The sweep bias to cross-check the PM400 range at, or None.
+
+    The LEAST negative bias past the threshold, not the deepest. Two reasons, and the
+    second is the one that bites: it is adjacent to the last fine-range point, so the
+    comparison is tightest; and the fine range has to still hold a pooled target there
+    or the re-read is over-range and measures nothing. At K=4 on the measured array a
+    group reads 444 nW at -1.82 V against the 470 nW the fine range realises, and
+    586 nW at -2.6 V, which does not fit.
+    """
+    if cfg.pool_pm_range_below_v is None:
+        return None
+    past = [v for v, _ in fine if v <= cfg.pool_pm_range_below_v]
+    return max(past) if past else None
+
+
+def pm_range_dual_pass(pm, smu, smile, live, bitval, v, limit, n_pm, n_smu,
+                       rows: list[Row], cfg: IQEConfig, t0: float,
+                       log: Logger) -> list[Row]:
+    """Re-measure this bias's pooled targets on the OTHER PM400 range.
+
+    Called once, at the first sweep bias past ``pool_pm_range_below_v``, from inside
+    bias_major -- so the bias is already settled and the dwell is already paid. Each
+    target costs a frame switch, a reference and a burst, the same as its first reading.
+
+    Returns rows tagged with the range they were taken on. They are NOT added to the
+    sweep, because two rows for one (target, bias) would break every groupby in the
+    analysis; they go to pm_range_check.csv beside the pre-flight pair.
+    """
+    pooled = [(x, y) for (x, y) in live if len(pool_members(x, y)) > 1]
+    if not pooled:
+        return []
+    other = cfg.pm_range          # the pooled targets just used pool_pm_range here
+    first = {(int(r["X"]), int(r["Y"])): r for r in rows}
+    # The whole point of the switch is that the fine range cannot hold a pooled target
+    # at the bright end -- so re-reading it there would be over-range, and comparing an
+    # over-range reading against an on-scale one measures nothing. The brightest target
+    # just measured at THIS bias is the exact test, no estimate needed.
+    realised = (_pm_range_realised[0]
+                or (PM_RANGE_REALISED_DEFAULT if other == 1e-7 else other))
+    worst = max((abs(first[k]["PM400_POWER_MEAN"]) for k in first
+                 if len(pool_members(*k)) > 1), default=0.0)
+    if worst > 0.95 * realised:
+        log(f"      range cross-check SKIPPED at {v:+.3f} V: the brightest pooled "
+            f"target reads {worst*1e9:.0f} nW, over 95 % of the {realised*1e9:.0f} nW "
+            f"the fine range realises, so re-reading it there would be over-range and "
+            f"the comparison would measure nothing. Move pool_pm_range_below_v to a "
+            f"bias where a pooled target still fits the fine range -- at K=4 that is "
+            f"about -1.6 V (section 26.18).")
+        return []
+    log(f"      range cross-check at {v:+.3f} V: re-measuring {len(pooled)} pooled "
+        f"target(s) on {other*1e9:.0f} nW (they were on "
+        f"{cfg.pool_pm_range*1e9:.0f} nW). Same dwell, same reference.")
+    out: list[Row] = []
+    for (x, y) in pooled:
+        if parked():
+            break
+        smile.blank_frame()
+        light(smile, x, y, bitval)
+        time.sleep(cfg.pixel_switch_settle_s * cfg.settle_scale)
+        # pm_range_for() would hand back the coarse range here, so force the other one
+        # and let measure_point's own flush deal with the change.
+        _, ch = set_pm_range(pm, other, log=log)
+        if ch:
+            flush_pm_after_range(pm, smu, n_smu, n_pm, cfg)
+        row, _ = measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
+                               dataclasses.replace(cfg, pool_pm_range_below_v=None),
+                               t0, log, restore=False)
+        row["PM_RANGE_W"] = other
+        out.append({k: row.get(k, "") for k in PM_CHECK_COLS})
+    # paired, same target, same bias, same everything but the range
+    d = []
+    for r in out:
+        f = first.get((int(r["X"]), int(r["Y"])))
+        if f is None or not f["PM400_POWER_MEAN"] or not r["PM400_POWER_MEAN"]:
+            continue
+        if (r["PM400_POWER_MEAN"] <= 0 or f["PM400_POWER_MEAN"] <= 0
+                or abs(r["PM400_POWER_STD"]) > 0.02 * abs(r["PM400_POWER_MEAN"])
+                or abs(f["PM400_POWER_STD"]) > 0.02 * abs(f["PM400_POWER_MEAN"])):
+            continue            # a bad read, not a range step -- see 26.20
+        d.append(abs(f["PM400_POWER_MEAN"]) / abs(r["PM400_POWER_MEAN"]) - 1.0)
+    if not d:
+        log(f"      !! every pair was unusable, so this bias did NOT verify the switch.")
+        return out
+    m = float(np.median(d))
+    sd = float(np.std(d, ddof=1)) if len(d) > 1 else float("nan")
+    sem = sd / math.sqrt(len(d)) if len(d) > 1 else float("nan")
+    sig = abs(m) / sem if sem and sem > 0 else float("nan")
+    log(f"      coarse/fine = {1+m:.4f} ({100*m:+.3f} %) over {len(d)} target(s) at a "
+        f"REAL sweep point, spread {100*sd:.3f} %"
+        + (f", {sig:.1f} sigma on the mean" if np.isfinite(sig) else ""))
+    if np.isfinite(sd) and sd > 0.02:
+        log(f"      !! spread {100*sd:.1f} % -- this cannot resolve a step, so the "
+            f"small mean means nothing. Something is wrong with the readings.")
+    elif abs(m) > 0.01:
+        log(f"      !! THE RANGES DISAGREE BY {100*m:+.2f} % at a real sweep point, "
+            f"over the 1 % this switch assumes. Every pooled point at or below "
+            f"{v:+.3f} V carries it as a step the analysis cannot see.")
+    elif np.isfinite(sig) and sig >= 3.0:
+        log(f"      a real but small step, {100*m:+.3f} % at {sig:.1f} sigma. Under "
+            f"1 %, so the switch stands -- put it in any budget spanning the two "
+            f"segments.")
+    else:
+        log(f"      consistent with no step, measured on the sweep's own grid.")
+    return out
+
+
 def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWriter",
                       settle_traces: list, cfg: IQEConfig, log: Logger,
-                      t0: float) -> int:
+                      t0: float, run_dir: Path | None = None) -> int:
     """Walk the biases on the outside and the pixels on the inside.
 
     The dwell belongs to the bias, not to the pixel (see `IQEConfig.sweep_order`), so
@@ -2064,6 +2171,19 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
     n_dead = 0
     cur_nplc = cur_range = None      # cur_limit is set by the preconditioning block
     i_last = None
+    # The first sweep bias at or below the threshold -- the one whose pooled targets
+    # switched range. None when the switch is off or no grid point is past it.
+    dual_rows: list[Row] = []
+    boundary_v = range_boundary_bias(fine, cfg)
+    if cfg.pool_pm_range_below_v is not None:
+        if boundary_v is None:
+            log(f"  no sweep bias reaches {cfg.pool_pm_range_below_v:+.2f} V, so the "
+                f"range never switches and there is nothing to cross-check.")
+        else:
+            log(f"  range boundary: {boundary_v:+.3f} V is the first bias past "
+                f"{cfg.pool_pm_range_below_v:+.2f} V. Every pooled target will be "
+                f"measured there on BOTH ranges.")
+
     for bitval in cfg.bitvals:
         for jpt, (v, _i_target) in enumerate(fine):
             if parked():
@@ -2167,6 +2287,14 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
                 log(f"      dead-skip: {len(dead_here)} pixel(s) below the live floor at "
                     f"the brightest bias - dropped from the remaining {len(fine) - 1} points")
 
+            # The boundary point on BOTH ranges, once per run, every pooled target.
+            # This is the verification the pre-flight check only approximates: a real
+            # sweep point, the sweep's own dwell and reference, and all the targets
+            # rather than eight. See pm_range_dual_pass.
+            if v == boundary_v:
+                dual_rows += pm_range_dual_pass(pm, smu, smile, live, bitval, v, limit,
+                                                n_pm, n_smu, rows, cfg, t0, log)
+
             # One dark reading per bias, with the frame blanked. pixel_major takes one
             # per pixel at whatever bias it stopped on; per bias is both cheaper and a
             # better match to what the analysis subtracts. It leaves the frame blanked,
@@ -2183,6 +2311,20 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
     smile.blank_frame()
     if n_dead:
         log(f"  dead-skipped {n_dead}/{len(selected)} selected pixels (fast-scan false-alive)")
+    if dual_rows and run_dir is not None:
+        # Appended to the pre-flight pair's file, with PM_RANGE_W and NVLED_V telling
+        # them apart: the pre-flight rows sit at pool_pm_range_below_v, these at the
+        # sweep grid point past it.
+        pfx = run_slug(cfg.sample_name, run_dir) + "_"
+        path = run_dir / "NVLEDSweep" / "Sweep" / f"{pfx}pm_range_check.csv"
+        prev = []
+        if path.exists():
+            import csv as _csv
+            with path.open() as f:
+                prev = [{k: (float(v) if v not in ("", None) else "")
+                         for k, v in r.items()} for r in _csv.DictReader(f)]
+        write_aggregated_one(path, prev + dual_rows, cols=PM_CHECK_COLS)
+        log(f"  wrote {len(dual_rows)} dual-range row(s) to {path.name}")
     return n_rows
 
 
@@ -2410,7 +2552,7 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
       if cfg.sweep_order == "bias_major":
         # Shares the writer, the trace list and the finally below; only the walk differs.
         return _sweep_bias_major(pm, smu, smile, selected, writer, settle_traces,
-                                 cfg, log, t0)
+                                 cfg, log, t0, run_dir)
       for i, r in enumerate(selected, 1):
         x, y = r["X"], r["Y"]
         if (int(x), int(y)) in skip:

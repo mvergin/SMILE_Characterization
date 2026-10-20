@@ -196,12 +196,19 @@ offset difference, so the VALUES are comparable -- only their uncertainty differ
 
 ### `NVLEDSweep/Sweep/<prefix>pm_range_check.csv`, with the same setting
 
-Two rows per checked target, the same pooled group read at the boundary bias on each
-range, with the columns `X, Y, POOL_K, NVLED_V, PM_RANGE_W, PM400_POWER_MEAN,
+Two rows per checked target, the same pooled group read on each range, with the columns `X, Y, POOL_K, NVLED_V, PM_RANGE_W, PM400_POWER_MEAN,
 PM400_POWER_STD, NVLED_CURR_MEAN, PM400_POWER_REF, NVLED_CURR_REF`. The ratio of the
 two `PM400_POWER_MEAN` values is the gain step across the boundary, and the run logs
 its median. It is a per-run verification of the +0.150 % measured once in 261019-1829
 and -1833.
+
+**Two groups of rows, told apart by `NVLED_V`.** The pre-flight pair sits at
+`pool_pm_range_below_v` itself, on `pm_range_check_targets` targets, measured before the
+sweep. The rows at the sweep **grid point** past the threshold are the real
+verification: every pooled target, inside the bias loop, with the sweep's own dwell,
+NPLC and reference. Use those. The grid-point rows are absent when the fine range could
+not hold a pooled target at that bias, in which case the run says so and the switch is
+unverified for that run.
 
 ### `FastScan/<prefix>screen_bitval=*.csv`, only when `fastscan_pool` is on
 
