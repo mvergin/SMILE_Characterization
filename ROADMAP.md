@@ -298,6 +298,48 @@ Still open, and deliberately not built: the pooled path is **not** wired into
 `measure_iqe`'s sweep. That is only worth doing if the bench run says the scatter
 falls, and the run is the cheap half.
 
+### Done, 20 October 2026 — overnight: 64 groups, 64 singles, pooled EQE unbiased to 0.6 %
+
+Run **261019-2342**, 7.5 hours: the full array, `block_size=64`, `pool_groups=[4]`,
+−0.8 to −1.55 V in 16 points. 2048 points over 128 targets -- 64 singles and 64
+block-local groups of four, covering 256 pixels -- and `analyze_array` reports
+**2048 of 2048 reliable**. Nothing clamped. The fast scan put the array at
+**261 168 of 262 144 alive, 99.628 %**.
+
+**The absolute noise is 15.1 pW at K=1 and 15.1 pW at K=4**, median over all sixteen
+biases, while the signal spans **0.19 to 80 nW -- a 420x range**. The relative gain runs
+3.46x to 4.07x at every bias, median 3.75x against the 4.0 that pure 1/K predicts.
+
+**Pooled EQE is unbiased.** 768 paired comparisons, each group against the single it
+shares a member with, at biases at or below -1.0 V:
+
+  per-member P vs shared single   0.979 +- 0.004   (spread 0.122)
+  EQE vs shared single            1.006 +- 0.003   (spread 0.072)
+
+EQE agrees to **0.6 %**, within 2 sigma of unity. The -1.9 % and +8.2 % reported
+yesterday came from four groups each; with sixty-four the spread collapses and the mean
+lands on one. The 2.1 % per-member power deficit is real at 5 sigma but small, and
+because EQE does not see it, it touches light and current equally -- this run cannot
+separate member variation from a small supply droop, and the bench additivity of
+0.974-1.002 brackets it either way.
+
+**The EQE peak reproduces on a different run and a different pixel set:** singles peak
+at -1.100 V and groups at -1.050 V, with -1.35 V at 93.1-93.2 % of peak. That is the
+same answer as the hundred-pixel run of 261015-0015, and the "within ~1 % across
+J = 8-30" claim stays withdrawn.
+
+**And the deliverable: a block-level EQE map of the whole array.** 64 blocks at the peak
+bias, spread 6.0 % against 9.1 % for the singles. The gradient is horizontal --
+correlation -0.46 with X against -0.02 with Y, the right half 5.2 % below the left.
+Section 16 measured a +3.7 % gradient without resolving its direction.
+
+**Two things the scale exposed.** The optical noise doubles at -1.3 V, 14.0 -> 27.5 pW,
+equally at both K: that is the knee where the sweep drops n_pm from 32 to 8 and NPLC
+from 2.0 to 1.0, so the droop side is measured at half the optical precision of the
+rising side. Nothing had quantified that. And the run stopped at -1.55 V only because
+`pool_pm_range` is one range per run -- the per-segment switch, measured safe, is what
+would let it reach -2.6 V.
+
 ### Done, 19 October 2026 — the 1/K gain holds in a production sweep
 
 Run **261019-2229**, the one that closes the pooling work: a 64x64 ROI,
