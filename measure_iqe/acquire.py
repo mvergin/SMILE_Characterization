@@ -1721,21 +1721,40 @@ def pm_range_for(x: int, y: int, v: float, cfg: IQEConfig) -> float:
     return cfg.pool_pm_range if len(pool_members(x, y)) > 1 else cfg.pm_range
 
 
-def set_pm_range(pm, want: float, log: Logger | None = None) -> float:
-    """Set the meter's range if it is not already there. Returns what it is now.
+def set_pm_range(pm, want: float, n_pm: int = 4, smu=None, n_smu: int = 2,
+                 log: Logger | None = None) -> tuple[float, bool]:
+    """Set the meter's range if it is not already there. Returns (range, changed).
 
     The REFERENCE must be read on the same range as the lit point, or the offset it
-    subtracts is the other range's -- 1154 pW apart, measured. measure_point() reads
-    both, so the range is set once at its top and nothing inside it changes the range.
+    subtracts is the other range's -- 1154 pW apart, measured. measure_point() sets the
+    range once at its top and nothing inside it changes the range.
+
+    **On a change, one burst is read and discarded.** Run 261020-0842 produced three
+    corrupt points in 2048 and every one was the first point after a range change: the
+    meter's internal averaging (pm_averaging=3) mixes samples from across the gain
+    switch, so the first burst carries pre-switch samples at the post-switch gain --
+    which came back NEGATIVE twice in the cross-check, with a burst std 300x normal. A
+    throwaway burst flushes the averager whatever its time constant is, where
+    pm_range_settle_s was a guess that turned out too short.
     """
     if _pm_range_now[0] == want:
-        return want
+        return want, False
     pm.set_range(want)
-    if log is not None and _pm_range_now[0]:
-        log(f"      PM400 range {_pm_range_now[0]*1e9:.0f} -> {want*1e9:.0f} nW "
-            f"(requested; the realised scale is coarser)")
-    _pm_range_now[0] = want
-    return want
+    prev, _pm_range_now[0] = _pm_range_now[0], want
+    if log is not None and prev:
+        log(f"      PM400 range {prev*1e9:.0f} -> {want*1e9:.0f} nW (requested); "
+            f"flushing one burst")
+    return want, True
+
+
+def flush_pm_after_range(pm, smu, n_smu: int, n_pm: int, cfg: IQEConfig) -> None:
+    """Settle, then read and discard one burst. See set_pm_range."""
+    if cfg.pm_range_settle_s:
+        time.sleep(cfg.pm_range_settle_s)
+    try:
+        acquire_point(pm, smu, max(1, n_smu), max(1, n_pm))
+    except Exception:
+        pass            # a throwaway read must never be what ends a 30 h run
 
 
 def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
@@ -1757,8 +1776,11 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
     # Before ANYTHING is read, including the reference: both must be on one range.
     # Only when the switch is configured -- an ordinary run must not gain an SCPI write
     # per point for a range that never moves.
-    rng = (set_pm_range(pm, pm_range_for(x, y, v, cfg))
-           if cfg.pool_pm_range_below_v is not None else cfg.pm_range)
+    rng = cfg.pm_range
+    if cfg.pool_pm_range_below_v is not None:
+        rng, changed = set_pm_range(pm, pm_range_for(x, y, v, cfg), log=log)
+        if changed:
+            flush_pm_after_range(pm, smu, n_smu, n_pm, cfg)
     raw_s = None
     if cfg.perpoint_range:
         # range from the ACTUAL current (probe-then-measure), not the coarse map
@@ -2201,8 +2223,8 @@ def pm_range_boundary_check(pm, smu, smile, selected: list[Row], run_dir: Path,
         light(smile, x, y, cfg.bitvals[0])
         time.sleep(cfg.vramp_highv_settle_s * cfg.settle_scale)
         for rng in (cfg.pm_range, cfg.pool_pm_range):
-            set_pm_range(pm, rng)
-            time.sleep(cfg.pm_range_settle_s)
+            # measure_point sets the range itself and flushes on a change, so the
+            # reading here goes through exactly the path the sweep uses.
             row, _ = measure_point(pm, smu, smile, x, y, cfg.bitvals[0], v, limit,
                                    cfg.vramp_highv_n_pm, cfg.vramp_highv_n_smu,
                                    cfg, t0, log)
@@ -2212,17 +2234,42 @@ def pm_range_boundary_check(pm, smu, smile, selected: list[Row], run_dir: Path,
     # fine vs coarse, paired per target
     fine = [r for r in rows if r["PM_RANGE_W"] == cfg.pm_range]
     coarse = [r for r in rows if r["PM_RANGE_W"] == cfg.pool_pm_range]
+    # Reject a reading before averaging it in. Run 261020-0842's cross-check averaged
+    # two NEGATIVE powers with a burst std 300x normal and reported "consistent with no
+    # step" off a 28.7 % spread, because it only ever tested the MEAN's significance.
+    pairs, junk = [], []
+    for f, c in zip(fine, coarse):
+        ok = all(abs(r["PM400_POWER_MEAN"]) > 0 and r["PM400_POWER_MEAN"] > 0
+                 and abs(r["PM400_POWER_STD"]) < 0.02 * abs(r["PM400_POWER_MEAN"])
+                 for r in (f, c))
+        (pairs if ok else junk).append((f, c))
+    if junk:
+        log(f"    !! {len(junk)} of {len(fine)} pair(s) REJECTED: a power at or below "
+            f"zero, or a burst std over 2 % of the reading. That is a bad read, not a "
+            f"range step, and averaging it in is how the first version of this check "
+            f"called a 28.7 % spread 'consistent with no step'.")
     d = [abs(c["PM400_POWER_MEAN"]) / abs(f["PM400_POWER_MEAN"]) - 1.0
-         for f, c in zip(fine, coarse) if f["PM400_POWER_MEAN"]]
-    if d:
+         for f, c in pairs]
+    if not d:
+        log(f"    !! EVERY pair was rejected, so this run has NOT verified the switch. "
+            f"Treat every pooled point below {v:+.2f} V as unverified, or set "
+            f"pool_pm_range_below_v=null.")
+    else:
         m = float(np.median(d))
         sd = float(np.std(d, ddof=1)) if len(d) > 1 else float("nan")
         sem = sd / math.sqrt(len(d)) if len(d) > 1 else float("nan")
         sig = abs(m) / sem if sem and sem > 0 else float("nan")
-        log(f"    coarse/fine = {1+m:.4f} ({100*m:+.3f} %) over {len(d)} target(s), "
-            f"spread {100*sd:.3f} %"
+        log(f"    coarse/fine = {1+m:.4f} ({100*m:+.3f} %) over {len(d)} usable "
+            f"target(s), spread {100*sd:.3f} %"
             + (f", {sig:.1f} sigma on the mean" if np.isfinite(sig) else ""))
-        if abs(m) > 0.01:
+        # A wide spread VETOES the verdict. It is not evidence of no step; it is
+        # evidence the measurement cannot see one.
+        if np.isfinite(sd) and sd > 0.02:
+            log(f"    !! the spread is {100*sd:.1f} %, far over the 1 % this switch "
+                f"assumes, so this check cannot resolve a step at all -- a small mean "
+                f"here means nothing. Something is wrong with the readings themselves. "
+                f"Raise pm_range_check_targets, or set pool_pm_range_below_v=null.")
+        elif abs(m) > 0.01:
             log(f"    !! THE TWO RANGES DISAGREE BY {100*m:+.2f} %, over the 1 % this "
                 f"switch assumes. Every pooled point below {v:+.2f} V carries that as "
                 f"a step the analysis cannot see. Set pool_pm_range_below_v=null and "
@@ -2329,7 +2376,13 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
     configure_voltage_source_b(smu, cfg, log)
     pm_range_boundary_check(pm, smu, smile, selected, run_dir, cfg, log,
                             time.perf_counter())
-    set_pm_range(pm, cfg.pm_range)      # leave it where an unpooled point expects it
+    if cfg.pool_pm_range_below_v is not None:
+        # leave it where an unpooled point expects it, and flush so the sweep's first
+        # point is not the throwaway
+        _, ch = set_pm_range(pm, cfg.pm_range)
+        if ch:
+            flush_pm_after_range(pm, smu, cfg.vramp_highv_n_smu,
+                                 cfg.vramp_highv_n_pm, cfg)
     sweep_dir = run_dir / "NVLEDSweep" / "Sweep"
     pfx = run_slug(cfg.sample_name, run_dir) + "_"
     (sweep_dir / "raw_data").mkdir(parents=True, exist_ok=True)
