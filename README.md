@@ -928,6 +928,15 @@ reading is right, and it is the likely cause of:
 python characterize_capacitance.py --what all --highc-both --sample-name Array42
 ```
 
+**Traces default to complete.** `--trace-points` is `0`, which keeps every sample;
+a positive value thins uniformly. It used to default to 4000 against a 6000-sample
+capture, so a third of each one was dropped to save about 5 MB on a worst-case run
+(648 captures: 16.3 MB at full resolution against 10.9 MB) — not a trade worth making
+when a decay exponent is the measurement. `--no-traces` turns saving off. Note that
+`--samples` is the knob that matters more: the default 6000 does not outlast a 240 s
+faint-end settle, so raise it (`--samples 20000`) when the record has to reach the
+asymptote.
+
 **`--sample-name` is required** unless `--simulate`. It names the output directory and goes into `run_config.json`. Before 20 October 2026 the tool had no such flag and recorded `cfg.sample_name`, the config default, whatever array was on the stage — so every older `*_CAPACITANCE` folder claims `Array42_IQE` and the file cannot tell you which ones are true. It now refuses rather than mislabels.
 
 ```bash

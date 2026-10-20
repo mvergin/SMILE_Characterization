@@ -375,9 +375,15 @@ class PowerTrace:
 
 
 def keep_trace(tag, t, ia, ib, n_max):
-    """Stash one trace for the run's traces.npz, and return its spectrum summary."""
+    """Stash one trace for the run's traces.npz, and return its spectrum summary.
+
+    ``n_max`` follows decimate_trace: 0 or negative means keep every sample. None means
+    saving is off (--no-traces). The two used to disagree -- decimate_trace read 0 as
+    "no thinning" while this read it as "do not save" -- so 0 did the opposite of what
+    the helper documented.
+    """
     spec = spectrum_summary(t, np.abs(ib))
-    if n_max and t.size:
+    if n_max is not None and t.size:
         td, ibd, k = decimate_trace(t, ib, n_max)
         _, iad, _ = decimate_trace(t, ia, n_max)
         _TRACES.append((tag, td.astype(np.float32), iad.astype(np.float32),
@@ -1701,10 +1707,18 @@ def build_parser():
     ap.add_argument("--samples", type=int, default=6000,
                     help="buffer samples per step. record_s in the CSV says how much time "
                          "that bought; raise it until the record outlasts the settling")
-    ap.add_argument("--trace-points", type=int, default=4000,
-                    help="raw I(t) samples kept per capture, written to traces.npz for "
-                         "plotting and spectra. Thinned UNIFORMLY so the frequency "
-                         "content survives; 0 disables trace saving")
+    ap.add_argument("--trace-points", type=int, default=0,
+                    help="cap on raw I(t) samples kept per capture, written to "
+                         "traces.npz for plotting and spectra. 0 (the default) keeps "
+                         "EVERY sample; a positive value thins UNIFORMLY so the "
+                         "frequency content survives. The old 4000 default silently "
+                         "dropped a third of each 6000-sample capture to save about "
+                         "5 MB on a worst-case run, which is not a trade worth making "
+                         "when a decay exponent is the measurement. Use --no-traces to "
+                         "turn saving off.")
+    ap.add_argument("--no-traces", action="store_true",
+                    help="do not write traces.npz at all. The summary CSVs are "
+                         "unaffected.")
     ap.add_argument("--chunk", type=int, default=2000,
                     help="samples per TSP burst. The buffer appends, so this only bounds "
                          "how long a single blocking VISA read lasts; lower it if a burst "
@@ -1869,6 +1883,12 @@ def main(argv=None):
         json.dumps({"config": cfg.to_dict(),
                     "args": {k: v for k, v in sorted(vars(args).items())}},
                    indent=2, default=str), encoding="utf-8")
+    if args.no_traces:
+        args.trace_points = None          # keep_trace skips; the CSVs are unaffected
+        log("--no-traces: traces.npz will not be written")
+    elif args.trace_points:
+        log(f"--trace-points {args.trace_points}: captures longer than that are thinned "
+            f"uniformly. The default of 0 keeps every sample.")
     if args.simulate:
         log("SIMULATION - plumbing only, the sim rig has no capacitance model.")
 
