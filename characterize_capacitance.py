@@ -81,6 +81,7 @@ import dataclasses
 import datetime
 import json
 import math
+import re
 import threading
 import time
 from pathlib import Path
@@ -1685,6 +1686,12 @@ def build_parser():
                     help="ch B limit used for the liveness check only. Kept healthy on "
                          "purpose: the limit is the charging current, so a low measurement "
                          "compliance makes every pixel read dead")
+    ap.add_argument("--sample-name", default=None,
+                    help="which array this is, e.g. Array38. It goes in the output "
+                         "directory name AND in run_config.json. Without it the "
+                         "recorded name is the config default, which is a different "
+                         "array -- so a cross-array comparison would label both runs "
+                         "the same. Required unless --simulate.")
     ap.add_argument("--out", default=None, help="output root (default: config base_dir)")
     ap.add_argument("--simulate", action="store_true",
                     help="plumbing only - the sim rig has no capacitance model")
@@ -1840,8 +1847,22 @@ def main(argv=None):
             + (" (this also selects the High-C measure range)" if args.highc or args.highc_both
                else ""))
 
+    if args.sample_name:
+        cfg = dataclasses.replace(cfg, sample_name=args.sample_name)
+    elif not args.simulate:
+        # Refuse rather than mislabel. Every bench run before 20 October 2026 carries
+        # the default name whatever array it was on, and there is no way to tell from
+        # the file which ones are right.
+        ap_err = (f"--sample-name is required: without it this run would be recorded as "
+                  f"{cfg.sample_name!r}, which is the config default and may not be the "
+                  f"array on the stage. Pass --sample-name Array38 (or whichever), or "
+                  f"--simulate if there is no hardware.")
+        log(f"config error: {ap_err}")
+        return 2
+
     root = Path(args.out) if args.out else Path(cfg.base_dir)
-    out_dir = root / f"{datetime.datetime.now():%y%m%d-%H%M}_CAPACITANCE"
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", cfg.sample_name).strip("-")
+    out_dir = root / f"{datetime.datetime.now():%y%m%d-%H%M}_{slug}_CAPACITANCE"
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"Output: {out_dir}")
     (out_dir / "run_config.json").write_text(

@@ -683,7 +683,7 @@ should look like.
 each one reading taken on the way to the settled reference:
 
 ```bash
-python characterize_capacitance.py --what cluster --highc --compliance 1e-5   --cluster-v -0.82 --cluster-k 16   --cluster-probe-s 0.05 0.1 0.2 0.5 1 2 3
+python characterize_capacitance.py --what cluster --highc --compliance 1e-5 \n  --sample-name Array42 --cluster-v -0.82 --cluster-k 16 \n  --cluster-probe-s 0.05 0.1 0.2 0.5 1 2 3
 ```
 
 That writes `cluster_settling.csv`, one row per (K, probe time) with the deviation in
@@ -925,9 +925,14 @@ reading is right, and it is the likely cause of:
   since 25 µC at ~1 µA is ~25 s and a high-current dwell settles the cap fast.
 
 ```bash
-python characterize_capacitance.py --what all --highc-both
-python characterize_capacitance.py --what optfloor          # 2 min, no pixels needed
-python characterize_capacitance.py --what cluster --highc --compliance 1e-5
+python characterize_capacitance.py --what all --highc-both --sample-name Array42
+```
+
+**`--sample-name` is required** unless `--simulate`. It names the output directory and goes into `run_config.json`. Before 20 October 2026 the tool had no such flag and recorded `cfg.sample_name`, the config default, whatever array was on the stage — so every older `*_CAPACITANCE` folder claims `Array42_IQE` and the file cannot tell you which ones are true. It now refuses rather than mislabels.
+
+```bash
+python characterize_capacitance.py --what optfloor --sample-name Array42   # 2 min, no pixels
+python characterize_capacitance.py --what cluster --highc --compliance 1e-5 --sample-name Array42
 ```
 
 **That C is the same everywhere is an assumption**, so every pixel-dependent
