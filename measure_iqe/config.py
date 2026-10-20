@@ -158,6 +158,35 @@ class IQEConfig:
                             # disjoint, which is the better independent sample but
                             # cannot separate those two. The single is never the
                             # group's FIRST member, so X,Y stays unique per row.
+    pool_pm_range_below_v: float | None = None
+                            # V. At or below this bias a POOLED target is read on
+                            # pool_pm_range instead of pm_range. None = one range for
+                            # the whole sweep, which is the default and what every run
+                            # before 20 October did.
+                            # Why it exists: the PM400 range is fixed (autorange off on
+                            # purpose) and the two ends of a pooled sweep want
+                            # different scales. MEASURED, runs 261019-1056/-1212: the
+                            # floor goes as range^0.74, so the coarse range costs 5.45x
+                            # at the faint end where pooling pays -- and MEASURED, runs
+                            # 261019-1829/-1833: the gain across the boundary agrees to
+                            # 0.150 % (0.56 sigma) and the 1154 pW dark offset cancels
+                            # in the lit-minus-off subtraction. So the fine range
+                            # belongs on the faint segment and the coarse one at the
+                            # bright end, with the switch at a FIXED bias rather than
+                            # wherever an autoranging meter decided.
+                            # Set it just above where the brightest group leaves the
+                            # fine range: at K=4 that is about -1.6 V (section 26.18).
+    pm_range_settle_s: float = 0.5
+                            # s after a PM400 range change before reading. The meter
+                            # switches a transimpedance gain, and nothing here has
+                            # measured how long that takes -- 0.5 s is a guess with
+                            # margin, and the cross-check below is what would show it
+                            # was too short (the two ranges would disagree).
+    pm_range_check_targets: int = 8
+                            # how many pooled targets are measured at the boundary bias
+                            # on BOTH ranges, to verify the 0.150 % in situ. 0 skips
+                            # it. Each one costs two extra points, so 8 is about two
+                            # minutes and the check is per run rather than per campaign.
     fastscan_pool: int = 0  # K for the fast-scan group-test SCREEN. 0 = off, and off
                             # is the default: the ordinary scan measures every pixel.
                             # With K > 1 the scan lights K pixels at a time, flags the
@@ -872,6 +901,32 @@ class IQEConfig:
                 raise ValueError(
                     f"fastscan_pool_detrend={self.fastscan_pool_detrend}; expected an "
                     f"odd window of at least 3 groups")
+        if self.pool_pm_range_below_v is not None:
+            if not self.pool_groups:
+                raise ValueError(
+                    "pool_pm_range_below_v without pool_groups: the switch is for "
+                    "pooled targets, and there are none.")
+            if not self.pool_pm_range:
+                raise ValueError(
+                    "pool_pm_range_below_v needs pool_pm_range: the threshold says "
+                    "WHERE to switch and pool_pm_range says WHAT to switch to.")
+            if self.pool_pm_range_below_v > 0:
+                raise ValueError(
+                    f"pool_pm_range_below_v={self.pool_pm_range_below_v}: this is a "
+                    f"bias in volts and the sweep is negative.")
+            if self.pool_pm_range <= self.pm_range:
+                raise ValueError(
+                    f"pool_pm_range={self.pool_pm_range:g} is not coarser than "
+                    f"pm_range={self.pm_range:g}. Switching to a finer range at the "
+                    f"BRIGHT end is backwards -- that is the end that over-ranges.")
+            if self.sweep_order != "bias_major":
+                raise ValueError(
+                    f"pool_pm_range_below_v with sweep_order={self.sweep_order!r}: the "
+                    f"range would change at every point instead of once per bias. Use "
+                    f"bias_major, where the bias is the outer loop.")
+        if self.pm_range_check_targets < 0:
+            raise ValueError(f"pm_range_check_targets={self.pm_range_check_targets}; "
+                             f"expected >= 0")
         if self.pool_pm_range and self.pool_pm_range <= 0:
             raise ValueError(f"pool_pm_range={self.pool_pm_range}; expected 0 (use "
                              f"pm_range) or a positive power in W")

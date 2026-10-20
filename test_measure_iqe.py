@@ -1592,6 +1592,56 @@ def test_the_screen_rescans_what_it_flags_and_says_what_it_skipped():
     assert "screened estimate(s)" in text
 
 
+def test_the_pm_range_switches_only_for_pooled_targets_past_the_boundary():
+    """The fine range is required where pooling pays; the coarse one only past it.
+
+    Measured: the optical floor goes as range^0.74, so a decade coarser range is
+    5.45x noisier (runs 261019-1056/-1212). A single pixel reaches 257 nW at -2.6 V
+    and never leaves the fine range, so switching for one is all cost. A K=4 group
+    reaches ~591 nW and must switch or over-range.
+    """
+    cfg = IQEConfig(sweep_select='blocks', pool_groups=(4,), pool_pm_range=1e-6,
+                    pool_pm_range_below_v=-1.6, sweep_order='bias_major').validate()
+    acquire._pool_members.clear()
+    acquire._pool_members[(5, 5)] = ((5, 5), (9, 9), (13, 13), (17, 17))
+    try:
+        for v, pooled, single in ((-0.8, 1e-7, 1e-7), (-1.5, 1e-7, 1e-7),
+                                  (-1.6, 1e-6, 1e-7), (-2.6, 1e-6, 1e-7)):
+            assert acquire.pm_range_for(5, 5, v, cfg) == pooled, v
+            assert acquire.pm_range_for(1, 1, v, cfg) == single, v
+        # the column appears only when the switch is on
+        assert 'PM_RANGE_W' in acquire.agg_cols(cfg)
+        assert 'PM_RANGE_W' not in acquire.agg_cols(IQEConfig().validate())
+        # ...and with the switch off the range is never written at all, so an
+        # ordinary run gains no SCPI traffic and measure_point still runs with no pm
+        off = IQEConfig(sweep_select='blocks', pool_groups=(4,)).validate()
+        assert acquire.pm_range_for(5, 5, -2.6, off) == off.pm_range
+    finally:
+        acquire._pool_members.clear()
+
+
+def test_the_pm_range_switch_is_refused_where_it_cannot_work():
+    """Three ways to ask for it that cannot mean what the operator wants."""
+    base = dict(sweep_select='blocks', pool_groups=(4,), pool_pm_range=1e-6,
+                pool_pm_range_below_v=-1.6, sweep_order='bias_major')
+    IQEConfig(**base).validate()        # the good one
+    for over, why in (
+            (dict(sweep_order='pixel_major'),
+             'the range would change at every point, not once per bias'),
+            (dict(pool_pm_range=1e-8),
+             'switching to a FINER range at the bright end is backwards'),
+            (dict(pool_groups=()),
+             'the switch is for pooled targets and there are none'),
+            (dict(pool_pm_range=0.0),
+             'a threshold with nothing to switch to'),
+            (dict(pool_pm_range_below_v=1.6),
+             'a positive bias when the sweep is negative')):
+        try:
+            IQEConfig(**{**base, **over}).validate()
+        except ValueError:
+            continue
+        raise AssertionError(f'validate() accepted {why}: {over}')
+
 def test_a_set_value_survives_a_shell_that_does_not_strip_quotes():
     """PowerShell and bash strip `roi='[0,0,63,63]'`. cmd.exe does not.
 

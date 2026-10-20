@@ -64,6 +64,33 @@ block_seed: 0   # blocks mode: RNG seed (vary across runs to sample new pixels)
 #
 # Pooled EQE = sum(P)/sum(I) is a CURRENT-WEIGHTED mean of the members, not the mean of
 # their EQEs. The two differ whenever brightness and current correlate across members.
+pool_pm_range_below_v: null
+                   # V. At or below this bias a POOLED target is read on
+                   # pool_pm_range instead of pm_range. null = one range for the whole
+                   # sweep, the default and what every run before 20 October did.
+                   # The PM400 range is fixed (autorange off on purpose) and the two
+                   # ends of a pooled sweep want different scales. MEASURED, runs
+                   # 261019-1056/-1212: the floor goes as range^0.74, so the coarse
+                   # range costs 5.45x at the faint end where pooling pays. MEASURED,
+                   # runs 261019-1829/-1833: the gain across the boundary agrees to
+                   # 0.150 % (0.56 sigma) and the 1154 pW dark offset cancels in the
+                   # lit-minus-off subtraction. So the fine range belongs on the faint
+                   # segment and the coarse one at the bright end, switched at a FIXED
+                   # bias rather than wherever an autoranging meter decided.
+                   # Set it just above where the brightest group leaves the fine range:
+                   # at K=4 that is about -1.6 V (section 26.18).
+                   # Requires pool_groups, pool_pm_range, and sweep_order=bias_major --
+                   # in pixel_major the range would change at every point.
+pm_range_settle_s: 0.5
+                   # s after a PM400 range change before reading. The meter switches a
+                   # transimpedance gain and nothing has measured how long that takes.
+                   # 0.5 s is a guess with margin; the cross-check below is what would
+                   # show it was too short, because the two ranges would disagree.
+pm_range_check_targets: 8
+                   # how many pooled targets are read at the boundary bias on BOTH
+                   # ranges, to verify the 0.150 % in situ. 0 skips it. Two extra
+                   # points each, so 8 is about two minutes -- the check is per run
+                   # rather than per campaign, which is the point.
 fastscan_pool: 0   # K for the fast-scan group-test SCREEN. 0 = OFF, the default, and
                    # the ordinary scan then measures every pixel. With K > 1 the scan
                    # lights K pixels at a time, flags the suspicious groups against a

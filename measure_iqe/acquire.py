@@ -526,6 +526,10 @@ _AGG_COLS_REF = ["NVLED_CURR_REF", "NVLED_CURR_REF_STD", "VLED_CURR_REF",
 _AGG_COLS_LIMIT = ["NVLED_LIMIT_A", "NVLED_AT_COMPLIANCE"]
 # Only written when pooling is on, so an ordinary run's files do not change at all.
 _AGG_COLS_POOL = ["POOL_K", "POOL_MEMBERS"]
+# Written only when the range actually moves during a run, so an ordinary file is
+# unchanged. Without it a reader cannot tell which scale a point was taken on, and the
+# floor differs 5.45x between them.
+_AGG_COLS_PMRANGE = ["PM_RANGE_W"]
 
 
 def agg_cols(cfg: IQEConfig) -> list[str]:
@@ -537,6 +541,8 @@ def agg_cols(cfg: IQEConfig) -> list[str]:
         cols += _AGG_COLS_LIMIT
     if cfg.pool_groups:
         cols += _AGG_COLS_POOL
+    if cfg.pool_pm_range_below_v is not None:
+        cols += _AGG_COLS_PMRANGE
     return cols
 
 
@@ -1698,6 +1704,40 @@ def prefill_reference_cache(pm, smu, smile, pixels, cfg: IQEConfig, log: Logger)
     return len(_ref_cache)
 
 
+# What the meter is set to right now, so the switch writes only when it has to.
+_pm_range_now = [0.0]
+
+
+def pm_range_for(x: int, y: int, v: float, cfg: IQEConfig) -> float:
+    """The PM400 range this (target, bias) should be read on.
+
+    Pooled targets only, and only at or below ``pool_pm_range_below_v``: a single pixel
+    reaches 257 nW at -2.6 V and never leaves the fine range, so switching for one would
+    cost 5.45x in floor (section 26.13) and buy nothing.
+    """
+    if (cfg.pool_pm_range_below_v is None or not cfg.pool_pm_range
+            or v > cfg.pool_pm_range_below_v):
+        return cfg.pm_range
+    return cfg.pool_pm_range if len(pool_members(x, y)) > 1 else cfg.pm_range
+
+
+def set_pm_range(pm, want: float, log: Logger | None = None) -> float:
+    """Set the meter's range if it is not already there. Returns what it is now.
+
+    The REFERENCE must be read on the same range as the lit point, or the offset it
+    subtracts is the other range's -- 1154 pW apart, measured. measure_point() reads
+    both, so the range is set once at its top and nothing inside it changes the range.
+    """
+    if _pm_range_now[0] == want:
+        return want
+    pm.set_range(want)
+    if log is not None and _pm_range_now[0]:
+        log(f"      PM400 range {_pm_range_now[0]*1e9:.0f} -> {want*1e9:.0f} nW "
+            f"(requested; the realised scale is coarser)")
+    _pm_range_now[0] = want
+    return want
+
+
 def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
                   cfg: IQEConfig, t0: float, log: Logger,
                   restore: bool = True) -> tuple[dict, dict | None]:
@@ -1714,6 +1754,11 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
 
     Returns (row, raw_samples_or_None); the caller stashes raw_samples if it wants them.
     """
+    # Before ANYTHING is read, including the reference: both must be on one range.
+    # Only when the switch is configured -- an ordinary run must not gain an SCPI write
+    # per point for a range that never moves.
+    rng = (set_pm_range(pm, pm_range_for(x, y, v, cfg))
+           if cfg.pool_pm_range_below_v is not None else cfg.pm_range)
     raw_s = None
     if cfg.perpoint_range:
         # range from the ACTUAL current (probe-then-measure), not the coarse map
@@ -1787,6 +1832,8 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
         # does not quote, so a comma inside a value silently shifts every later column.
         row.update(POOL_K=len(members),
                    POOL_MEMBERS=" ".join(f"{mx}:{my}" for mx, my in members))
+    if cfg.pool_pm_range_below_v is not None:
+        row["PM_RANGE_W"] = rng
     if ref is not None:
         rp, rps, riv, _, rinv, rinvs, _, _ = ref
         row.update(NVLED_CURR_REF=rinv, NVLED_CURR_REF_STD=rinvs,
@@ -2117,6 +2164,82 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
     return n_rows
 
 
+PM_CHECK_COLS = ["X", "Y", "POOL_K", "NVLED_V", "PM_RANGE_W",
+                 "PM400_POWER_MEAN", "PM400_POWER_STD", "NVLED_CURR_MEAN",
+                 "PM400_POWER_REF", "NVLED_CURR_REF"]
+
+
+def pm_range_boundary_check(pm, smu, smile, selected: list[Row], run_dir: Path,
+                            cfg: IQEConfig, log: Logger, t0: float) -> list[Row]:
+    """Read the switch bias on BOTH ranges and say whether the gain agrees.
+
+    Section 26.17 measured +0.150 % at 0.56 sigma across the boundary, on four pixels
+    at one bias on one evening. A sweep that trusts that number for thirty hours should
+    verify it on its own array at its own boundary, which costs two points per checked
+    target. That is what a calibration knob on real hardware is for.
+
+    The reading is lit-minus-reference on each range in turn, so the 1154 pW offset
+    between the ranges cancels exactly as it must during the sweep itself. What is left
+    is the gain.
+    """
+    if cfg.pool_pm_range_below_v is None or not cfg.pm_range_check_targets:
+        return []
+    pooled = [r for r in selected if len(pool_members(int(r["X"]), int(r["Y"]))) > 1]
+    pooled = pooled[:cfg.pm_range_check_targets]
+    if not pooled:
+        return []
+    v = float(cfg.pool_pm_range_below_v)
+    log(f"  PM400 range cross-check: {len(pooled)} pooled target(s) at the boundary "
+        f"{v:+.2f} V on both {cfg.pm_range*1e9:.0f} and {cfg.pool_pm_range*1e9:.0f} nW "
+        f"(requested). Verifying the 0.150 % of section 26.17 on THIS array.")
+    limit = pick_limit(None, cfg)        # no prior current here: the ladder's default
+    smu.set_voltage("b", v)
+    rows: list[Row] = []
+    for r in pooled:
+        x, y = int(r["X"]), int(r["Y"])
+        smile.blank_frame()
+        light(smile, x, y, cfg.bitvals[0])
+        time.sleep(cfg.vramp_highv_settle_s * cfg.settle_scale)
+        for rng in (cfg.pm_range, cfg.pool_pm_range):
+            set_pm_range(pm, rng)
+            time.sleep(cfg.pm_range_settle_s)
+            row, _ = measure_point(pm, smu, smile, x, y, cfg.bitvals[0], v, limit,
+                                   cfg.vramp_highv_n_pm, cfg.vramp_highv_n_smu,
+                                   cfg, t0, log)
+            row["PM_RANGE_W"] = rng
+            rows.append({k: row.get(k, "") for k in PM_CHECK_COLS})
+    smile.blank_frame()
+    # fine vs coarse, paired per target
+    fine = [r for r in rows if r["PM_RANGE_W"] == cfg.pm_range]
+    coarse = [r for r in rows if r["PM_RANGE_W"] == cfg.pool_pm_range]
+    d = [abs(c["PM400_POWER_MEAN"]) / abs(f["PM400_POWER_MEAN"]) - 1.0
+         for f, c in zip(fine, coarse) if f["PM400_POWER_MEAN"]]
+    if d:
+        m = float(np.median(d))
+        sd = float(np.std(d, ddof=1)) if len(d) > 1 else float("nan")
+        sem = sd / math.sqrt(len(d)) if len(d) > 1 else float("nan")
+        sig = abs(m) / sem if sem and sem > 0 else float("nan")
+        log(f"    coarse/fine = {1+m:.4f} ({100*m:+.3f} %) over {len(d)} target(s), "
+            f"spread {100*sd:.3f} %"
+            + (f", {sig:.1f} sigma on the mean" if np.isfinite(sig) else ""))
+        if abs(m) > 0.01:
+            log(f"    !! THE TWO RANGES DISAGREE BY {100*m:+.2f} %, over the 1 % this "
+                f"switch assumes. Every pooled point below {v:+.2f} V carries that as "
+                f"a step the analysis cannot see. Set pool_pm_range_below_v=null and "
+                f"stop the sweep short of the bright end instead.")
+        elif np.isfinite(sig) and sig >= 3.0:
+            log(f"    a real but small step: {100*m:+.3f} % at {sig:.1f} sigma. Under "
+                f"1 %, so the switch stands, but it is a systematic between the two "
+                f"segments and belongs in any error budget that spans them.")
+        else:
+            log(f"    consistent with no step -- the switch is free, as section 26.17 "
+                f"measured.")
+    pfx = run_slug(cfg.sample_name, run_dir) + "_"
+    write_aggregated_one(run_dir / "NVLEDSweep" / "Sweep" / f"{pfx}pm_range_check.csv",
+                         rows, cols=PM_CHECK_COLS)
+    return rows
+
+
 def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                       cfg: IQEConfig, log: Logger) -> int:
     """Voltage-source adaptive sweep. Single bitval, low-J-weighted spacing, and
@@ -2204,6 +2327,9 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
     prefill_reference_cache(pm, smu, smile,
                             [(int(r["X"]), int(r["Y"])) for r in selected], cfg, log)
     configure_voltage_source_b(smu, cfg, log)
+    pm_range_boundary_check(pm, smu, smile, selected, run_dir, cfg, log,
+                            time.perf_counter())
+    set_pm_range(pm, cfg.pm_range)      # leave it where an unpooled point expects it
     sweep_dir = run_dir / "NVLEDSweep" / "Sweep"
     pfx = run_slug(cfg.sample_name, run_dir) + "_"
     (sweep_dir / "raw_data").mkdir(parents=True, exist_ok=True)

@@ -184,6 +184,25 @@ What a reader must do with `POOL_K`:
 A reader that ignores the column entirely gets the right EQE and a wrong `J` --
 the safe direction, but still wrong.
 
+### `PM_RANGE_W`, only when `pool_pm_range_below_v` is set
+
+The PM400 range that point was read on, in W, as requested (the realised hardware scale
+is coarser -- `1e-7` lands on 470 nW on the S171C). Pooled targets switch to
+`pool_pm_range` at or below the threshold bias; single pixels never switch. **A reader
+comparing points across the boundary must check this column**: the optical floor goes
+as `range^0.74`, so a decade coarser range is 5.45x noisier, and the two segments are
+not equally precise. The lit-minus-reference subtraction removes the ranges' 1154 pW
+offset difference, so the VALUES are comparable -- only their uncertainty differs.
+
+### `NVLEDSweep/Sweep/<prefix>pm_range_check.csv`, with the same setting
+
+Two rows per checked target, the same pooled group read at the boundary bias on each
+range, with the columns `X, Y, POOL_K, NVLED_V, PM_RANGE_W, PM400_POWER_MEAN,
+PM400_POWER_STD, NVLED_CURR_MEAN, PM400_POWER_REF, NVLED_CURR_REF`. The ratio of the
+two `PM400_POWER_MEAN` values is the gain step across the boundary, and the run logs
+its median. It is a per-run verification of the +0.150 % measured once in 261019-1829
+and -1833.
+
 ### `FastScan/<prefix>screen_bitval=*.csv`, only when `fastscan_pool` is on
 
 The pooled fast-scan **screen** writes one row per group of K pixels, with the same

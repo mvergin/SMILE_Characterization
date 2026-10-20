@@ -22,6 +22,9 @@
     "fastscan_bitval": 15,
     "pool_groups": [],
     "pool_include_singles": true,
+    "pool_pm_range_below_v": null,
+    "pm_range_settle_s": 0.5,
+    "pm_range_check_targets": 8,
     "fastscan_pool": 0,
     "fastscan_pool_rescan_frac": 0.05,
     "fastscan_pool_detrend": 15,
@@ -144,23 +147,20 @@
     "smu_display_off": false
   },
   "provenance": {
-    "commit": "31137abdf77a3301473741ac1c1ce02e14b7493c",
-    "commit_short": "31137ab",
+    "commit": "2022833de0660798f78ccd0e35a204f0e650a5cd",
+    "commit_short": "2022833",
     "branch": "main",
-    "committed": "2026-10-19T09:56:41+02:00",
-    "describe": "v0.2-125-g31137ab-dirty",
+    "committed": "2026-10-20T08:10:59+02:00",
+    "describe": "v0.2-136-g2022833-dirty",
     "dirty": true,
     "changed": [
       "RUN_FORMAT.md",
-      "characterize_capacitance.py",
       "configs/standard.yaml",
       "measure_iqe/acquire.py",
-      "measure_iqe/config.py",
-      "test_measure_iqe.py",
-      "uv.lock"
+      "measure_iqe/config.py"
     ],
-    "diff_sha256": "0865320bf8e13f8e",
-    "started": "2026-10-19T10:12:35+02:00",
+    "diff_sha256": "db274dd2ab15165a",
+    "started": "2026-10-20T08:28:02+02:00",
     "host": "IHT-RE316",
     "python": "3.10.5",
     "platform": "Windows-10-10.0.26100-SP0"

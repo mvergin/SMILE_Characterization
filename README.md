@@ -276,6 +276,9 @@ runs that pinned each value.
 | `block_seed` | `int` | `0` | blocks mode: RNG seed (vary across runs to sample new pixels) blocks mode: no two measured pixels may sit closer than this (Chebyshev, so 2 = never sharing an edge or a corner). Without it, each block's farthest-point walk ran to the block's own border and the block next door did the same, so pairs of measured LEDs landed side by side across the shared edge — the sample looked stratified but was really clustered, and neighbouring blocks' statistics blurred into each other. Raise it to spread the sample further (thermal/optical crosstalk between nearby pixels is a physical question, so it is a knob); 1 disables the guard. A block too dead or too small to honour it falls back and says so in the log. |
 | `pool_groups` | `tuple[int,...]` | `()` | per-block pooled group sizes. `()` = off, and that is the default: a pooled row reports the SUM of K pixels' light and current, so it is not a pixel. `[4]` adds one group of 4 to every block; `[2,4,8]` adds three groups of different K. See *Pooled groups* below. |
 | `pool_include_singles` | `bool` | `true` | each group takes one of its **own block's** single pixels as a member, which makes the comparison paired: `P(group) − P(single)` is the rest of the group on the same silicon. `false` keeps the two sets disjoint. |
+| `pool_pm_range_below_v` | `float \| None` | `None` | V. At or below this bias a **pooled** target is read on `pool_pm_range`. `None` = one range all sweep. Needs `pool_groups`, `pool_pm_range` and `bias_major`. See *The PM400 range per segment*. |
+| `pm_range_settle_s` | `float` | `0.5` | s after a range change before reading. A guess with margin — nothing has measured the gain switch. |
+| `pm_range_check_targets` | `int` | `8` | pooled targets read at the boundary on **both** ranges each run, to verify the switch in situ. 0 skips it. |
 | `pool_pm_range` | `float` | `0.0` | W. The PM400 range for pooled targets, `0` = use `pm_range`, which is almost always right. Measured: `pm_range=1e-7` realises as **470 nW** on the S171C, so a K=4 group over-ranges at −2.6 V — but raising this costs a 10× worse optical floor and defeats the point of pooling. See *The pooled fast-scan screen* and report Q22. |
 | `min_pixel_separation` | `int` | `2` |  |
 | `sweep_fraction` | `float` | `0.1` | spatial mode: fraction of ALIVE pixels to sweep |
@@ -705,6 +708,48 @@ The settled reference is pushed out to **1.5× the last probe**, because dividin
 reading taken at the same moment gives 1.0 by construction. One acquisition takes about
 `cluster_n_pm × 4 ms`, so a probe much under that averages over the transient instead of
 sampling it, and the run says so.
+
+#### The PM400 range per segment
+
+The range is fixed and the two ends of a pooled sweep want different scales. The
+fine 470 nW range is required at the faint end, where pooling pays and the coarse
+one costs **5.45×** in floor; a K = 4 group **over-ranges** on it at −2.6 V. So
+neither range works for a whole sweep.
+
+```bash
+python -m measure_iqe --set block_size=64 --set pixels_per_block=1 \\
+  --set 'pool_groups=[4]' --set pool_pm_range=1e-6 \\
+  --set pool_pm_range_below_v=-1.6 --set sweep_order=bias_major
+```
+
+Single pixels never switch — one reaches 257 nW at −2.6 V and stays on scale, so
+switching for one would cost floor and buy nothing. Every row carries `PM_RANGE_W`
+when the switch is on, because a reader otherwise cannot tell which scale a point
+was taken on and the two differ 5.45× in floor.
+
+**It is refused in `pixel_major`**, where the range would change at every point
+instead of once per bias, and refused if `pool_pm_range` is not coarser than
+`pm_range` — switching to a *finer* range at the bright end is backwards.
+
+**Every run verifies the switch.** Before the sweep, `pm_range_check_targets`
+pooled targets are read at the boundary bias on **both** ranges, and the run says
+whether the gains agree:
+
+```
+PM400 range cross-check: 8 pooled target(s) at the boundary -1.60 V on both
+  100 and 1000 nW (requested). Verifying the 0.150 % of section 26.17 on THIS array.
+  coarse/fine = 1.0012 (+0.118 %) over 8 target(s), spread 0.21 %, 1.6 sigma
+  consistent with no step -- the switch is free, as section 26.17 measured.
+```
+
+It writes `NVLEDSweep/Sweep/<prefix>pm_range_check.csv` with both readings per
+target. Over 1 % disagreement and it says so loudly and tells you to turn the
+switch off; between 3σ and 1 % it reports a real but tolerable systematic that
+belongs in any error budget spanning the two segments.
+
+That check exists because §26.17 measured the 0.150 % **once**, on four pixels at
+one bias on one evening. A sweep that leans on it for thirty hours should confirm
+it on its own array, and two points per target is what that costs.
 
 #### Rules the selection enforces
 
