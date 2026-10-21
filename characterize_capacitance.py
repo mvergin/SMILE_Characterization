@@ -430,6 +430,95 @@ class PowerTrace:
                 np.array([r[1] for r in self.rows], float))
 
 
+# How far the 1 % settling band may be widened by noise before the row stops being a
+# measurement. A band at 6 % still says something -- "settled to within 6 %" -- and
+# firing there buries the real case in chatter. The real case, measured on Array42
+# without High-C at the 1 uA range, was 38 %: 35.6 nA against 13.6 nA of band.
+NOISE_LIMITED_FRAC = 0.10
+
+
+def flush_traces(out_dir: Path, log=None) -> Path | None:
+    """Write every trace collected so far to traces.npz. Safe to call repeatedly.
+
+    Called after each pixel as well as at the end, for the same reason write_csv is:
+    a run is ~75 minutes and used to hold all its raw data in memory until the last
+    line. The CSVs were already flushed per pixel, so a half-finished run gave you
+    `settled` and `t_1pct` but none of the traces the exponent is fitted from.
+
+    savez_compressed rewrites the whole archive, so this is O(n^2) over the run -- at
+    eight pixels and a few MB each that is seconds in total, against 75 minutes of
+    measurement. Writing to a temporary name first means an interrupted flush cannot
+    leave a truncated archive where a complete one used to be.
+    """
+    if not (_TRACES or _PTRACES or _VTRACES):
+        return None
+    npz = out_dir / "traces.npz"
+    # The suffix MUST stay .npz: savez_compressed appends ".npz" to any name that
+    # lacks it, so "traces.npz.part" became "traces.npz.part.npz" on disk and the
+    # rename below then failed on a file that was never written.
+    tmp = out_dir / "traces.part.npz"
+    try:
+        # Current traces are (t, I_A, I_B) on the instrument clock. Power traces are
+        # (t, P) on the host clock at their own rate, so they cannot share a key:
+        # the "pm_" prefix keeps one file per run without pretending they align.
+        np.savez_compressed(tmp, **{
+            f"{i:03d}_{tag}_{k}": np.vstack([t, ia, ib])
+            for i, (tag, t, ia, ib, k) in enumerate(_TRACES)
+        }, **{
+            f"pm_{i:03d}_{tag}": np.vstack([t, p])
+            for i, (tag, t, p) in enumerate(_PTRACES)
+        }, **{
+            f"v_{i:03d}_{tag}": np.vstack([t, v])
+            for i, (tag, t, v) in enumerate(_VTRACES)})
+        tmp.replace(npz)
+    except Exception as exc:                     # a flush must never kill a measurement
+        if log is not None:
+            log(f"    could not flush traces: {type(exc).__name__}: {exc}")
+        return None
+    return npz
+
+
+def capture_verdict(met, stage, highc, rng):
+    """Say in words when a row's numbers are not measurements.
+
+    A long capture is ~7 minutes, and it used to end in a line of plausible-looking
+    figures whatever happened. Two ways a row can be worthless while still printing:
+
+      * OVER-RANGE. `settled` is the median of the surviving samples, so at
+        5695/6000 over-range it is the median of the 305 that happened to fit --
+        a biased minority, not the current.
+      * NOISE-LIMITED. settling_metrics widens the 1 % band to 5 sigma when the
+        noise is larger than 1 % (`t_1pct_tol` records what it used), because a
+        trace with 3 % scatter can never enter a 1 % band and a pure-fraction
+        criterion would return NaN forever. When that happens the trace never
+        leaves its own band, and t_1pct falls back to half a smoothing window --
+        a sentinel. Printed bare it reads like a fast settling time, when it
+        means the opposite: the current is too small to resolve on this range.
+
+    Measured example, Array42 at -0.80 V on the 1 uA range without High-C: 35.6 nA
+    against 27.1 nA of scatter, so the band is 13.6 nA = 38 % of the reading, and
+    "t1%=1.017" is exactly half the 100-sample window. Both of these are the ANSWER
+    for a non-High-C capture -- they are only misleading when left unsaid.
+    """
+    out = []
+    n, over = met.get("n", 0), met.get("n_overflow", 0)
+    settled, tol = abs(met.get("settled", float("nan"))), met.get("t_1pct_tol")
+    state = f"{'High-C' if highc else 'no High-C'}, range {rng}"
+    if n and over > 0.5 * n:
+        out.append(f"{stage}: OVER-RANGE, {over}/{n} samples ({100 * over / n:.0f} %). "
+                   f"`settled` is the median of the {n - over} that fit, which is a "
+                   f"biased minority and not the current. ({state})")
+    if np.isfinite(settled) and settled > 0 and tol and np.isfinite(tol):
+        if tol > NOISE_LIMITED_FRAC * settled:
+            out.append(
+                f"{stage}: NOISE-LIMITED. The settling band had to be widened to "
+                f"{tol * 1e9:.2f} nA ({100 * tol / settled:.0f} % of the "
+                f"{settled * 1e9:.1f} nA reading) because the scatter is larger than "
+                f"1 %. t1% is then half a smoothing window, not a settling time: this "
+                f"current is not resolvable here. ({state})")
+    return out
+
+
 def keep_trace(tag, t, ia, ib, n_max):
     """Stash one trace for the run's traces.npz, and return its spectrum summary.
 
@@ -878,6 +967,8 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                        else f"(50Hz n/a: above Nyquist {spec['fs_hz']/2:.0f}Hz)")
                     + ("  << NOT SETTLED" if not met["settled_ok"] else "")
                     + (f"  ERR: {err}" if err else ""))
+                for line in capture_verdict(met, stage, highc, rng):
+                    log(f"      {line}")
     smile.blank_frame()
     return rows
 
@@ -2320,25 +2411,17 @@ def main(argv=None):
                     collected[name].extend(rows)
                     # flush after every experiment, so a later crash keeps this
                     write_csv(out_dir, name, collected[name])
+                    # and the raw traces with them. The CSVs alone give `settled` and
+                    # `t_1pct` but not the records the exponent is fitted from, and a
+                    # run is over an hour -- too long to see nothing until the end.
+                    flush_traces(out_dir, log)
     finally:
         m.shutdown(pm, smu, smile, cfg)
         # Writing in the finally is the point: previously an exception here skipped
         # the writes entirely and a run that died partway lost every completed row.
         log("=" * 56)
-        if _TRACES or _PTRACES or _VTRACES:
-            npz = out_dir / "traces.npz"
-            # Current traces are (t, I_A, I_B) on the instrument clock. Power traces are
-            # (t, P) on the host clock at their own rate, so they cannot share a key:
-            # the "pm_" prefix keeps one file per run without pretending they align.
-            np.savez_compressed(npz, **{
-                f"{i:03d}_{tag}_{k}": np.vstack([t, ia, ib])
-                for i, (tag, t, ia, ib, k) in enumerate(_TRACES)
-            }, **{
-                f"pm_{i:03d}_{tag}": np.vstack([t, p])
-                for i, (tag, t, p) in enumerate(_PTRACES)
-            }, **{
-                f"v_{i:03d}_{tag}": np.vstack([t, v])
-                for i, (tag, t, v) in enumerate(_VTRACES)})
+        npz = flush_traces(out_dir, log)
+        if npz:
             log(f"wrote {npz} ({len(_TRACES)} I(t)"
                 + (f" + {len(_PTRACES)} P(t)" if _PTRACES else "")
                 + (f" + {len(_VTRACES)} V(t)" if _VTRACES else "")

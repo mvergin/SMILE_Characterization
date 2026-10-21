@@ -108,9 +108,16 @@ class Run:
     def keys(self) -> list[str]:
         return list(self.npz.files) if self.npz is not None else []
 
-    def traces(self, prefix: str) -> list[tuple[str, np.ndarray]]:
-        """Trace arrays in run order. The index prefix IS the order they were taken."""
-        return [(k, self.npz[k]) for k in sorted(self.keys) if k.startswith(prefix)]
+    def traces(self, pattern: str) -> list[tuple[str, np.ndarray]]:
+        """Trace arrays in run order. The index prefix IS the order they were taken.
+
+        Matched by regex, not by a string prefix: the I(t) keys are NNN_step_... with
+        no letter prefix, and selecting them with startswith("0") worked only while a
+        run had fewer than 100 traces. The real comparison run takes 26 captures on
+        each of 8 pixels, so keys 100 upwards would have been dropped in silence.
+        """
+        rx = re.compile(pattern)
+        return [(k, self.npz[k]) for k in sorted(self.keys) if rx.match(k)]
 
     def step_traces(self) -> list[tuple[dict, np.ndarray, np.ndarray | None]]:
         """Pair every step.csv row with its I(t) and P(t), by order within a tag group.
@@ -122,10 +129,18 @@ class Run:
         """
         if self._st is not None:
             return self._st
+        if self.npz is None:
+            # A run in progress flushes its CSVs per pixel; before this script's
+            # companion change it only wrote traces.npz at the very end. Say that
+            # once, rather than one mismatch warning for each of 26 tag groups.
+            print(f"  ! {self.name}: no traces.npz yet -- CSV figures only",
+                  file=sys.stderr)
+            self._st = []
+            return self._st
         itr, ptr = defaultdict(list), defaultdict(list)
-        for k, arr in self.traces("0"):        # NNN_step_..._<stride> : t, i_a, i_b
+        for k, arr in self.traces(r"\d{3}_step_"):        # NNN_step_..._<stride> : t, i_a, i_b
             itr[re.sub(r"^\d{3}_", "", re.sub(r"_\d+$", "", k))].append(arr)
-        for k, arr in self.traces("pm_"):      # pm_NNN_step_... : t, P
+        for k, arr in self.traces(r"pm_\d{3}_"):      # pm_NNN_step_... : t, P
             ptr[re.sub(r"^pm_\d{3}_", "", k)].append(arr)
         grouped = defaultdict(list)
         for r in self.step:
@@ -149,8 +164,11 @@ class Run:
         """Pair every cap.csv row with its V(t) ramp, the same way."""
         if self._ct is not None:
             return self._ct
+        if self.npz is None:
+            self._ct = []
+            return self._ct
         vtr = defaultdict(list)
-        for k, arr in self.traces("v_"):
+        for k, arr in self.traces(r"v_\d{3}_"):
             vtr[re.sub(r"^v_\d{3}_", "", k)].append(arr)
         grouped = defaultdict(list)
         for r in self.cap:
@@ -467,12 +485,13 @@ def fig_step_long(runs, out: Path, t_min=1.0):
                 if r["stage"] != "long" or r["highc"] != hc:
                     continue
                 t, i = clean(it[0], it[2])
-                if t.size < 50:
-                    continue
                 found = True
+                # Every long trace gets an entry, even one too short to fit. Skipping
+                # them made an unfittable record indistinguishable from a missing one,
+                # and the summary then blamed the wrong thing.
                 alpha, iinf, r2, n = fit_power_law(t, i, t_min=t_min)
                 key = (run.name, title, f"{r['quadrant']} {_num(r['v_to']):+.2f}V")
-                fits[key] = (alpha, iinf, r2, n)
+                fits[key] = (alpha, iinf, r2, n, int(t.size))
                 tb, yb = log_bin(t, np.abs(i) - (iinf if np.isfinite(iinf) else 0.0))
                 keep = (tb >= t_min) & (yb > 0)
                 ax.plot(tb[keep], yb[keep] * 1e9, color=COLOURS[ri], lw=1.0, alpha=0.8)
@@ -672,13 +691,23 @@ def main(argv=None):
 
     print(f"\n-- power law |I-I_inf| ~ t^-alpha, fitted for t > {a.fit_from:g} s {'-' * 16}")
     if fits:
-        for (name, state, where), (alpha, iinf, r2, n) in sorted(fits.items()):
+        for (name, state, where), (alpha, iinf, r2, n, nsamp) in sorted(fits.items()):
+            if not np.isfinite(alpha):
+                print(f"  {name:14} {state:12} {where:12}  record of {nsamp} samples "
+                      f"is too short to fit -- raise --step-long-samples")
+                continue
             # Synthetic records with a known exponent all fit at r2 > 0.99, so
             # anything below that is a record without a resolvable power law in it,
             # not a measured exponent. Quoting it would be quoting noise.
             flag = "" if r2 > 0.99 else "   << WEAK FIT, do not quote this exponent"
             print(f"  {name:14} {state:12} {where:12}  alpha={alpha:5.2f}  "
                   f"I_inf={iinf * 1e9:8.1f} nA  r2={r2:5.3f}  bins={n}{flag}")
+    elif any(r["stage"] == "long" for run in runs for r in run.step):
+        # The rows are there, so the captures happened -- what is missing is the raw
+        # record the exponent is fitted from. A run in progress is the usual reason.
+        print("  long captures exist in step.csv but their traces do not. The "
+              "exponent is")
+        print("  fitted from traces.npz, which a run only has once it has flushed it.")
     else:
         print("  no long captures found. Without --highc-both there is one state only,")
         print("  and before --step-long-ranges the non-High-C long capture never ran.")

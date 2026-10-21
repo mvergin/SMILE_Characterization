@@ -480,6 +480,46 @@ def test_both_highc_states_get_exactly_one_long_record():
            for st in step_stages(v, False, rng, b) if st[0] == "long"]
     assert off == [], off
 
+def test_a_worthless_row_says_so_instead_of_printing_plausible_numbers():
+    """A long capture is 7 minutes. It must not end in numbers that only look real.
+
+    Both cases are measured, from the Array42 run of 21 October 2026 at -0.80 V on
+    the 1 uA range without High-C:
+
+      fast  472.8 nA but 5695/6000 over-range -- `settled` is the median of the 305
+            samples that fit, a biased minority
+      long   35.6 nA against 27.1 nA of scatter, so settling_metrics widened the 1 %
+            band to 13.6 nA and t_1pct fell back to half a smoothing window, 1.017 s.
+            Printed bare that reads like fast settling. It means the opposite.
+
+    Neither may fire on the clean High-C long record from the same run.
+    """
+    from characterize_capacitance import capture_verdict
+
+    noisy = dict(n=20000, n_overflow=0, settled=35.6e-9, t_1pct_tol=13.55e-9)
+    v = capture_verdict(noisy, "long", False, 1e-6)
+    assert len(v) == 1 and "NOISE-LIMITED" in v[0], v
+    assert "38 %" in v[0] and "35.6 nA" in v[0], "say how bad, with the numbers"
+
+    # ...but a band only mildly widened still says something ("settled to within
+    # 6 %"), and firing there buried the real case: the simulator alone produced
+    # nine of these in a two-pixel run.
+    mild = dict(n=6000, n_overflow=0, settled=2629.8e-9, t_1pct_tol=175.76e-9)
+    assert capture_verdict(mild, "fast", False, 1e-6) == []
+
+    over = dict(n=6000, n_overflow=5695, settled=472.8e-9, t_1pct_tol=4.7e-9)
+    v = capture_verdict(over, "fast", False, 1e-6)
+    assert len(v) == 1 and "OVER-RANGE" in v[0], v
+    assert "305" in v[0], "name the surviving count, not just the percentage"
+
+    # the clean record this comparison exists to produce must stay quiet
+    good = dict(n=20000, n_overflow=18, settled=488.4e-9, t_1pct_tol=4.0e-9)
+    assert capture_verdict(good, "long", True, None) == []
+
+    # a row with no reading at all must not crash the logger it is called from
+    assert capture_verdict(dict(n=0, n_overflow=0, settled=float("nan"),
+                                t_1pct_tol=float("nan")), "fast", True, None) == []
+
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
