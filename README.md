@@ -928,6 +928,50 @@ reading is right, and it is the likely cause of:
 python characterize_capacitance.py --what all --highc-both --sample-name Array42
 ```
 
+**`step` captures twice: fast then long.** At `--nplc 0.01` a buffered sample takes
+1.06 ms (measured, not modelled — see below), so the default 6000 samples is a **6.4 s**
+record against a faint-end settle of **240 s**. One capture cannot be both fast and
+long, and `settled` is the median of the last 20 % of *whatever window it got*, so a
+truncated record produces a plausible wrong number. There are now two:
+
+| stage | NPLC | samples | record | resolution | what it answers |
+|---|---|---|---|---|---|
+| `fast` | 0.01 | 6000 | 6.4 s | 1.06 ms | the current-limited charge edge, overshoot, ripple, spectrum |
+| `long` | 1.0 | 10000 | 407 s | 40.7 ms | the approach to the asymptote — **the decay exponent** |
+
+The long stage runs at one bias per pixel (the faintest, High-C on): every combination
+at 407 s would be 72 hours. `--step-long-voltages` overrides the bias,
+`--step-long-nplc 0` disables the stage. Rows carry `stage`, `record_span_s` and
+`record_truncated`, and the run says so when a record ended before 1 % settling.
+
+**The sample interval is measured.** From the instrument timestamps of four bench runs
+at two NPLCs: `dt = 2.001 × nplc/50 + 660 µs`, giving 1060 µs at NPLC 0.01 and 40670 µs
+at 1.0. The 2× is the burst reading **both** channels sequentially
+(`smua.measure.i` then `smub.measure.i`); the 660 µs is fixed per-sample overhead. The
+previous `max(2·nplc/50, 200e-6)` was 2.65× short at NPLC 0.01, so every record length
+derived from it was wrong by that factor.
+
+**`step` also records optical settling.** A background PM thread starts *at* the step —
+through the same `trigger` hook `switch` uses — so `I(t)` and `P(t)` share `t = 0`.
+Columns `p_settled_W`, `p_t_1pct`, `p_settled_ok`, `p_n`, `p_rate_hz`, and the trace
+under `pm_*`. Expect 30–80 Hz against the SMU's 24.6 Hz at NPLC 1.0. **The two records
+are not synchronous** — same origin, different clocks and rates — so bin them onto a
+common grid before dividing; do not pair them sample by sample. `--step-pm-trace 0`
+disables it.
+
+**`step`'s default is the configuration that found the power law.** `--v-start -1.0`
+with `--step-voltages -0.95 -0.90 -0.85 -0.80`: 0.05–0.20 V steps from a fixed start,
+which is how excess ∝ ΔV and the `t^−1.2` decay were established (*"Why it barely helps:
+the settling is not RC"*). `--voltages` keeps its wide nine-bias span, because `leak`
+and `switch` want the whole sweep range.
+
+**`cap` is buffered and keeps the ramp.** `smub.measure.v` into the buffer with the
+instrument's own timestamps — one channel, so no 2× — and the full `--cap-seconds` is
+captured. `--cap-v-stop` is applied as a **mask in analysis**, not as a live break, so
+samples past turn-on are kept too and `C` can be fitted per voltage segment instead of
+as one slope across −0.4 → −0.65 V. A junction's `C` is voltage-dependent and a single
+fit cannot show that. The raw `(t, V)` lands in `traces.npz` under `v_*`.
+
 **Traces default to complete.** `--trace-points` is `0`, which keeps every sample;
 a positive value thins uniformly. It used to default to 4000 against a 6000-sample
 capture, so a third of each one was dropped to save about 5 MB on a worst-case run

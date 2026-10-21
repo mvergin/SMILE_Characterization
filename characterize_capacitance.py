@@ -98,6 +98,11 @@ DEFAULT_VOLTAGES = [-0.6, -0.7, -0.8, -0.9, -1.0, -1.1, -1.3, -1.8, -2.6]
 # The 10 mA range is what the clean runs used; the fine ones read low J "not just
 # noisily but WRONG" before, which is the thing to explain.
 DEFAULT_RANGES = [1e-3, 1e-4, 1e-5, 1e-6, 1e-7]
+# step's own default: four 0.05-0.20 V steps from -1.00 V. This is the configuration
+# behind the README's "the settling is not RC" -- excess ~ t^-1.2 with amplitude
+# proportional to the step -- which the old -2.6 V start and nine-bias span did not
+# reproduce. Varying the STEP SIZE from a fixed start is what established the power law.
+STEP_VOLTAGES = [-0.95, -0.90, -0.85, -0.80]
 QUADRANTS = ("TL", "TR", "BL", "BR")
 # The 2600 returns 9.91e37 for an over-range reading. It is a sentinel, not a number:
 # left in, it poisons every median and max it touches.
@@ -227,6 +232,18 @@ def select_pixels(pm, smu, smile, cfg, args, log):
 #  capture primitive
 # ----------------------------------------------------------------------
 
+# Fitted on the instrument timestamps of charatests/261013-2140, -2155 (NPLC 0.01,
+# 1060 us) and -2201, -2337 (NPLC 1.0, 40670 us). Two channels per sample at 2.001x the
+# integration, plus 660 us of fixed overhead.
+SAMPLE_2CH_FACTOR = 2.001
+SAMPLE_OVERHEAD_S = 660e-6
+
+
+def sample_interval_s(nplc: float, channels: int = 2) -> float:
+    """Seconds per buffered sample at this NPLC. Measured; see the constants above."""
+    return channels * nplc / 50.0 + SAMPLE_OVERHEAD_S
+
+
 def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
                  chunk=2000, log=None, limit_a=None, capacitance=45.7e-6,
                  max_presettle_s=60.0, cfg=None, charge_limit=None,
@@ -297,8 +314,13 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
         return (np.linspace(0.0, time.perf_counter() - t0, len(ib)),
                 np.asarray(ia, float), np.asarray(ib, float))
 
-    # two channels per iteration, integration plus overhead, then 4x head-room
-    per_sample_s = max(2.0 * nplc / 50.0, 200e-6)
+    # MEASURED, not modelled: the instrument timestamps of four bench runs at NPLC
+    # 0.01 and 1.0 fit dt = 2.001 * nplc/50 + 660 us (1060 us and 40670 us). The 2x is
+    # the burst reading BOTH channels sequentially -- smua.measure.i then smub.measure.i
+    # -- and the 660 us is per-sample TSP and interface overhead. The old
+    # max(2*nplc/50, 200e-6) underestimated 0.01 by 2.65x, so every record-length claim
+    # built on it was short.
+    per_sample_s = sample_interval_s(nplc)
     old_timeout = smu.inst.timeout
     smu.inst.timeout = max(10_000, int(chunk * per_sample_s * 4_000))
     done = 0
@@ -400,10 +422,23 @@ _TRACES: list = []
 # rate. They land in the same traces.npz under a "pm_" prefix so one file still holds
 # everything a run measured.
 _PTRACES: list = []
+# V(t) ramps from exp_cap. Separate because they are a voltage against a current, on
+# their own clock, and the "v_" prefix in traces.npz says so.
+_VTRACES: list = []
 
 # Extra CSVs an experiment wants beside its own, keyed by file stem. The settling scan
 # needs one row per (K, probe time), which does not fit cluster.csv's one row per K.
 _EXTRA_ROWS: dict = {}
+
+
+def keep_trace_v(tag, t, v):
+    """Stash one ``V(t)`` ramp. exp_cap's raw data, which used to be discarded.
+
+    Lands in traces.npz under a "v_" prefix, so one file still holds everything a run
+    measured and a reader can tell a voltage ramp from a current transient by the key.
+    """
+    if t.size:
+        _VTRACES.append((tag, t.astype(np.float32), v.astype(np.float32)))
 
 
 def keep_power_trace(tag, t, p):
@@ -610,6 +645,30 @@ def drain_errors(smu):
         return f"error-queue read failed: {exc}"
 
 
+def step_stages(v: float, highc: bool, rng, args):
+    """The captures to take at one (voltage, range, High-C) point.
+
+    Always the fast one. The long one only where slow settling lives, because every
+    combination at 400 s would be 72 hours: the faintest bias, High-C on (the state the
+    sweep actually uses), and -- when --highc-both sweeps ranges with High-C off -- not
+    repeated per range, since the long stage is about the device and not the range.
+    """
+    out = [("fast", args.nplc, args.samples)]
+    if not args.step_long_nplc or args.step_long_samples <= 0:
+        return out
+    # The FAINTEST bias is the LEAST negative, i.e. max(): the sweep runs -0.8 V (faint,
+    # 240 s to settle) to -2.6 V (bright, 1.8 s). Picking min() would put the long
+    # capture at the bright end, where there is nothing slow to see.
+    want = (args.step_long_voltages if args.step_long_voltages is not None
+            else [max(args.step_voltages)])
+    if v not in want:
+        return out
+    if args.highc_both and not highc:
+        return out                  # one long capture per point, in the sweep's state
+    out.append(("long", args.step_long_nplc, args.step_long_samples))
+    return out
+
+
 def exp_step(pm, smu, smile, pixel, cfg, args, log):
     """I(t) after a voltage step, per voltage x range x High-C state."""
     rows = []
@@ -624,17 +683,63 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
             err_range = drain_errors(smu)
             if err_range:
                 log(f"    SMU rejected range {rng}: {err_range}")
-            for v in args.voltages:
-                t, ia, ib = capture_step(smu, args.v_start, v, args.samples, args.nplc,
+            for v in args.step_voltages:
+              # Two captures per point, because one cannot be both fast and long. The
+              # long stage is narrow on purpose -- see step_long_points().
+              for stage, nplc_s, nsamp in step_stages(v, highc, rng, args):
+                # P(t) beside I(t). capture_step's `trigger` hook exists for exactly
+                # this -- "replaces the voltage step with any other perturbation" -- so
+                # the step and the optical record start on the same statement and share
+                # t = 0. exp_switch has used it since the switch-deviation work.
+                ptrace = (PowerTrace(pm, args.step_pm_trace)
+                          if args.step_pm_trace else None)
+
+                def _step(_v=v):
+                    smu.set_voltage("b", float(_v))
+                    if ptrace is not None:
+                        ptrace.start()
+
+                t, ia, ib = capture_step(smu, args.v_start, v, nsamp, nplc_s,
                                      chunk=args.chunk, log=log,
                                      limit_a=cfg.nvled_compliance,
                                      capacitance=args.capacitance,
                                      max_presettle_s=args.max_presettle_s,
                                       cfg=cfg, charge_limit=args.charge_limit,
-                                      switch_settle_s=args.switch_settle_s)
+                                      switch_settle_s=args.switch_settle_s,
+                                      trigger=_step)
+                p_t = p_p = np.array([])
+                if ptrace is not None:
+                    p_t, p_p = ptrace.stop()
                 met = settling_metrics(t, np.abs(ib))
-                spec = keep_trace(f"step_hc{int(highc)}_r{rng}_f{args.v_start:+.3f}_v{v:+.3f}",
-                                  t, ia, ib, args.trace_points)
+                # Say it when the record cannot have seen the asymptote. settled is the
+                # median of the last 20 % of the window, which is a number whatever the
+                # window was, so nothing else in the row reveals this.
+                span = float(t[-1] - t[0]) if t.size > 1 else 0.0
+                truncated = bool(np.isfinite(met.get("t_1pct", float("nan")))
+                                 and met["t_1pct"] >= 0.9 * span)
+                if truncated or (span and not np.isfinite(met.get("t_1pct", float("nan")))):
+                    log(f"      {stage}: the {span:.1f} s record did not reach 1 % "
+                        f"settling, so `settled` is the end of the window and not the "
+                        f"asymptote. Raise --step-long-samples or --step-long-nplc.")
+                tag = (f"step_{stage}_hc{int(highc)}_r{rng}"
+                       f"_f{args.v_start:+.3f}_v{v:+.3f}")
+                spec = keep_trace(tag, t, ia, ib, args.trace_points)
+                # Optical settling, measured the same way the electrical is: the LAST
+                # time the trace leaves the band around its own settled value.
+                p_met = {}
+                if p_t.size > 10:
+                    keep_power_trace(tag, p_t, p_p)
+                    pm_met = settling_metrics(p_t, np.abs(p_p))
+                    p_met = dict(p_settled_W=pm_met["settled"],
+                                 p_t_1pct=pm_met["t_1pct"],
+                                 p_settled_ok=pm_met["settled_ok"],
+                                 p_n=int(p_t.size),
+                                 p_rate_hz=float(p_t.size / max(p_t[-1], 1e-9)))
+                    if log:
+                        el = met.get("t_1pct", float("nan"))
+                        log(f"      {stage}: P(t) {p_t.size} samples at "
+                            f"{p_met['p_rate_hz']:.0f} Hz, optical t_1pct "
+                            f"{pm_met['t_1pct']:.2f}s vs electrical {el:.2f}s")
                 ia_ok = ia[np.isfinite(ia) & (np.abs(ia) < OVERFLOW)] if ia.size else ia
                 # The node is settled by now, so read the light too: at these currents
                 # it is well above the measured optical floor, which turns a settling
@@ -664,8 +769,11 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                 if at_lim:
                     log(f"      at compliance ({cfg.nvled_compliance:g} A): V={v:+.2f} is "
                         f"not reachable at this limit, the node is current-limited")
-                rows.append(dict(highc=highc, range_i=rng if rng is not None else "limit",
-                                 compliance_a=cfg.nvled_compliance, nplc=args.nplc,
+                rows.append(dict(stage=stage, highc=highc, **p_met,
+                                 range_i=rng if rng is not None else "limit",
+                                 compliance_a=cfg.nvled_compliance, nplc=nplc_s,
+                                 n_requested=nsamp, record_span_s=span,
+                                 record_truncated=truncated,
                                  at_compliance=at_lim,
                                  v_from=args.v_start, v_to=v, **met,
                                  j_settled=to_j(met["settled"], cfg),
@@ -732,21 +840,48 @@ def exp_cap(pm, smu, smile, pixel, cfg, args, log):
             src = dataclasses.replace(cfg, current_source_range_i=cap_source_range(i_set))
             m.configure_current_source_b(smu, src)
             m.set_nplc(smu, max(args.nplc, 0.1))
+            # Buffered V(t) on ch B, with the INSTRUMENT's timestamps. Polling this
+            # from Python gave host-clock times and, worse, threw the raw ramp away --
+            # only the fitted slope reached the CSV, so C could never be examined per
+            # voltage segment. A junction's C is voltage-dependent, and a single slope
+            # across -0.4 -> -0.65 V cannot show that.
+            #
+            # One channel, so no 2x: sample_interval_s(nplc, channels=1). The whole
+            # cap_seconds is captured and the stop voltage is applied in ANALYSIS, which
+            # is what makes segmenting possible -- the live break could only ever give
+            # one span.
+            nplc_cap = max(args.nplc, 0.1)
+            n_cap = max(16, int(args.cap_seconds / sample_interval_s(nplc_cap, 1)))
+            m.set_nplc(smu, nplc_cap)
+            smu.setup_buffers(timestamps=True)
+            smu.clear_buffers_only()
             m.set_current_b(smu, -abs(i_set))        # sink: drives the node negative
-            t0 = time.perf_counter()
-            ts, vs = [], []
-            while (dt := time.perf_counter() - t0) < args.cap_seconds:
-                vb, _ = m.read_voltage_b(smu, n=2)
-                ts.append(dt)
-                vs.append(vb)
-                # honour the stop only once the ramp is genuinely under way: a glitch
-                # on the first read after the mode switch must not end it immediately
-                if len(ts) >= 5 and abs(vb) > abs(args.cap_v_stop):
-                    break                            # before turn-on or compliance
+            if hasattr(smu, "inst"):
+                smu.measure_burst_v_b(n_cap)
+                ts, vs = smu.read_buffer_b(n_cap)
+            else:                                     # sim rig: no TSP
+                t0 = time.perf_counter()
+                ts, vs = [], []
+                while (dt := time.perf_counter() - t0) < min(args.cap_seconds, 0.2):
+                    vb, _ = m.read_voltage_b(smu, n=2)
+                    ts.append(dt); vs.append(vb)
             m.set_current_b(smu, 0.0)
-            tsa, vsa = np.asarray(ts), np.asarray(vs)
+            tsa, vsa = np.asarray(ts, float), np.asarray(vs, float)
+            if tsa.size:
+                tsa = tsa - tsa[0]
+            # The stop is now a MASK, not a break: keep everything, fit what is below
+            # turn-on. Samples past cap_v_stop are still saved -- they are the only
+            # record of what the node does once the diode starts conducting.
+            n_all = int(tsa.size)
+            use = np.abs(vsa) <= abs(args.cap_v_stop) if tsa.size else np.zeros(0, bool)
+            if use.sum() >= 6:
+                tsa, vsa = tsa[use], vsa[use]
+            keep_trace_v(f"cap_lit{int(lit)}_i{i_set:.0e}", np.asarray(ts, float),
+                         np.asarray(vs, float))
             slope, cap = ramp_capacitance(tsa, vsa, i_set, cfg.nvled_v_limit)
-            rows.append(dict(lit=lit, i_set=i_set, park_v=park, n_samples=int(tsa.size),
+            rows.append(dict(lit=lit, i_set=i_set, park_v=park, nplc=nplc_cap,
+                             n_samples=int(tsa.size), n_captured=n_all,
+                             n_requested=n_cap,
                              ramp_s=float(tsa[-1]) if tsa.size else 0.0,
                              v_start=float(vsa[0]) if vsa.size else float("nan"),
                              v_end=float(vsa[-1]) if vsa.size else float("nan"),
@@ -1630,15 +1765,26 @@ def estimate_seconds(what, cfg, args, n_pixels):
     """
     pre = min(max(2.0, 3 * charge_time_s(args.capacitance, args.v_start,
                                          cfg.nvled_compliance)), args.max_presettle_s)
-    rec = args.samples * (max(2 * args.nplc / 50.0, 200e-6) + 3e-4)
+    rec = args.samples * sample_interval_s(args.nplc)
     pm_s = args.step_n_pm * 4e-3
     per_capture = pre + rec
     total = 0.0
     n_hc = 2 if args.highc_both else 1
     if "step" in what:
-        n_rng = 1 if (args.highc and not args.highc_both) else len(args.ranges)
-        total += n_pixels * n_hc * n_rng * len(args.voltages) * (
+        # With --highc-both the two halves differ: High-C OFF sweeps the ranges,
+        # High-C ON uses one (the limit owns the range). Counting len(ranges) for both
+        # overstated a 12-pixel run by 1.7x, and the operator budgets from this number.
+        n_combo = (len(args.ranges) + 1 if args.highc_both
+                   else 1 if args.highc else len(args.ranges))
+        total += n_pixels * n_combo * len(args.step_voltages) * (
             per_capture + pm_s * (2 if args.step_dark else 1))
+        # the long stage: one capture per pixel, at the faintest bias, High-C on, and
+        # it dominates -- 400 s against the fast stage's 2.4 s
+        if args.step_long_nplc and args.step_long_samples > 0:
+            n_long = len(args.step_long_voltages or [1])
+            total += n_pixels * n_long * (
+                args.step_long_samples * sample_interval_s(args.step_long_nplc)
+                + pm_s * (2 if args.step_dark else 1))
     if "leak" in what:
         # three frame states per bias: lit, addressed-at-bitval-0, blanked
         total += n_pixels * len(args.voltages) * 3 * (per_capture + pm_s)
@@ -1702,8 +1848,20 @@ def build_parser():
     ap.add_argument("--simulate", action="store_true",
                     help="plumbing only - the sim rig has no capacitance model")
     ap.add_argument("--voltages", nargs="+", type=float, default=DEFAULT_VOLTAGES)
+    ap.add_argument("--step-voltages", nargs="+", type=float, default=STEP_VOLTAGES,
+                    help="biases for step/stepdir. Defaults to the four that produced "
+                         "the 'settling is not RC' result -- 0.05 to 0.20 V steps from "
+                         "--v-start -1.0, where the excess current decays as t^-1.2 "
+                         "with amplitude proportional to the step. --voltages keeps its "
+                         "wide span because leak and switch want the whole sweep range, "
+                         "not four neighbouring points.")
     ap.add_argument("--ranges", nargs="+", type=float, default=DEFAULT_RANGES)
-    ap.add_argument("--v-start", type=float, default=-2.6, help="voltage to step FROM")
+    ap.add_argument("--v-start", type=float, default=-1.0,
+                    help="voltage to step FROM. -1.0, with --voltages -0.95..-0.80, is "
+                         "the configuration that produced the 'settling is not RC' "
+                         "result in the README: excess current decaying as t^-1.2 with "
+                         "amplitude proportional to the step size. The old -2.6 V "
+                         "default did not reproduce that figure.")
     ap.add_argument("--samples", type=int, default=6000,
                     help="buffer samples per step. record_s in the CSV says how much time "
                          "that bought; raise it until the record outlasts the settling")
@@ -1788,6 +1946,31 @@ def build_parser():
                     help="stop the ramp here, before the LED turns on and starts taking "
                          "a share of the setpoint")
     ap.add_argument("--cap-seconds", type=float, default=5.0, help="max ramp duration")
+    ap.add_argument("--step-pm-trace", type=int, default=1,
+                    help="PM reads per optical sample during a step capture, on a "
+                         "background thread started AT the step. 0 disables. step used "
+                         "to take one settled reading and nothing else, so optical "
+                         "settling after a bias change was measured nowhere -- and the "
+                         "sweep's dwell is ultimately about when the EQE is "
+                         "trustworthy, which needs both channels. Lands in traces.npz "
+                         "under pm_*, on host time, with t=0 at the step for both "
+                         "records. Do not divide the two sample-by-sample: bin them "
+                         "onto a common grid first, they are not synchronous.")
+    ap.add_argument("--step-long-nplc", type=float, default=1.0,
+                    help="NPLC for the SECOND, long step capture. At the fast stage's "
+                         "--nplc 0.01 a 6000-sample record is 2.4 s, against a 240 s "
+                         "faint-end settle -- so the fast capture cannot see the "
+                         "asymptote and its `settled` is the median of a window that "
+                         "never got there. 1.0 gives 40 ms per sample, so 10000 "
+                         "samples is a 400 s record. 0 disables the long stage.")
+    ap.add_argument("--step-long-samples", type=int, default=10000,
+                    help="buffer samples for the long step capture. 10000 at NPLC 1.0 "
+                         "is 400 s, comfortably past the 240 s measured on Array42.")
+    ap.add_argument("--step-long-voltages", nargs="+", type=float, default=None,
+                    help="biases to run the long capture at. Default: the faintest of "
+                         "--voltages, which is where slow settling lives. Every "
+                         "combination would be 648 captures x 400 s = 72 h, so this is "
+                         "deliberately narrow.")
     ap.add_argument("--step-n-pm", type=int, default=512,
                     help="PM reads after each step capture. 512 gives a ~7.6 pW 3-sigma "
                          "floor (measured), against ~219 pW at J=0.25")
@@ -1959,7 +2142,7 @@ def main(argv=None):
         # Writing in the finally is the point: previously an exception here skipped
         # the writes entirely and a run that died partway lost every completed row.
         log("=" * 56)
-        if _TRACES or _PTRACES:
+        if _TRACES or _PTRACES or _VTRACES:
             npz = out_dir / "traces.npz"
             # Current traces are (t, I_A, I_B) on the instrument clock. Power traces are
             # (t, P) on the host clock at their own rate, so they cannot share a key:
@@ -1969,9 +2152,13 @@ def main(argv=None):
                 for i, (tag, t, ia, ib, k) in enumerate(_TRACES)
             }, **{
                 f"pm_{i:03d}_{tag}": np.vstack([t, p])
-                for i, (tag, t, p) in enumerate(_PTRACES)})
-            log(f"wrote {npz} ({len(_TRACES)} traces"
+                for i, (tag, t, p) in enumerate(_PTRACES)
+            }, **{
+                f"v_{i:03d}_{tag}": np.vstack([t, v])
+                for i, (tag, t, v) in enumerate(_VTRACES)})
+            log(f"wrote {npz} ({len(_TRACES)} I(t)"
                 + (f" + {len(_PTRACES)} P(t)" if _PTRACES else "")
+                + (f" + {len(_VTRACES)} V(t)" if _VTRACES else "")
                 + f", {npz.stat().st_size / 1e6:.1f} MB)")
         for name, rs in _EXTRA_ROWS.items():
             collected.setdefault(name, []).extend(rs)

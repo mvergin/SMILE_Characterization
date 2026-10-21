@@ -208,6 +208,29 @@ class Keithley2602B:
             f"end print('DONE')"
         )
 
+    def measure_burst_v_b(self, n):
+        """Burst-measure ch B VOLTAGE into its buffer. One channel, so no 2x.
+
+        exp_cap sources current and watches the voltage ramp, so it needs V(t) and not
+        I(t), and only on the channel driving the node. Polling it from Python gave
+        host-clock timestamps and threw the raw ramp away; this keeps the instrument's
+        own timestamps, which is what a slope measurement should rest on.
+        """
+        self.inst.query(
+            f"for i=1,{n} do smub.measure.v(smub.nvbuffer1) end print('DONE')")
+
+    def read_buffer_b(self, n=None):
+        """(timestamps, values) from ch B's buffer alone."""
+        cnt = int(float(self.inst.query("print(smub.nvbuffer1.n)")))
+        if n is not None:
+            cnt = min(cnt, int(n))
+        if cnt == 0:
+            return [], []
+        vals = self.inst.query(f"printbuffer(1, {cnt}, smub.nvbuffer1)")
+        ts = self.inst.query(f"printbuffer(1, {cnt}, smub.nvbuffer1.timestamps)")
+        f = lambda s: [float(x) for x in s.strip().split(",")]
+        return f(ts), f(vals)
+
     def measure_burst_fire(self, n):
         self.inst.write(
             f"for i=1,{n} do "

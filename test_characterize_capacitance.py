@@ -272,6 +272,40 @@ def _cluster_run(ks, n_members=16):
     return rows, smile.frames
 
 
+def test_the_sample_interval_matches_the_instrument_timestamps():
+    """Fitted on four bench runs, and every record-length claim rests on it.
+
+    The old model was max(2*nplc/50, 200e-6), which at NPLC 0.01 predicted 400 us
+    against a measured 1060 us -- 2.65x short. Record lengths derived from it were
+    wrong by the same factor, which is how a 6.4 s capture got described as 2.4 s.
+
+    The measured points come from the instrument timestamps in
+    charatests/261013-2140 and -2155 (NPLC 0.01, 1060 us, decimation stride 5) and
+    -2201 and -2337 (NPLC 1.0, 40670 us, stride 1).
+    """
+    from characterize_capacitance import sample_interval_s
+
+    for nplc, measured_us in ((0.01, 1060.0), (1.0, 40670.0)):
+        got = sample_interval_s(nplc) * 1e6
+        assert abs(got - measured_us) / measured_us < 0.01, (
+            f'NPLC {nplc}: model {got:.0f} us against a measured {measured_us:.0f} us')
+
+    # the 2x is the burst reading BOTH channels: smua.measure.i then smub.measure.i.
+    # One channel is half the integration, same fixed overhead.
+    two = sample_interval_s(1.0, 2)
+    one = sample_interval_s(1.0, 1)
+    assert one < two, 'one channel must cost less than two'
+    assert abs((two - one) - 1.0 / 50.0) < 1e-6, (
+        'the difference between one and two channels is exactly one integration')
+
+    # monotone, and the overhead dominates at the bottom
+    assert sample_interval_s(0.001) > 600e-6, 'the fixed overhead must not vanish'
+    prev = 0.0
+    for nplc in (0.001, 0.01, 0.1, 1.0, 2.0):
+        v = sample_interval_s(nplc)
+        assert v > prev
+        prev = v
+
 def test_the_settling_verdict_weighs_sigma_and_never_guesses_a_dwell():
     """Run 261019-1057's real numbers, and the three branches of the conclusion.
 
