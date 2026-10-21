@@ -232,16 +232,25 @@ def select_pixels(pm, smu, smile, cfg, args, log):
 #  capture primitive
 # ----------------------------------------------------------------------
 
-# Fitted on the instrument timestamps of charatests/261013-2140, -2155 (NPLC 0.01,
-# 1060 us) and -2201, -2337 (NPLC 1.0, 40670 us). Two channels per sample at 2.001x the
-# integration, plus 660 us of fixed overhead.
-SAMPLE_2CH_FACTOR = 2.001
-SAMPLE_OVERHEAD_S = 660e-6
+# MEASURED on the instrument, four points over two channel counts and two NPLCs:
+#   2 channels: charatests/261013-2140 and -2155 (NPLC 0.01, 1060 us),
+#               -2201 and -2337        (NPLC 1.0, 40670 us)  -> 2.001*nplc/50 + 660 us
+#   1 channel : results/261021-1051    (NPLC 0.01, 291 us; NPLC 1.0, 20145 us)
+#                                                            -> 1.003*nplc/50 +  91 us
+# The integration scales with the channel count, as it must -- the burst issues one
+# measure call per channel. The OVERHEAD does not: it is per measure-CALL, not per
+# sample, so one channel costs 91 us and two cost 660 us rather than 182. A single
+# constant cannot describe both, which is why this is a table and not a formula.
+SAMPLE_OVERHEAD_S = {1: 91e-6, 2: 660e-6}
 
 
 def sample_interval_s(nplc: float, channels: int = 2) -> float:
-    """Seconds per buffered sample at this NPLC. Measured; see the constants above."""
-    return channels * nplc / 50.0 + SAMPLE_OVERHEAD_S
+    """Seconds per buffered sample at this NPLC and channel count. Measured.
+
+    Matches all four bench points to 0.3 %. An unmeasured channel count falls back to
+    the two-channel overhead, which is the conservative direction for a VISA timeout.
+    """
+    return channels * nplc / 50.0 + SAMPLE_OVERHEAD_S.get(int(channels), 660e-6)
 
 
 def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
@@ -909,6 +918,20 @@ def exp_cap(pm, smu, smile, pixel, cfg, args, log):
             keep_trace_v(f"cap_lit{int(lit)}_i{i_set:.0e}", np.asarray(ts, float),
                          np.asarray(vs, float))
             slope, cap = ramp_capacitance(tsa, vsa, i_set, cfg.nvled_v_limit)
+            # Is the setpoint large enough to dominate the diode's own leakage? At
+            # -0.4 V on Array42 the 1 uA point gave C = 213.56 uF blanked against
+            # 39.41 uF lit -- a factor of 5 -- while 10 and 100 uA agreed at 45-52 uF.
+            # The leakage steals part of the ramp current, the slope under-reads, and C
+            # comes out too high. There is nothing to tune: the setpoint has to be well
+            # above the leakage. Flagged, not silently averaged with the good points.
+            i_leak_frac = (abs(cap * slope) / abs(i_set)) if (slope and i_set) else float("nan")
+            suspect = bool(np.isfinite(cap) and cap > 2.0 * args.capacitance)
+            if suspect:
+                log(f"      !! I={i_set*1e9:.0f} nA gives C={cap*1e6:.1f} uF, over 2x "
+                    f"the {args.capacitance*1e6:.1f} uF expected. At this bias the "
+                    f"diode's leakage is a large fraction of the setpoint, so it steals "
+                    f"ramp current and the slope under-reads. Trust the larger "
+                    f"setpoints; this one is leakage-dominated.")
             rows.append(dict(lit=lit, i_set=i_set, park_v=park, nplc=nplc_cap,
                              n_samples=int(tsa.size), n_captured=n_all,
                              n_requested=n_cap,
@@ -916,6 +939,7 @@ def exp_cap(pm, smu, smile, pixel, cfg, args, log):
                              v_start=float(vsa[0]) if vsa.size else float("nan"),
                              v_end=float(vsa[-1]) if vsa.size else float("nan"),
                              dvdt=slope, capacitance_F=cap,
+                             leakage_suspect=suspect,
                              smu_errors=drain_errors(smu)))
             log(f"    lit={lit!s:5} I={i_set*1e9:>8.0f} nA  "
                 f"V {vsa[0] if vsa.size else float('nan'):+.3f} -> "
@@ -924,7 +948,54 @@ def exp_cap(pm, smu, smile, pixel, cfg, args, log):
                 f"-> C={cap*1e6:8.2f} uF")
     m.set_current_b(smu, 0.0)
     smile.blank_frame()
+    flag_cap_leakage(rows, log)
     return rows
+
+
+def flag_cap_leakage(rows, log, tol=0.30):
+    """Mark setpoints where lit and blanked disagree. Mutates ``rows``.
+
+    The capacitor cannot care whether a sub-turn-on pixel is addressed, so a large
+    lit/blanked difference at one setpoint means something other than the capacitor is
+    taking the ramp current -- the diode's own leakage, which is a large fraction of a
+    small setpoint at -0.4 V.
+
+    This is the test an absolute threshold cannot do. Measured on Array42 at 1 uA:
+    213.56 uF blanked against 39.41 uF lit, 5.4x apart, and the lit value is the one
+    that looks right. Both are wrong; only the pair shows it.
+    """
+    by_i: dict = {}
+    for r in rows:
+        by_i.setdefault(r["i_set"], {})[bool(r["lit"])] = r
+    for i_set, pair in sorted(by_i.items()):
+        a, b = pair.get(False), pair.get(True)
+        if a is None or b is None:
+            continue
+        ca, cb = a["capacitance_F"], b["capacitance_F"]
+        if not (np.isfinite(ca) and np.isfinite(cb) and ca > 0 and cb > 0):
+            continue
+        ratio = max(ca, cb) / min(ca, cb)
+        bad = ratio > 1.0 + tol
+        a["lit_blank_ratio"] = b["lit_blank_ratio"] = float(ratio)
+        if bad:
+            a["leakage_suspect"] = b["leakage_suspect"] = True
+            log(f"    !! I={i_set*1e9:.0f} nA: lit and blanked disagree by "
+                f"{ratio:.2f}x ({cb*1e6:.2f} vs {ca*1e6:.2f} uF). The capacitor cannot "
+                f"care whether a sub-turn-on pixel is addressed, so at this setpoint "
+                f"the diode's leakage is taking a large share of the ramp current. "
+                f"NEITHER value is usable -- not even the one that looks plausible. "
+                f"Use a larger --cap-currents entry.")
+    good = [r for r in rows if not r.get("leakage_suspect")
+            and np.isfinite(r["capacitance_F"])]
+    if good:
+        cs = sorted(r["capacitance_F"] for r in good)
+        med = cs[len(cs) // 2]
+        log(f"    C from {len(good)} usable capture(s): median {med*1e6:.2f} uF "
+            f"(spread {cs[0]*1e6:.2f}-{cs[-1]*1e6:.2f})")
+    else:
+        log(f"    !! no usable capture: every setpoint is leakage-dominated or failed "
+            f"to fit. Raise --cap-currents, or park further below turn-on with "
+            f"--cap-park.")
 
 
 def ramp_capacitance(ts, vs, i_set, v_limit):
@@ -2220,6 +2291,13 @@ def main(argv=None):
             log(f"wrote {p}")
         if not wrote:
             log("no data written")
+        # Last, so it contains everything above -- including the lines that only ever
+        # existed in a terminal: the High-C warning, every "<< NOT SETTLED", the
+        # pre-settle notices, the optical-vs-electrical comparison. In the finally, so a
+        # run that dies partway still leaves its log.
+        log(f"wrote {out_dir / 'Console_LOG.txt'}")
+        if hasattr(log, "save"):
+            log.save(out_dir / "Console_LOG.txt")
     return 0
 
 

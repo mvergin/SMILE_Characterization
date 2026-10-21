@@ -273,30 +273,52 @@ def _cluster_run(ks, n_members=16):
 
 
 def test_the_sample_interval_matches_the_instrument_timestamps():
-    """Fitted on four bench runs, and every record-length claim rests on it.
+    """Four bench points, and every record-length claim rests on them.
 
-    The old model was max(2*nplc/50, 200e-6), which at NPLC 0.01 predicted 400 us
-    against a measured 1060 us -- 2.65x short. Record lengths derived from it were
-    wrong by the same factor, which is how a 6.4 s capture got described as 2.4 s.
+    Two channels, from the instrument timestamps in charatests/261013-2140 and
+    -2155 (NPLC 0.01, 1060 us, decimation stride 5) and -2201 and -2337 (NPLC 1.0,
+    40670 us, stride 1). One channel, from results/261021-1051 on Array42 (NPLC
+    0.01, 291 us; NPLC 1.0, 20145 us).
 
-    The measured points come from the instrument timestamps in
-    charatests/261013-2140 and -2155 (NPLC 0.01, 1060 us, decimation stride 5) and
-    -2201 and -2337 (NPLC 1.0, 40670 us, stride 1).
+    Two models have already been wrong here, so this pins the hardware and not a
+    belief about it:
+
+      * max(2*nplc/50, 200e-6) predicted 400 us at NPLC 0.01 against 1060 us
+        measured -- 2.65x short, and every record length derived from it with it.
+      * then `channels*nplc/50 + 660e-6` predicted 860 us for ONE channel against
+        291 us measured, because it assumed the overhead was per sample. It is per
+        measure-CALL: 91 us for one, 660 us for two, not 182. An earlier version of
+        this very test asserted that one and two channels differ by exactly one
+        integration, which is what that wrong model implied -- and the bench says
+        the extra channel costs one integration PLUS 569 us.
     """
     from characterize_capacitance import sample_interval_s
 
-    for nplc, measured_us in ((0.01, 1060.0), (1.0, 40670.0)):
-        got = sample_interval_s(nplc) * 1e6
+    # every measured point, both channel counts
+    for ch, nplc, measured_us in ((2, 0.01, 1060.0), (2, 1.0, 40670.0),
+                                  (1, 0.01, 291.0), (1, 1.0, 20145.0)):
+        got = sample_interval_s(nplc, ch) * 1e6
         assert abs(got - measured_us) / measured_us < 0.01, (
-            f'NPLC {nplc}: model {got:.0f} us against a measured {measured_us:.0f} us')
+            f'{ch}ch NPLC {nplc}: model {got:.0f} us against measured {measured_us:.0f} us')
 
-    # the 2x is the burst reading BOTH channels: smua.measure.i then smub.measure.i.
-    # One channel is half the integration, same fixed overhead.
-    two = sample_interval_s(1.0, 2)
-    one = sample_interval_s(1.0, 1)
+    # the default must be the cheap one, or the long stage silently doubles
+    from characterize_capacitance import build_parser
+    assert build_parser().parse_args(['--what', 'step']).step_channels == 1
+
+    # the integration scales with the channel count; the overhead does NOT
+    two, one = sample_interval_s(1.0, 2), sample_interval_s(1.0, 1)
     assert one < two, 'one channel must cost less than two'
-    assert abs((two - one) - 1.0 / 50.0) < 1e-6, (
-        'the difference between one and two channels is exactly one integration')
+    extra = (two - one) - 1.0 / 50.0
+    assert extra > 100e-6, (
+        'the second channel costs more than one integration -- it adds its own call '
+        'overhead, which is why a single fixed constant cannot fit both counts')
+
+    # and the long stage must still outlast the 240 s faint-end settle it exists for
+    a = build_parser().parse_args(['--what', 'step'])
+    span = a.step_long_samples * sample_interval_s(a.step_long_nplc, a.step_channels)
+    assert span > 1.5 * 240.0, (
+        f'the long record is {span:.0f} s against a 240 s settle; halving the '
+        f'per-sample time without raising --step-long-samples is how that breaks')
 
     # monotone, and the overhead dominates at the bottom
     assert sample_interval_s(0.001) > 600e-6, 'the fixed overhead must not vanish'

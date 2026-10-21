@@ -234,6 +234,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         log("interrupted — partial results are on disk")
         return 130
     log(f"run directory: {result.run_dir}")
+    # Everything logged, saved beside the data. Nothing wrote this before: the
+    # Console_LOG.txt in older run directories was the operator redirecting output by
+    # hand, so a 30 h run's warnings -- the dropped frame writes, the compliance
+    # notices, the pooled cross-check verdict -- lived only in a terminal.
+    if hasattr(log, "save"):
+        log.save(Path(result.run_dir) / "Console_LOG.txt")
+        log(f"wrote {Path(result.run_dir) / 'Console_LOG.txt'}")
+        log.save(Path(result.run_dir) / "Console_LOG.txt")   # include the line above
     return 0
 
 

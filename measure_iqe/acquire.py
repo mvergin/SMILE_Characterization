@@ -73,14 +73,32 @@ def make_logger(stream=None) -> Logger:
         out.reconfigure(encoding="utf-8", errors="replace")   # type: ignore[union-attr]
     except Exception:
         pass
+    # Every line is kept so the run can save it. Nothing used to: the Console_LOG.txt
+    # in one old run directory was the operator redirecting output by hand, so warnings,
+    # "<< NOT SETTLED" notices and the pre-settle messages lived only in a terminal and
+    # were gone as soon as it scrolled. A 30 h run deserves better. ~100 bytes a line,
+    # so even a very chatty run is a megabyte.
+    lines: list[str] = []
 
     def log(message: str) -> None:
         line = f"[{datetime.datetime.now():%H:%M:%S}] {message}"
+        lines.append(line)
         try:
             print(line, file=out)
         except UnicodeEncodeError:
             print(line.encode("ascii", "replace").decode("ascii"), file=out)
 
+    def save(path) -> None:
+        """Write everything logged so far. Safe to call from a finally."""
+        try:
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception:
+            pass          # a log that cannot be saved must not end the run
+
+    log.lines = lines          # type: ignore[attr-defined]
+    log.save = save            # type: ignore[attr-defined]
     return log
 
 
