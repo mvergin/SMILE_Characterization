@@ -291,7 +291,20 @@ trace_settling_min_s: 2.0   # skip for short dwells: nothing to see
 # settling is a charge relaxation and not an RC charge. Measure it, do not inherit it:
 #   python -m measure_iqe --calibrate --out D:\cal
 #   python -m measure_iqe --calibration "D:\cal\...\<array>_calibration.yaml"
+# The dwell this produces governs the whole sweep, so a calibration that samples one
+# corner sets the array's dwell from that corner. Array38's first one ran on
+# roi=(32,32,63,63) and picked (35,34), (32,46), (35,54) -- three neighbours inside TL,
+# the one quadrant the capacitance run had measured as slow (108 s against ~1 s in TR,
+# BL and BR). It recommended 15.23 s on that evidence, and those three pixels disagreed
+# among themselves by 3.9x. So sample every quadrant, the way characterize_capacitance
+# always has, from a small window in each rather than a full-ROI fast scan that costs
+# two hours before the first capture.
+calibrate_per_quadrant: 1  # pixels per quadrant. 0 = the old single-ROI path, which
+                           # then uses calibrate_pixels below
+calibrate_quadrant_window: 24  # window scanned at each quadrant centre, px. Four 24x24
+                           # windows is ~2300 pixels, about 70 s
 calibrate_pixels: 3        # pixels to characterise; the worst case sets the dwell
+                           # (single-ROI path only, i.e. calibrate_per_quadrant=0)
 calibrate_seconds: 40.0    # poll each bias this long. Shorter than the real settle time
                            # makes the answer a lower bound, and the file says so.
 calibrate_n_smu: 4

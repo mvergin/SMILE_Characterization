@@ -520,7 +520,17 @@ class IQEConfig:
     # Array38 (42.8 uF) and another array may need far more or far less. It does not
     # follow from C, because the settling is a charge relaxation and not an RC charge,
     # so it is measured directly rather than inferred.
+    # A calibration that samples one corner sets the whole array's dwell from it.
+    # Array38's first calibration ran on roi=(32,32,63,63) and picked (35,34), (32,46),
+    # (35,54) -- three neighbours inside TL, which the capacitance run had already
+    # singled out as the one slow quadrant (108 s against ~1 s in TR, BL and BR). It
+    # recommended 15.23 s for the array on that evidence. So sample every quadrant, the
+    # way characterize_capacitance does, and from a small window in each rather than a
+    # full-ROI fast scan that costs two hours before the first capture.
+    calibrate_per_quadrant: int = 1   # pixels per quadrant. 0 = the old single-ROI path
+    calibrate_quadrant_window: int = 24  # window scanned at each quadrant centre, px
     calibrate_pixels: int = 3  # pixels to characterise; the worst case sets the dwell
+                                     # (single-ROI path only, i.e. calibrate_per_quadrant=0)
     calibrate_seconds: float = 40.0  # poll each bias this long. Must exceed the real
                                      # settle time or the answer is a lower bound, which
                                      # the calibration says so explicitly.
@@ -1027,6 +1037,10 @@ class IQEConfig:
             raise ValueError("min_pixel_separation must be >= 1 (1 disables the guard)")
         if not 0 <= self.fastscan_alive_pctl <= 100:
             raise ValueError(f"fastscan_alive_pctl={self.fastscan_alive_pctl} must be in [0, 100]")
+        if self.calibrate_per_quadrant < 0:
+            raise ValueError("calibrate_per_quadrant must be >= 0 (0 = single ROI)")
+        if self.calibrate_per_quadrant and self.calibrate_quadrant_window < 2:
+            raise ValueError("calibrate_quadrant_window must be >= 2 px")
         if self.dead_iv_pixels < 0:
             raise ValueError("dead_iv_pixels must be >= 0 (0 is off)")
         if self.dead_iv_pixels:

@@ -351,15 +351,26 @@ def _dump(path: Path, data: dict[str, Any]) -> Path:
 
 
 def write_calibration(out_dir: str | Path, data: dict[str, Any],
-                      root: str | Path = ".") -> tuple[Path, Path]:
+                      root: str | Path = ".",
+                      simulated: bool = False) -> tuple[Path, Path | None]:
     """Write the calibration twice: with the run, and in the per-array location.
 
     The copy in the run directory is the record of what was measured, timestamped
     alongside its own fast scan. The copy in ``calibrations/<sample>.yaml`` is the one
     ``--array`` picks up, so a characterised array needs one flag and no file paths.
+
+    ``simulated`` writes ONLY the run copy. A simulated calibration is a software
+    test, and the per-array file is a measured fact about a physical array: on
+    21 October 2026 a `--calibrate --simulate` run replaced the bench's Array42_IQE
+    calibration -- 600 s window, 54.47 s dwell, measured 14 October -- with simulator
+    output recommending 1.5 s, and printed "per-array: ...Array42_IQE.yaml" as if that
+    were a success. It was recovered from the copy an old run directory happened to
+    keep. The test suite already guards this; nothing guarded a human running it.
     """
     name = str(data.get("sample_name") or "array")
     record = _dump(Path(out_dir) / f"{name}_calibration.yaml", data)
+    if simulated:
+        return record, None
     # Write to every root, so a sweep started from either directory finds it. They are
     # small, and a stale copy in the other root would be worse than a duplicate.
     stable = None

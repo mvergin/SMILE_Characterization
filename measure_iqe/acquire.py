@@ -53,7 +53,7 @@ from typing import Any, Callable, Iterable, Iterator, NamedTuple
 
 import numpy as np
 
-from .config import Q_E, SMU_I_RANGES, IQEConfig
+from .config import NAMED_ROIS, Q_E, SMU_I_RANGES, IQEConfig
 from .provenance import provenance, run_slug, write_provenance
 from .calibrate import calibrate, write_calibration
 from .safeexit import parked, safe_exit
@@ -3046,6 +3046,57 @@ def shutdown(pm, smu, smile, cfg: IQEConfig) -> None:
             pass
 
 
+def calibration_pixels(pm, smu, smile, out_dir: Path, cfg: IQEConfig,
+                       log: Logger) -> list[tuple[int, int]]:
+    """Which pixels the dwell is measured on. Every quadrant, from a small window each.
+
+    The dwell this produces governs the whole sweep, so a calibration that samples one
+    corner sets the array's dwell from that corner. Array38's first one ran on
+    roi=(32,32,63,63) and picked (35,34), (32,46) and (35,54) -- three neighbours
+    inside TL, the one quadrant the capacitance run had measured as slow (108 s against
+    ~1 s in TR, BL and BR). It recommended 15.23 s on that evidence, and the three
+    pixels disagreed among themselves by 3.9x (2.62 / 4.58 / 10.15 s).
+
+    So: a centred window per quadrant, which is what characterize_capacitance has always
+    done. Four 24x24 windows is ~2300 pixels, about 70 s, against the two hours a
+    full-ROI fast scan costs before the first capture even starts.
+
+    ``calibrate_per_quadrant = 0`` restores the old single-ROI behaviour.
+    """
+    if not cfg.calibrate_per_quadrant:
+        x1, y1, x2, y2 = cfg.resolve_roi()
+        sel = run_fast_scan(pm, smu, smile, x1, y1, x2, y2, out_dir, cfg, log)
+        return [(int(r["X"]), int(r["Y"])) for r in sel[:cfg.calibrate_pixels]]
+
+    win = max(2, int(cfg.calibrate_quadrant_window))
+    out: list[tuple[int, int]] = []
+    for quad in ("TL", "TR", "BL", "BR"):
+        qx1, qy1, qx2, qy2 = NAMED_ROIS[quad]
+        cx, cy = (qx1 + qx2) // 2, (qy1 + qy2) // 2
+        wx1, wy1 = max(qx1, cx - win // 2), max(qy1, cy - win // 2)
+        wx2, wy2 = min(qx2, wx1 + win - 1), min(qy2, wy1 + win - 1)
+        log(f"  {quad}: calibration window ({wx1},{wy1})-({wx2},{wy2})")
+        # The sweep's sampler cannot be handed a 24 px window with the sweep's own
+        # 64 px blocks: it reported "0 non-empty blocks" out of 532 alive pixels.
+        # One block = the whole window, as characterize_capacitance does. Pooling is
+        # off because a pooled target is K pixels and the dwell is about one.
+        wcfg = dataclasses.replace(
+            cfg, roi=(wx1, wy1, wx2, wy2), sweep_select="blocks", block_size=win,
+            pixels_per_block=cfg.calibrate_per_quadrant,
+            max_sweep_pixels=cfg.calibrate_per_quadrant,
+            pool_groups=(), fastscan_pool=0, sweep_rotate=0)
+        # Its own directory per quadrant: run_fast_scan writes a fixed set of file
+        # names, so four calls into one directory would overwrite each other.
+        sel = run_fast_scan(pm, smu, smile, wx1, wy1, wx2, wy2,
+                            out_dir / f"FastScan_{quad}", wcfg, log)
+        got = [(int(r["X"]), int(r["Y"])) for r in sel[:cfg.calibrate_per_quadrant]]
+        if not got:
+            log(f"    {quad}: no alive pixel in the window -- this quadrant is not "
+                f"represented in the dwell")
+        out += got
+    return out
+
+
 def run_calibration(config: IQEConfig | None = None, *, simulate: bool = False,
                     base_dir: str | Path | None = None,
                     log: Logger | None = None) -> Path:
@@ -3068,21 +3119,28 @@ def run_calibration(config: IQEConfig | None = None, *, simulate: bool = False,
         smu.set_voltage("a", cfg.vled_voltage)
         smu.enable_output("a", True)
         smu.enable_output("b", True)
-        x1, y1, x2, y2 = cfg.resolve_roi()
-        selected = run_fast_scan(pm, smu, smile, x1, y1, x2, y2, out_dir, cfg, log)
-        pixels = [(int(r["X"]), int(r["Y"])) for r in selected[:cfg.calibrate_pixels]]
+        pixels = calibration_pixels(pm, smu, smile, out_dir, cfg, log)
         if not pixels:
             raise RuntimeError("no alive pixels found to calibrate on")
         data = calibrate(pm, smu, smile, pixels, cfg, log, out_dir=out_dir)
     finally:
         parked.__exit__(None, None, None)
-    record, stable = write_calibration(out_dir, data)
+    record, stable = write_calibration(out_dir, data, simulated=simulate)
     log("=" * 56)
     log(f"CALIBRATION for {cfg.sample_name}")
     log(f"  record  : {record}")
-    log(f"  per-array: {stable}")
-    log(f"Use it with:  python -m measure_iqe --array {cfg.sample_name}")
-    return stable
+    if stable is None:
+        log(f"  per-array: NOT written -- this was --simulate. "
+            f"calibrations/{cfg.sample_name}.yaml is a measured fact about a physical "
+            f"array and a simulated run must not replace it.")
+    else:
+        log(f"  per-array: {stable}")
+        log(f"Use it with:  python -m measure_iqe --array {cfg.sample_name}")
+    # Always a usable path. Under --simulate there is no per-array copy by design, but
+    # the run-directory record is a complete calibration file and --calibration <path>
+    # loads it, so returning None would make a simulated calibration unusable rather
+    # than merely unpublished.
+    return stable or record
 
 
 def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = False,
