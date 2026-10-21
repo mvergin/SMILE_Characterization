@@ -1891,6 +1891,69 @@ def test_aggregated_fields_keep_full_float_precision():
     assert acquire.agg_field("7:5 5:13") == "7:5 5:13", "a string must not be quoted"
 
 
+def test_dead_pixel_iv_picks_dark_pixels_and_calls_a_flat_line_infinite():
+    """A dead pixel is usually shorted, so sub-turn-on it is a resistor.
+
+    Two things this has to get right, and a naive version gets both wrong:
+
+      * WHICH pixels. "Below the alive threshold" includes pixels at 19 % of the lit
+        level, which are still emitting and so still have a working junction. Sweeping
+        those returns a diode curve, not the short the measurement is for. The cut is
+        the fast scan's own noise: within dead_iv_dark_sigma of dark.
+      * WHAT counts as not conducting. A healthy pixel is a flat line whose
+        least-squares slope is some denormal positive float, and 1/that is ~1e24 ohm.
+        That looks like a measurement and survives being averaged into one.
+    """
+    import numpy as np
+    from measure_iqe.acquire import fit_resistance
+
+    v = np.array([0.0, -0.1, -0.2, -0.3, -0.4, -0.5])
+    rng = np.random.default_rng(3)
+
+    # a 220 ohm short, measured through the SMU's few-nA range offset. The offset is
+    # fitted, not forced through the origin: 1 nA over a 0.5 V sweep is 500 Mohm of
+    # error, irrelevant against a short and fatal against a healthy pixel.
+    R, r2, off = fit_resistance(v, v / 220.0 + 3e-9)
+    assert abs(R - 220.0) < 1.0 and r2 > 0.999, (R, r2)
+    assert abs(off - 3e-9) < 1e-10, off
+
+    # a flat line is infinite, not 1e24, with or without noise on it
+    assert fit_resistance(v, np.full(6, 2e-10))[0] == float("inf")
+    assert fit_resistance(v, 2e-10 + rng.normal(0, 2e-12, 6))[0] == float("inf")
+
+    # but a real slope is kept even when it is small against the noise it rode in on:
+    # 1 Gohm over 0.5 V is 500 pA of swing against 2 pA of scatter
+    R = fit_resistance(v, v / 1e9 + rng.normal(0, 2e-12, 6))[0]
+    assert 0.9e9 < R < 1.1e9, R
+
+    # too few points to fit is NaN, never a number
+    assert not np.isfinite(fit_resistance(v[:2], v[:2] / 220.0)[0])
+
+
+def test_dead_iv_refuses_a_bias_that_would_measure_the_diode_instead():
+    """dead_iv_volts must stay below turn-on and must not change the array's polarity.
+
+    Past ~-0.8 V a HEALTHY pixel conducts too, so the slope stops being the short this
+    exists to find. A positive entry forward-biases the array in a direction nothing
+    else in the program uses.
+    """
+    from measure_iqe import IQEConfig
+
+    def rejects(**kw):
+        try:
+            IQEConfig(roi=(0, 0, 7, 7), dead_iv_pixels=4, **kw).validate()
+        except ValueError as exc:
+            return str(exc)
+        raise AssertionError(f"accepted {kw}")
+
+    assert "turn-on" in rejects(dead_iv_volts=(0.0, -0.4, -0.9))
+    assert "forward-biases" in rejects(dead_iv_volts=(0.1, 0.0, -0.2))
+    assert "slope" in rejects(dead_iv_volts=(0.0, -0.2))
+    assert "dead_iv_dark_sigma" in rejects(dead_iv_dark_sigma=0.0)
+    # and the default is off, so nothing changes for a run that does not ask
+    assert IQEConfig(roi=(0, 0, 7, 7)).validate().dead_iv_pixels == 0
+
+
 if __name__ == "__main__":
     # write_calibration() writes to every calibration root, the install tree included.
     # That is wanted for a real --calibrate and poison for a test: the suite once

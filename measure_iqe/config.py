@@ -803,6 +803,24 @@ class IQEConfig:
                                      # span -- -2.6 V draws ~175 uA -- so the list shares one
                                      # compliance and one range. At -1.05 V that is ~7 uA read on
                                      # the 1e-3 range, where the range offset is a few nA = 0.05%.
+    # --- IV of dead pixels, after the fast scan has classified them -----------------
+    # A dead pixel is usually shorted, so it has a RESISTANCE where a working one has a
+    # diode. That takes no High-C and no settling: a few sub-turn-on points and a slope.
+    # The same sweep runs on an equal number of alive pixels, because a resistance with
+    # nothing to compare it against says very little.
+    dead_iv_pixels: int = 0          # how many dead pixels to sweep. 0 = off
+    dead_iv_dark_sigma: float = 3.0  # "dead dead": keep only pixels whose fast-scan power
+                                     # is within this many sigma of dark, judged against the
+                                     # median per-pixel burst std. A pixel just under the
+                                     # alive threshold is still emitting and would give a
+                                     # diode curve, not the short this measurement is for.
+    dead_iv_volts: tuple[float, ...] = (0.0, -0.1, -0.2, -0.3, -0.4, -0.5)
+                                     # all below turn-on (~-0.8 V), so a healthy pixel draws
+                                     # almost nothing and a short draws V/R. Same polarity as
+                                     # the sweep: nothing here forward-biases the array.
+    dead_iv_limit_a: float = 1e-3    # compliance. A hard short at -0.5 V hits it, which is
+                                     # itself the result: R below ~500 ohm.
+    dead_iv_nplc: float = 1.0        # quiet reading; the whole sweep is a few seconds
     dead_threshold_frac: float = 0.20  # a pixel is alive if P ≥ this × the "typical lit" level
     fastscan_alive_pctl: int = 90  # "typical lit" level = this percentile of the fast-scan power.
                                      # NOT the median: the median collapses to the noise floor on a
@@ -1009,6 +1027,23 @@ class IQEConfig:
             raise ValueError("min_pixel_separation must be >= 1 (1 disables the guard)")
         if not 0 <= self.fastscan_alive_pctl <= 100:
             raise ValueError(f"fastscan_alive_pctl={self.fastscan_alive_pctl} must be in [0, 100]")
+        if self.dead_iv_pixels < 0:
+            raise ValueError("dead_iv_pixels must be >= 0 (0 is off)")
+        if self.dead_iv_pixels:
+            if not self.dead_iv_volts or len(self.dead_iv_volts) < 3:
+                raise ValueError("dead_iv_volts needs at least 3 points to fit a slope")
+            if any(v > 0 for v in self.dead_iv_volts):
+                raise ValueError(
+                    f"dead_iv_volts={self.dead_iv_volts} has a positive entry. The array "
+                    f"is driven negative; a positive bias here forward-biases it in a "
+                    f"direction nothing else in this program uses.")
+            if min(self.dead_iv_volts) < -0.75:
+                raise ValueError(
+                    f"dead_iv_volts reaches {min(self.dead_iv_volts):g} V, at or past "
+                    f"turn-on (~-0.8 V). Then a HEALTHY pixel conducts too and the slope "
+                    f"is a diode, not the short this measurement exists to find.")
+            if self.dead_iv_dark_sigma <= 0:
+                raise ValueError("dead_iv_dark_sigma must be > 0")
         if self.pixel_area_um2 <= 0:
             raise ValueError("pixel_area_um2 must be > 0")
         return self

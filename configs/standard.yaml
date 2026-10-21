@@ -365,6 +365,27 @@ fastscan_voltages: []     # EXTRA fast-scan biases; nvled_v_fastscan is always f
                           # neither reproduces, both withdrawn -- report 26.2.)
                           # For example:
                           # [-1.05, -1.65] measures the peak and both shoulders in one run.
+# ---- IV of dead pixels (off by default) ----
+# A dead pixel is usually shorted, so below turn-on it is a RESISTANCE where a working
+# one is a reverse-biased diode. That needs no High-C and no settling: a few points and
+# a slope. The same sweep runs on an equal number of ALIVE pixels, because a resistance
+# with nothing to compare it against says very little. Written to DeadIV/*_dead_iv.csv.
+dead_iv_pixels: 0          # how many dead pixels to sweep. 0 = off. "10" gives 10 dead + 10 alive
+dead_iv_dark_sigma: 3.0    # "dead dead", not merely under the alive threshold: keep only pixels
+                          # whose fast-scan power is within this many sigma of dark, sigma being
+                          # the median per-pixel burst std of the scan itself. A pixel at 19 % of
+                          # the lit level is below the threshold but still EMITTING, so its
+                          # junction works and it returns a diode curve, not a short. If too few
+                          # qualify the run says so and falls back to the darkest available.
+dead_iv_volts: [0.0, -0.1, -0.2, -0.3, -0.4, -0.5]
+                          # all below turn-on (~-0.8 V), so a healthy pixel draws almost nothing
+                          # and a short draws V/R. Same polarity as the sweep: nothing here
+                          # forward-biases the array. Rejected if any entry is positive or past
+                          # -0.75 V, where a healthy pixel starts conducting too.
+dead_iv_limit_a: 0.001     # compliance. A hard short at -0.5 V reaches it, which is itself the
+                          # answer: R below ~500 ohm. Such a row is flagged AT_COMPLIANCE and its
+                          # R is an upper bound.
+dead_iv_nplc: 1.0          # quiet reading; the whole sweep is a few seconds per pixel
 dead_threshold_frac: 0.2   # a pixel is alive if P ≥ this × the "typical lit" level
 fastscan_alive_pctl: 90   # "typical lit" level = this percentile of the fast-scan power. NOT the median: the ...
 pixel_area_um2: 100.0

@@ -1252,6 +1252,146 @@ def screen_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
     return order, rows
 
 
+_DEAD_IV_COLS = ["X", "Y", "STATE", "NVLED_V", "NVLED_CURR_MEAN", "NVLED_CURR_STD",
+                 "PM400_POWER_MEAN", "PM400_POWER_STD", "SCAN_POWER_W",
+                 "R_OHM", "R_FIT_R2", "I_OFFSET_A", "AT_COMPLIANCE"]
+
+
+def fit_resistance(volts, currents) -> tuple[float, float, float]:
+    """Least-squares R from a sub-turn-on IV, as (R_ohm, r2, I_offset_A).
+
+    The offset is fitted rather than forced through the origin: the SMU has a range
+    zero-offset of a few nA, and forcing the line through (0, 0) folds that straight
+    into the slope. At 1 nA of offset over a 0.5 V sweep that is a 500 Mohm error --
+    irrelevant against a short, fatal against a healthy pixel.
+
+    Returns R = inf when the slope is zero or negative, which is what a pixel that is
+    genuinely not conducting looks like. inf is the honest answer there, not a huge
+    number that invites being averaged.
+    """
+    v = np.asarray(volts, float)
+    i = np.asarray(currents, float)
+    ok = np.isfinite(v) & np.isfinite(i)
+    if ok.sum() < 3:
+        return float("nan"), float("nan"), float("nan")
+    v, i = v[ok], i[ok]
+    slope, offset = np.polyfit(v, i, 1)
+    var = float(np.var(i))
+    r2 = 1.0 - float(np.var(i - (slope * v + offset))) / var if var > 0 else float("nan")
+    # "Not conducting" has to be decided against the noise, not against zero. A healthy
+    # pixel reads a flat line whose least-squares slope is some denormal positive
+    # number, and 1/that is ~1e24 ohm -- a value that looks like a measurement and
+    # survives being averaged. The current has to swing by more than the scatter it was
+    # measured through before a slope means anything.
+    swing = abs(float(slope) * float(np.ptp(v)))
+    noise = float(np.std(i - (slope * v + offset)))
+    if slope <= 0 or swing <= 3.0 * noise or np.ptp(i) == 0:
+        return float("inf"), r2, float(offset)
+    return 1.0 / float(slope), r2, float(offset)
+
+
+def measure_dead_iv(pm, smu, smile, dead: list[Row], alive: list[Row],
+                    run_dir: Path, cfg: IQEConfig, log: Logger) -> list[Row]:
+    """Sweep a few dead pixels sub-turn-on and fit a resistance. And the same alive.
+
+    A dead pixel is normally shorted, so below turn-on it is a RESISTOR while a healthy
+    one is a reverse-biased diode drawing almost nothing. That difference shows up in a
+    handful of points and needs none of the sweep's machinery -- no High-C, no settling
+    ladder, no power meter range dance. The meter is still read, because a pixel that
+    conducts AND emits is a third thing worth seeing.
+
+    An equal number of alive pixels get the identical sweep. A resistance on its own
+    says very little; the same number measured the same way on pixels known to work is
+    what turns it into a comparison.
+
+    The dead pixels are the DARKEST ones, not merely those under the alive threshold.
+    A pixel sitting just below the threshold is still emitting, so it still has a
+    working junction and would return a diode curve. `dead_iv_dark_sigma` keeps only
+    pixels whose fast-scan power is within that many sigma of dark, sigma being the
+    median per-pixel burst std of the scan -- the meter's own noise, measured in the
+    same run rather than assumed.
+    """
+    n = cfg.dead_iv_pixels
+    sigma = float(np.nanmedian([abs(r.get("PM400_POWER_STD") or np.nan)
+                                for r in dead] or [np.nan]))
+    cut = cfg.dead_iv_dark_sigma * sigma
+    cands = [r for r in dead if abs(r["PM400_POWER_MEAN"]) <= cut] if np.isfinite(cut) \
+        else []
+    if len(cands) < n:
+        # Say what was relaxed and by how much, rather than quietly sweeping pixels
+        # that are dim instead of dead.
+        darkest = sorted(dead, key=lambda r: abs(r["PM400_POWER_MEAN"]))[:n]
+        log(f"  dead IV: only {len(cands)} pixel(s) within {cfg.dead_iv_dark_sigma:g} "
+            f"sigma of dark ({cut * 1e9:.3f} nW); taking the {len(darkest)} darkest "
+            f"instead, up to {abs(darkest[-1]['PM400_POWER_MEAN']) * 1e9:.3f} nW"
+            if darkest else "  dead IV: no dead pixels at all")
+        cands = darkest
+    # Spread them out. Neighbouring dead pixels are usually one defect, so sweeping
+    # four of them measures that defect four times.
+    picked = _fps_pick(cands, n, 0, min_sep=cfg.min_pixel_separation) if cands else []
+    refs = _fps_pick(alive, min(n, len(alive)), 0,
+                     min_sep=cfg.min_pixel_separation) if alive else []
+    if not picked and not refs:
+        log("  dead IV: nothing to measure")
+        return []
+
+    log(f"  dead IV: {len(picked)} dead + {len(refs)} alive over "
+        f"{', '.join(f'{v:g}' for v in cfg.dead_iv_volts)} V "
+        f"(limit {cfg.dead_iv_limit_a:g} A, NPLC {cfg.dead_iv_nplc:g}, no High-C)")
+    # Its own limit and no High-C: this is a resistance measurement, and High-C exists
+    # to settle a capacitive node that a short does not have.
+    configure_voltage_source_b(smu, dataclasses.replace(
+        cfg, nvled_compliance=cfg.dead_iv_limit_a, highc_b=False), log)
+    set_nplc(smu, cfg.dead_iv_nplc)
+    rows: list[Row] = []
+    try:
+        for state, group in (("dead", picked), ("alive", refs)):
+            for r in group:
+                x, y = r["X"], r["Y"]
+                smile.blank_frame()
+                smile.set_pixel(x, y, cfg.fastscan_bitval)
+                vs, is_ = [], []
+                here: list[Row] = []
+                for v in cfg.dead_iv_volts:
+                    smu.set_voltage("b", float(v))
+                    time.sleep(max(cfg.fastscan_settle_ms, 20) / 1000.0)
+                    p, ps, _, _, inv, invs, _, _ = acquire_point(
+                        pm, smu, cfg.fastscan_n_smu, 3)
+                    vs.append(v)
+                    is_.append(inv)
+                    here.append(dict(X=x, Y=y, STATE=state, NVLED_V=v,
+                                     NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
+                                     PM400_POWER_MEAN=p, PM400_POWER_STD=ps,
+                                     SCAN_POWER_W=r["PM400_POWER_MEAN"]))
+                res, r2, off = fit_resistance(vs, is_)
+                at_lim = any(abs(i) >= 0.95 * cfg.dead_iv_limit_a
+                             for i in is_ if i is not None and np.isfinite(i))
+                for row in here:
+                    row.update(R_OHM=res, R_FIT_R2=r2, I_OFFSET_A=off,
+                               AT_COMPLIANCE=int(at_lim))
+                rows.extend(here)
+                shown = ("inf (not conducting)" if res == float("inf")
+                         else f"{res:.4g} ohm" if np.isfinite(res) else "n/a")
+                log(f"    {state:5} ({x},{y})  R={shown}  r2={r2:.3f}"
+                    f"  scan P={abs(r['PM400_POWER_MEAN']) * 1e9:7.3f} nW"
+                    + ("  << AT COMPLIANCE, R is an upper bound" if at_lim else ""))
+    finally:
+        smile.blank_frame()
+        smu.set_voltage("b", float(cfg.fastscan_v_list()[0]))
+        configure_voltage_source_b(smu, dataclasses.replace(
+            cfg, nvled_compliance=cfg.fastscan_limit_a), log)
+        set_nplc(smu, cfg.fastscan_nplc)
+    if rows:
+        pfx = run_slug(cfg.sample_name, run_dir) + "_"
+        write_aggregated_one(run_dir / "DeadIV" / f"{pfx}dead_iv.csv", rows,
+                             cols=_DEAD_IV_COLS)
+        med = {s: np.nanmedian([r["R_OHM"] for r in rows if r["STATE"] == s] or [np.nan])
+               for s in ("dead", "alive")}
+        log(f"  dead IV: median R  dead {med['dead']:.4g} ohm   "
+            f"alive {med['alive']:.4g} ohm")
+    return rows
+
+
 def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
                   run_dir: Path, cfg: IQEConfig, log: Logger) -> list[Row]:
     volts = cfg.fastscan_v_list()
@@ -1362,6 +1502,11 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
         log(f"  NOTE: ROI is majority-dark (median {med*1e9:.2f} nW < threshold {thr*1e9:.1f} nW) — "
             f"most of this region is dead; block selection draws from the lit minority.")
     smile.blank_frame()      # never hand the next stage a lit pixel
+    if cfg.dead_iv_pixels:
+        # Here, not later: this is the only point where the dead population exists.
+        # select_sweep_pixels keeps the alive ones and the dead are never named again.
+        dead = [r for r, p in zip(sel_rows, P) if p < thr]
+        measure_dead_iv(pm, smu, smile, dead, alive, run_dir, cfg, log)
     sel = select_sweep_pixels(alive, cfg, log)
     # Pooled groups come AFTER the rotation, deliberately: sweep_rotate exists to move a
     # different single pixel into slot 0 (section 17, open question 13), and a pooled
