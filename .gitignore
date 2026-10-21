@@ -246,3 +246,4 @@ INVESTIGATION_REPORT.md
 # from disk, so a fresh clone cannot rebuild the investigation figures. That is the
 # intended trade: see ROADMAP.md, "Measurement data must not live under the repo root".
 caprun/
+analysis/
