@@ -34,7 +34,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 OVERFLOW = 1e36          # the 2600's over-range sentinel, 9.91e37. Not a number.
-DPI = 150
+DPI = 300
 QUADRANTS = ("TL", "TR", "BL", "BR")
 # Two arrays, two colours, everywhere. Index 0 is the first run on the command line.
 COLOURS = ("#1f77b4", "#d62728", "#2ca02c", "#9467bd")
@@ -60,8 +60,9 @@ def _quadrant_of(x, y):
 # is now called a fast capture; one from before the paired leakage test has no
 # `leakage_suspect`, and nothing in it was ever flagged. Backfilling beats crashing,
 # but the assumption is printed so a missing column is never mistaken for a measurement.
-BACKFILL = {"stage": "fast", "leakage_suspect": "False", "lit_blank_ratio": "",
-            "p_t_1pct": "", "p_settled_W": "", "channels": "2"}
+BACKFILL = {"step.csv": {"stage": "fast", "p_t_1pct": "", "p_settled_W": "",
+                         "channels": "2"},
+            "cap.csv": {"leakage_suspect": "False", "lit_blank_ratio": ""}}
 
 
 def _rows(path: Path) -> list[dict]:
@@ -69,10 +70,11 @@ def _rows(path: Path) -> list[dict]:
         return []
     with path.open(encoding="utf-8") as f:
         out = list(csv.DictReader(f))
-    missing = sorted(k for k in BACKFILL if out and k not in out[0])
+    fill = BACKFILL.get(path.name, {})
+    missing = sorted(k for k in fill if out and k not in out[0])
     for r in out:
         for k in missing:
-            r[k] = BACKFILL[k]
+            r[k] = fill[k]
         # --pixels records quadrant="given", so derive it rather than plotting a
         # single bar labelled "given" for four different quadrants.
         if r.get("quadrant") in (None, "", "given"):
@@ -80,7 +82,7 @@ def _rows(path: Path) -> list[dict]:
     if missing:
         print(f"  ! {path.parent.name}/{path.name} predates "
               f"{', '.join(missing)} -- assuming "
-              + ", ".join(f"{k}={BACKFILL[k]!r}" for k in missing), file=sys.stderr)
+              + ", ".join(f"{k}={fill[k]!r}" for k in missing), file=sys.stderr)
     return out
 
 
@@ -284,7 +286,13 @@ def fit_power_law(t, i, t_min=1.0, t_max=None, nbin=120, min_bins=20, snr=3.0):
     def scan(cands):
         out = (float("nan"), float("nan"), -np.inf, 0)
         for cand in cands:
-            d = ib - cand
+            # abs(), because the approach can come from EITHER side. An earlier
+            # version used ib - cand with cand below the data, which only ever
+            # described a decay from above -- and the Array42 record does the
+            # opposite: 312 -> 419 -> 474 -> 481 nA, rising to its asymptote. The
+            # fit then returned alpha = -0.04 at r2 = 0.60, a straight line through
+            # the wrong model. I_inf simply sits ABOVE the data for a rise.
+            d = np.abs(ib - cand)
             keep = d > snr * sb if sigma else d > 0
             if np.count_nonzero(keep) < min_bins:
                 continue
@@ -298,15 +306,20 @@ def fit_power_law(t, i, t_min=1.0, t_max=None, nbin=120, min_bins=20, snr=3.0):
                 out = (-float(slope), float(cand), r2, int(np.count_nonzero(keep)))
         return out
 
-    # Two passes. A single 400-point grid over [0, min] has a step of ~1 nA, and an
-    # I_inf wrong by 1 nA leaves a constant offset in the tail that flattens the fit:
-    # a true 1.6 came back as 1.12 on synthetic data purely from grid resolution.
-    top = float(ib.min())
-    best = scan(np.linspace(0.0, top, 400, endpoint=False))
+    # Candidates on BOTH sides of the data: below it describes a decay toward I_inf,
+    # above it an approach from below. Array42 does the second. The band inside the
+    # data is skipped -- there d crosses zero and log10 of it is meaningless.
+    lo, hi = float(ib.min()), float(ib.max())
+    span = max(hi - lo, 1e-15)
+    below = np.linspace(max(0.0, lo - 4 * span), lo, 400, endpoint=False)
+    above = np.linspace(hi + span * 1e-6, hi + 4 * span, 400)
+    # Two passes. A single grid has a step of ~1 nA here, and an I_inf wrong by 1 nA
+    # leaves a constant offset in the tail that flattens the fit: a true 1.6 came back
+    # as 1.12 on synthetic data purely from grid resolution.
+    best = scan(np.concatenate([below, above]))
     if np.isfinite(best[1]):
-        step = top / 400.0
-        best = max(best, scan(np.linspace(max(0.0, best[1] - 2 * step),
-                                          min(top * (1 - 1e-12), best[1] + 2 * step),
+        step = 4 * span / 400.0
+        best = max(best, scan(np.linspace(best[1] - 2 * step, best[1] + 2 * step,
                                           400)), key=lambda b: b[2])
     return best if np.isfinite(best[0]) else nan4
 
@@ -333,71 +346,82 @@ def log_bin(t, y, nbin=140):
 
 # --------------------------------------------------------------------------- figures
 
-def fig_cap_per_quadrant(runs, out: Path):
-    """C per quadrant, lit, usable setpoints only.
+def _q_axes(n, w=3.4, h=3.2, **kw):
+    """One panel per quadrant, in a row. Returns (fig, [ax...])."""
+    fig, axes = plt.subplots(1, max(1, n), figsize=(w * max(1, n), h),
+                             squeeze=False, **kw)
+    return fig, list(axes[0])
 
-    A setpoint is usable when the lit and blanked ramps agree: the capacitor cannot
-    care whether a sub-turn-on pixel is addressed, so a disagreement means the diode's
-    leakage is taking a share of the ramp current. Both values are then unusable --
-    including the one that looks plausible (39.41 uF against 213.56 uF on Array42).
+
+def _quadrants_in(runs):
+    qs = {r["quadrant"] for run in runs for r in run.step}
+    return [q for q in QUADRANTS if q in qs] or ["?"]
+
+
+def fig_capacitance(runs, out: Path):
+    """C per quadrant, every setpoint shown, lit against blanked.
+
+    Bars hid the whole story. What matters is that the usable setpoints AGREE -- with
+    each other, across quadrants, and between lit and blanked -- while the smallest one
+    does not. On Array42 the 1 uA setpoint reads 186-308 uF blanked against 42-46 uF
+    lit, a 4.4-7.0x disagreement, because at -0.4 V the diode's own leakage takes a
+    large share of a 1 uA ramp. The capacitor cannot care whether a sub-turn-on pixel
+    is addressed, so that disagreement is the test, and BOTH values fail it.
     """
-    fig, ax = plt.subplots(figsize=(9.5, 4.8))
-    w = 0.8 / max(1, len(runs))
-    summary = {}
+    fig, ax = plt.subplots(figsize=(8.6, 4.6))
+    summary, xs = {}, []
+    qs = _quadrants_in(runs)
     for ri, run in enumerate(runs):
-        per_q = defaultdict(list)
+        good = []
         for r in run.cap:
-            if r["lit"] != "True":
+            q = r["quadrant"]
+            if q not in qs:
                 continue
-            c = _num(r["capacitance_F"])
-            if np.isfinite(c):
-                per_q[r["quadrant"]].append((c, r["leakage_suspect"] == "True"))
-        good, flagged = [], []
-        for q in QUADRANTS:
-            vals = per_q.get(q, [])
-            keep = [c for c, bad in vals if not bad]
-            drop = [c for c, bad in vals if bad]
-            good.append(np.median(keep) * 1e6 if keep else np.nan)
-            flagged.append(np.median(drop) * 1e6 if drop else np.nan)
-        xs = np.arange(len(QUADRANTS))
-        off = (ri - (len(runs) - 1) / 2) * w
-        ax.bar(xs + off, good, w, color=COLOURS[ri], label=f"{run.name} usable")
-        ax.bar(xs + off, flagged, w, facecolor="none", edgecolor=COLOURS[ri],
-               hatch="///", linewidth=1.0,
-               label=f"{run.name} leakage-flagged (NOT usable)")
-        for x, g in zip(xs, good):
-            if np.isfinite(g):
-                ax.annotate(f"{g:.1f}", (x + off, g), ha="center", va="bottom",
-                            fontsize=7.5, rotation=90)
-        ok = [g for g in good if np.isfinite(g)]
-        summary[run.name] = (float(np.median(ok)) if ok else float("nan"),
-                             float(np.min(ok)) if ok else float("nan"),
-                             float(np.max(ok)) if ok else float("nan"))
-    ax.set_xticks(np.arange(len(QUADRANTS)), QUADRANTS)
+            c, lit = _num(r["capacitance_F"]) * 1e6, r["lit"] == "True"
+            bad = r["leakage_suspect"] == "True"
+            if not np.isfinite(c):
+                continue
+            x = qs.index(q) + (ri - (len(runs) - 1) / 2) * 0.3
+            xs.append(x)
+            ax.plot(x, c, marker="o" if lit else "s", ms=7 if lit else 5,
+                    mfc=COLOURS[ri] if not bad else "none", mec=COLOURS[ri],
+                    mew=1.4, ls="none", alpha=0.9)
+            if not bad and lit:
+                good.append(c)
+        if good:
+            summary[run.name] = (float(np.median(good)), float(np.min(good)),
+                                 float(np.max(good)))
+            ax.axhline(np.median(good), color=COLOURS[ri], ls="--", lw=0.9, alpha=0.6)
+        ax.plot([], [], "o", color=COLOURS[ri], ls="none", label=f"{run.name} lit")
+        ax.plot([], [], "s", color=COLOURS[ri], ls="none", label=f"{run.name} blanked")
+    ax.plot([], [], "o", mfc="none", mec="0.3", ls="none",
+            label="hollow = lit/blanked disagreed, NOT usable")
+    ax.set_yscale("log")
+    ax.set_xticks(range(len(qs)), qs)
     ax.set_xlabel("quadrant")
-    ax.set_ylabel("carrier capacitance  [uF]")
-    ax.set_title("Capacitance per quadrant (lit, leakage-free setpoints)\n"
-                 "hatched = lit and blanked disagreed, so neither value is usable",
-                 fontsize=10)
-    ax.legend(fontsize=7.5, ncol=2)
-    ax.grid(axis="y", alpha=0.3)
+    ax.set_ylabel("fitted capacitance  [uF]")
+    ax.set_title("Carrier capacitance: every setpoint, lit and blanked\n"
+                 "the usable ones agree; the smallest is leakage-dominated and both "
+                 "of its values are wrong", fontsize=10)
+    ax.legend(fontsize=7.5, loc="best")
+    ax.grid(axis="y", which="both", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out / "cap_per_quadrant.png", dpi=DPI)
+    fig.savefig(out / "capacitance.png", dpi=DPI)
     plt.close(fig)
     return summary
 
 
 def fig_cap_ramps(runs, out: Path):
-    """The raw V(t) the capacitance was fitted from. C = I / (dV/dt), so slope is 1/C.
+    """The raw V(t) behind each C. A current source charges the node: dV/dt = I/C.
 
-    Lit solid, blanked dashed. Where the two diverge, the diode is drawing part of the
-    ramp current and the slope under-reads -- the whole leakage test, made visible.
+    Lit solid, blanked dashed. Where the two separate, the diode is taking part of the
+    ramp current and the slope under-reads.
     """
     sets = sorted({_num(r["i_set"]) for run in runs for r in run.cap})
     sets = [s for s in sets if np.isfinite(s)]
     if not sets:
         return
-    fig, axes = plt.subplots(1, len(sets), figsize=(4.0 * len(sets), 3.9),
+    fig, axes = plt.subplots(1, len(sets), figsize=(3.8 * len(sets), 3.8),
                              squeeze=False, sharey=True)
     for si, iset in enumerate(sets):
         ax = axes[0][si]
@@ -407,132 +431,195 @@ def fig_cap_ramps(runs, out: Path):
                     continue
                 t, v = clean(tv[0], tv[1])
                 lit = r["lit"] == "True"
-                ax.plot(t, v, color=COLOURS[ri], lw=1.1 if lit else 0.9,
-                        ls="-" if lit else "--", alpha=0.85,
+                ax.plot(t, v, color=COLOURS[ri], lw=1.0 if lit else 0.9,
+                        ls="-" if lit else "--", alpha=0.8,
                         label=f"{run.name} {'lit' if lit else 'blanked'}")
-        ax.set_title(f"I = {iset * 1e9:.0f} nA", fontsize=9)
+        flagged = any(r["leakage_suspect"] == "True" for run in runs for r in run.cap
+                      if abs(_num(r["i_set"]) - iset) < 1e-15)
+        ax.set_title(f"I = {iset * 1e9:.0f} nA"
+                     + ("\nLEAKAGE-DOMINATED, rejected" if flagged else ""),
+                     fontsize=9, color="#b22222" if flagged else "black")
         ax.set_xlabel("t  [s]")
         ax.grid(alpha=0.3)
         if si == 0:
             ax.set_ylabel("V on ch B  [V]")
-        handles, labels = ax.get_legend_handles_labels()   # one entry per (run, lit)
-        seen = dict(zip(labels, handles))
+        h, l = ax.get_legend_handles_labels()
+        seen = dict(zip(l, h))
         ax.legend(seen.values(), seen.keys(), fontsize=7)
-    fig.suptitle("Capacitance ramps: a current source charges the node, dV/dt = I/C "
-                 "(lit solid, blanked dashed)", fontsize=10)
+    fig.suptitle("Capacitance ramps. Steeper = smaller C. Lit and blanked must "
+                 "overlap, or the diode is stealing ramp current.", fontsize=10)
     fig.tight_layout()
     fig.savefig(out / "cap_ramps.png", dpi=DPI)
     plt.close(fig)
 
 
-def fig_step_fast(runs, out: Path):
-    """The fast capture: the charge edge and the first seconds, High-C on, per bias.
+def fig_charge_edge(runs, out: Path, window_ms=120.0):
+    """The fast capture's reason to exist: the charge edge, High-C on, at the faintest
+    bias. Linear in milliseconds.
 
-    High-C only, because without it a sub-10 uA reading is a range artifact rather
-    than a current -- see range_artifact.png.
+    This was a log axis before, which spread the first few milliseconds over most of
+    the panel and left the reader deciphering "10^-1 s". The edge is a few ms wide, so
+    milliseconds is what the axis should say.
     """
     biases = sorted({_num(r["v_to"]) for run in runs for r in run.step
-                     if r["stage"] == "fast" and r["highc"] == "True"}, reverse=True)
+                     if r["stage"] == "fast" and r["highc"] == "True"})
     if not biases:
         return
-    fig, axes = plt.subplots(1, len(biases), figsize=(3.4 * len(biases), 3.7),
-                             squeeze=False)
-    for bi, v in enumerate(biases):
-        ax = axes[0][bi]
-        for ri, run in enumerate(runs):
-            for r, it, _ in run.step_traces():
-                if (r["stage"] != "fast" or r["highc"] != "True"
-                        or abs(_num(r["v_to"]) - v) > 1e-9):
-                    continue
-                t, i = clean(it[0], it[2])          # row 2 is ch B
-                ok = t > 0
-                ax.plot(t[ok], i[ok] * 1e9, color=COLOURS[ri], lw=0.8, alpha=0.7)
-            ax.plot([], [], color=COLOURS[ri], lw=1.2, label=run.name)
-        ax.set_title(f"V = {v:+.2f} V", fontsize=9)
-        ax.set_xlabel("t after the step  [s]")
-        log_axes(ax, x=True, y=False)
-        ax.grid(which="both", alpha=0.3)
-        if bi == 0:
-            ax.set_ylabel("I on ch B  [nA]")
-            ax.legend(fontsize=7.5)
-    fig.suptitle("Fast capture, High-C on: charge edge and early relaxation "
-                 "(one line per pixel)", fontsize=10)
+    v_want = max(biases)                       # the faintest, where the long one runs
+    fig, ax = plt.subplots(figsize=(7.6, 4.2))
+    for ri, run in enumerate(runs):
+        for r, it, _ in run.step_traces():
+            if (r["stage"] != "fast" or r["highc"] != "True"
+                    or abs(_num(r["v_to"]) - v_want) > 1e-9):
+                continue
+            t, i = clean(it[0], it[2])
+            sel = t * 1e3 <= window_ms
+            ax.plot(t[sel] * 1e3, i[sel] * 1e9, color=COLOURS[ri], lw=0.9, alpha=0.75)
+        ax.plot([], [], color=COLOURS[ri], lw=1.4, label=run.name)
+    ax.set_xlabel("t after the step  [ms]")
+    ax.set_ylabel("I on ch B  [nA]")
+    ax.set_title(f"Charge edge at V = {v_want:+.2f} V, High-C on (one line per pixel)\n"
+                 "0.2 V across ~47 uF at a 1 mA limit is ~9 ms", fontsize=10)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
     fig.tight_layout()
-    fig.savefig(out / "step_fast.png", dpi=DPI)
+    fig.savefig(out / "charge_edge.png", dpi=DPI)
     plt.close(fig)
 
 
-def fig_step_long(runs, out: Path, t_min=1.0):
-    """The long capture on log-log, with the fitted exponent. The headline figure.
+def fig_settling(runs, out: Path):
+    """THE figure. Current and light on one time axis, each as a fraction of its final.
 
-    Settling here is a POWER LAW, not an RC exponential: the amplitude scales with the
-    step size and the decay goes as t^-1.2, which is displaced charge / dielectric
-    absorption. Whether removing the capacitors removed the power law -- not merely
-    made C smaller -- is the question this plot answers.
+    Measured on Array42: the light is flat by ~2 s while the current is still climbing
+    at 400 s and never reaches 0.1 % inside the record. So the slow electrical tail
+    carries NO light -- it is parasitic, not LED current. What the sweep's dwell waits
+    for is the denominator of the EQE, not the numerator.
 
-    One panel per High-C state, because the two are measured on different ranges, so
-    their absolute currents are not comparable to each other. Across runs, inside one
-    panel, they are.
+    Normalising both to their own final value is the only way to put a nanoamp and a
+    picowatt on one axis, and it is also the honest comparison: the question is when
+    each one STOPS CHANGING, not what either is worth.
     """
-    states = (("True", "High-C on"), ("False", "High-C off"))
-    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.6), squeeze=False)
-    fits = {}
-    for si, (hc, title) in enumerate(states):
-        ax = axes[0][si]
-        found = False
+    qs = _quadrants_in(runs)
+    fig, axes = _q_axes(len(qs), w=3.6, h=3.6, sharey=True)
+    rows = {}
+    for qi, q in enumerate(qs):
+        ax = axes[qi]
         for ri, run in enumerate(runs):
-            for r, it, _ in run.step_traces():
-                if r["stage"] != "long" or r["highc"] != hc:
+            for r, it, pt in run.step_traces():
+                if (r["stage"] != "long" or r["highc"] != "True"
+                        or r["quadrant"] != q):
                     continue
                 t, i = clean(it[0], it[2])
-                found = True
-                # Every long trace gets an entry, even one too short to fit. Skipping
-                # them made an unfittable record indistinguishable from a missing one,
-                # and the summary then blamed the wrong thing.
-                alpha, iinf, r2, n = fit_power_law(t, i, t_min=t_min)
-                key = (run.name, title, f"{r['quadrant']} {_num(r['v_to']):+.2f}V")
-                fits[key] = (alpha, iinf, r2, n, int(t.size))
-                tb, yb = log_bin(t, np.abs(i) - (iinf if np.isfinite(iinf) else 0.0))
-                keep = (tb >= t_min) & (yb > 0)
-                ax.plot(tb[keep], yb[keep] * 1e9, color=COLOURS[ri], lw=1.0, alpha=0.8)
-                if np.isfinite(alpha) and keep.sum() > 2:
-                    tf = np.geomspace(tb[keep][0], tb[keep][-1], 50)
-                    ref = yb[keep][0]
-                    ax.plot(tf, ref * (tf / tf[0]) ** (-alpha) * 1e9,
-                            color=COLOURS[ri], ls=":", lw=1.5)
-            ax.plot([], [], color=COLOURS[ri], lw=1.2, label=run.name)
-        ax.plot([], [], color="0.4", ls=":", lw=1.5, label="fitted power law")
-        log_axes(ax)
+                if t.size < 50:
+                    continue
+                # Log-bin BOTH for display. The optical record is 200k samples at
+                # 500 Hz: drawn raw it is a solid block of ink that hides the current
+                # curve underneath it. The median per bin is the same trace, readable.
+                fin = np.median(np.abs(i[int(0.8 * i.size):]))
+                tb, yb = log_bin(t, np.abs(i) / fin, nbin=220)
+                ax.plot(tb, yb, color=COLOURS[ri], lw=1.3,
+                        label=f"{run.name} current")
+                if pt is not None:
+                    tp, p = clean(pt[0], pt[1])
+                    if tp.size > 50:
+                        pf = np.median(np.abs(p[int(0.8 * p.size):]))
+                        tpb, pb = log_bin(tp, np.abs(p) / pf, nbin=220)
+                        ax.plot(tpb, pb, color="#ff7f0e", lw=1.3, ls="--",
+                                alpha=0.85, label=f"{run.name} light")
+                e, o = _num(r["t_1pct"]), _num(r["p_t_1pct"])
+                rows[(run.name, q)] = (e, o, _num(r["t_01pct"]))
+                for val, col in ((o, "#ff7f0e"), (e, COLOURS[ri])):
+                    if np.isfinite(val) and val > 0:
+                        ax.axvline(val, color=col, ls=":", lw=1.1, alpha=0.8)
+        ax.axhspan(0.99, 1.01, color="0.85", zorder=0)
+        ax.set_xscale("log")
+        ax.set_ylim(0.0, 1.35)
         ax.set_xlabel("t after the step  [s]")
-        ax.set_ylabel("|I(t) - I_inf|  [nA]")
-        ax.set_title(title + ("" if found else "  (no long capture in these runs)"),
-                     fontsize=10)
+        ax.set_title(q, fontsize=10)
         ax.grid(which="both", alpha=0.25)
-        ax.legend(fontsize=7.5)
-    fig.suptitle("Long capture on log-log: a straight line IS a power law.  "
-                 f"I_inf is fitted, not the `settled` column.  t > {t_min:g} s",
+        if qi == 0:
+            ax.set_ylabel("fraction of its own final value")
+            h, l = ax.get_legend_handles_labels()
+            seen = dict(zip(l, h))
+            ax.legend(seen.values(), seen.keys(), fontsize=7, loc="lower right")
+    fig.suptitle("The light settles. The current does not.  solid = I(t), dashed = "
+                 "P(t), both over their own final value\n"
+                 "grey band = within 1 %, dotted verticals = when each last left it",
                  fontsize=10)
     fig.tight_layout()
-    fig.savefig(out / "step_long_loglog.png", dpi=DPI)
+    fig.savefig(out / "settling.png", dpi=DPI)
+    plt.close(fig)
+    return rows
+
+
+def fig_power_law(runs, out: Path, t_min=1.0):
+    """The relaxation on log-log, where a power law is a straight line.
+
+    Only High-C. Without it the reading is not a current at all (see highc_needed.png),
+    so fitting an exponent to it would be fitting the meter.
+
+    I_inf is FITTED and may sit on either side of the data: Array42 approaches from
+    BELOW, 312 -> 419 -> 474 -> 481 nA, so the asymptote is above every sample. An
+    earlier version searched below only and reported alpha = -0.04 at r2 = 0.60.
+    """
+    fig, ax = plt.subplots(figsize=(7.8, 5.0))
+    fits = {}
+    for ri, run in enumerate(runs):
+        for r, it, _ in run.step_traces():
+            if r["stage"] != "long" or r["highc"] != "True":
+                continue
+            t, i = clean(it[0], it[2])
+            alpha, iinf, r2, nb = fit_power_law(t, i, t_min=t_min)
+            q = r["quadrant"]
+            fits[(run.name, q)] = (alpha, iinf, r2, nb, int(t.size))
+            if not np.isfinite(alpha):
+                continue
+            # Colour is the QUADRANT and dash is the RUN. Four lines of one colour
+            # told the reader nothing about which was which, and with two arrays the
+            # pairs that matter are same-colour: the same quadrant before and after.
+            col = COLOURS[QUADRANTS.index(q) % len(COLOURS)] if q in QUADRANTS \
+                else COLOURS[0]
+            dash = [(0, ()), (0, (6, 2)), (0, (1, 1.5))][ri % 3]
+            tb, yb = log_bin(t, np.abs(np.abs(i) - iinf))
+            keep = (tb >= t_min) & (yb > 0)
+            ax.plot(tb[keep], yb[keep] * 1e9, color=col, lw=1.3, alpha=0.9, ls=dash,
+                    label=f"{run.name} {q}: a={alpha:.2f}, r2={r2:.3f}")
+            tf = np.geomspace(tb[keep][0], tb[keep][-1], 40)
+            ax.plot(tf, yb[keep][0] * (tf / tf[0]) ** -alpha * 1e9,
+                    color=col, ls=":", lw=1.0, alpha=0.5)
+    log_axes(ax)
+    ax.set_xlabel("t after the step  [s]")
+    ax.set_ylabel("distance from the fitted asymptote  |I - I_inf|  [nA]")
+    ax.set_title("Relaxation is a power law, not an RC exponential\n"
+                 "straight on log-log = t^-a. Dotted = the fit. High-C only.",
+                 fontsize=10)
+    ax.legend(fontsize=7.5)
+    ax.grid(which="both", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(out / "power_law.png", dpi=DPI)
     plt.close(fig)
     return fits
 
 
-def fig_range_artifact(runs, out: Path):
-    """Can High-C be dropped? The one plot that answers it.
+def fig_highc_needed(runs, out: Path):
+    """Can High-C be dropped? Two independent answers, side by side.
 
-    Without High-C on Array42, a sub-10 uA reading sits at ~50 % of whatever measure
-    range was selected, at a FIXED bias -- so `settled` tracks the RANGE and not the
-    device. On this plot that is a line of slope 1. A reading that tracks bias instead
-    is flat, at the High-C value. Flat is the bar for Array38.
+    LEFT: at a fixed bias the non-High-C reading tracks the selected RANGE, sitting at
+    about half of whatever was chosen, across five decades. A line of slope 1 is an
+    artifact; flat would be a device.
+
+    RIGHT: the decisive one, because the power meter is an independent witness. The
+    same pixel at the same bias, measured long with High-C and without: on Array42 the
+    CURRENT differs by 13x (424-488 nA against 35-37 nA) while the LIGHT agrees to
+    about 1 %. The device was in the same state both times, so the disagreement is the
+    meter, not the pixel.
     """
-    fig, axes = plt.subplots(1, len(runs), figsize=(4.9 * len(runs), 4.2),
-                             squeeze=False, sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(12.4, 4.8), squeeze=False)
+    ax = axes[0][0]
     verdict = {}
     for ri, run in enumerate(runs):
-        ax = axes[0][ri]
-        biases = sorted({_num(r["v_to"]) for r in run.step}, reverse=True)
         all_x = []
+        biases = sorted({_num(r["v_to"]) for r in run.step}, reverse=True)
         for bi, v in enumerate(biases):
             pts = sorted((_num(r["range_i"]), abs(_num(r["settled"])))
                          for r in run.step
@@ -544,94 +631,111 @@ def fig_range_artifact(runs, out: Path):
                 continue
             x = np.array([p[0] for p in pts])
             y = np.array([p[1] for p in pts])
-            col = COLOURS[bi % len(COLOURS)]
             all_x.append(x)
-            ax.plot(x, y, "o-", lw=1.0, ms=4, color=col, label=f"V = {v:+.2f} V")
-            truth = [abs(_num(r["settled"])) for r in run.step
-                     if (r["highc"] == "True" and r["stage"] == "long"
-                         and abs(_num(r["v_to"]) - v) < 1e-9)]
-            truth = truth or [abs(_num(r["settled"])) for r in run.step
-                              if (r["highc"] == "True"
-                                  and abs(_num(r["v_to"]) - v) < 1e-9)]
-            truth = [a for a in truth if np.isfinite(a) and a > 0]
-            if truth:
-                ax.axhline(float(np.median(truth)), color=col, ls="--", lw=0.9,
-                           alpha=0.7)
+            ax.plot(x, y, "o-", lw=1.0, ms=4, color=COLOURS[bi % len(COLOURS)],
+                    alpha=0.9, label=f"{run.name} V={v:+.2f}" if ri == 0 or True else None)
             verdict.setdefault(run.name, []).append(
                 (v, float(np.median(y / x)), float(np.ptp(np.log10(y)))))
-        # The ranges actually plotted. Scraping get_lines() instead picked up the
-        # axhline, whose xdata is [0, 1] in axes coordinates, so the guide line ran
-        # out to 1 A and stretched the axis past any measurement.
         drawn = np.concatenate(all_x) if all_x else np.array([])
         if drawn.size:
             xs = np.geomspace(drawn.min(), drawn.max())
-            ax.plot(xs, 0.5 * xs, color="0.6", ls=":", lw=1.2,
-                    label="50 % of range (pure artifact)")
-        log_axes(ax)
-        ax.set_xlabel("selected measure range  [A]")
-        ax.set_title(f"{run.name} -- High-C OFF\n"
-                     "on the guide line = artifact, flat = usable\n"
-                     "dashed = the High-C truth at that bias", fontsize=8.5)
-        ax.grid(which="both", alpha=0.25)
-        if ri == 0:
-            ax.set_ylabel("|settled| reading  [A]")
-        ax.legend(fontsize=7)
-    fig.suptitle("Does a non-High-C reading track the DEVICE or the RANGE?",
-                 fontsize=10)
+            ax.plot(xs, 0.5 * xs, color="0.55", ls=":", lw=1.4,
+                    label="50 % of range = pure artifact")
+    log_axes(ax)
+    ax.set_xlabel("selected measure range  [A]")
+    ax.set_ylabel("|settled| reading  [A]")
+    ax.set_title("High-C OFF: the reading follows the RANGE\n"
+                 "on the guide line = artifact, flat = a real current", fontsize=9.5)
+    ax.grid(which="both", alpha=0.25)
+    ax.legend(fontsize=7)
+
+    ax2 = axes[0][1]
+    qs = _quadrants_in(runs)
+    w, labels = 0.35, []
+    for ri, run in enumerate(runs):
+        cur, pwr = {}, {}
+        for r in run.step:
+            if r["stage"] != "long":
+                continue
+            key = (r["quadrant"], r["highc"] == "True")
+            cur[key] = abs(_num(r["settled"])) * 1e9
+            pwr[key] = abs(_num(r["power_W"])) * 1e12
+        x = np.arange(len(qs))
+        on = [cur.get((q, True), np.nan) for q in qs]
+        off = [cur.get((q, False), np.nan) for q in qs]
+        ax2.bar(x - w / 2, on, w, color=COLOURS[ri], label=f"{run.name} I, High-C on")
+        ax2.bar(x + w / 2, off, w, color=COLOURS[ri], alpha=0.4, hatch="//",
+                label=f"{run.name} I, High-C off")
+        for xi, q in enumerate(qs):
+            a, b = cur.get((q, True)), cur.get((q, False))
+            pa, pb = pwr.get((q, True)), pwr.get((q, False))
+            if a and b and np.isfinite(a) and np.isfinite(b) and b:
+                ax2.annotate(f"{a / b:.0f}x", (xi, max(a, b) * 1.25), ha="center",
+                             fontsize=9, color="#b22222")
+            if pa and pb and np.isfinite(pa) and np.isfinite(pb) and pb:
+                ax2.annotate(f"light {pa:.0f} vs {pb:.0f} pW\n({100 * (pa / pb - 1):+.1f} %)",
+                             (xi, max(a or 0, b or 0) * 0.45), ha="center", fontsize=7,
+                             color="0.25")
+        labels = qs
+    # Headroom for the ratio labels, which sit above the taller bar and were being
+    # clipped off the top of the axis entirely.
+    top = max([v for v in ax2.get_ylim()] + [0])
+    ax2.set_ylim(0, top * 1.35)
+    ax2.set_xticks(np.arange(len(labels)), labels)
+    ax2.set_xlabel("quadrant")
+    ax2.set_ylabel("long-capture settled current  [nA]")
+    ax2.set_title("Same pixel, same bias, same light -- 13x different current\n"
+                  "the power meter is the witness: the device did not change",
+                  fontsize=9.5)
+    ax2.grid(axis="y", alpha=0.3)
+    ax2.legend(fontsize=7)
     fig.tight_layout()
-    fig.savefig(out / "range_artifact.png", dpi=DPI)
+    fig.savefig(out / "highc_needed.png", dpi=DPI)
     plt.close(fig)
     return verdict
 
 
-def fig_settling(runs, out: Path):
-    """Electrical against optical settling, per High-C state and stage.
+def fig_bias_response(runs, out: Path):
+    """Current and light against bias, High-C on. They do not fall together.
 
-    On Array42 the light settles about 45x faster than the current (2.24 s against
-    101.15 s at -0.80 V), so the slow electrical tail carries NO light and is
-    parasitic. If removing the capacitors collapses the electrical time toward the
-    optical one, the relaxation lived in their dielectric.
+    On Array42 between -0.95 and -0.80 V the current falls 5.4x while the light falls
+    22x. So as the bias drops, a growing share of the current stops producing photons
+    -- which is the same parasitic path the settling figure sees, measured a second way.
     """
-    groups = (("long", "True", "long, High-C on"),
-              ("long", "False", "long, High-C off"),
-              ("fast", "True", "fast, High-C on"))
-    labels, el, op = [], [], []
-    for stage, hc, title in groups:
-        for run in runs:
-            sel = [r for r in run.step if r["stage"] == stage and r["highc"] == hc]
-            e = [x for x in (_num(r["t_1pct"]) for r in sel) if np.isfinite(x)]
-            p = [x for x in (_num(r["p_t_1pct"]) for r in sel) if np.isfinite(x)]
-            if not sel:
+    fig, axes = plt.subplots(1, 2, figsize=(10.6, 4.3), squeeze=False, sharex=True)
+    ratios = {}
+    for ri, run in enumerate(runs):
+        per_q = defaultdict(list)
+        for r in run.step:
+            if r["stage"] != "fast" or r["highc"] != "True":
                 continue
-            labels.append(f"{run.name}\n{title}")
-            el.append(float(np.median(e)) if e else np.nan)
-            op.append(float(np.median(p)) if p else np.nan)
-    if not labels:
-        return {}
-    fig, ax = plt.subplots(figsize=(1.6 * len(labels) + 3, 4.6))
-    x = np.arange(len(labels))
-    ax.bar(x - 0.2, el, 0.4, color="#1f77b4", label="electrical t(1%)")
-    ax.bar(x + 0.2, op, 0.4, color="#ff7f0e", label="optical t(1%)")
-    for xi, (a, b) in enumerate(zip(el, op)):
-        for dx, val in ((-0.2, a), (0.2, b)):
-            if np.isfinite(val) and val > 0:
-                ax.annotate(f"{val:.3g}", (xi + dx, val), ha="center", va="bottom",
-                            fontsize=7)
-        if np.isfinite(a) and np.isfinite(b) and b > 0:
-            ax.annotate(f"{a / b:.0f}x", (xi, max(a, b) * 1.7), ha="center",
-                        fontsize=8.5, color="0.3")
-    if np.any(np.isfinite(el + op) & (np.array(el + op) > 0)):
+            per_q[r["quadrant"]].append((_num(r["v_to"]), abs(_num(r["settled"])),
+                                         abs(_num(r["power_W"]))))
+        for q, pts in sorted(per_q.items()):
+            pts.sort()
+            v = np.array([p[0] for p in pts])
+            i = np.array([p[1] for p in pts]) * 1e9
+            p = np.array([p[2] for p in pts]) * 1e12
+            axes[0][0].plot(v, i, "o-", ms=4, lw=1.0, color=COLOURS[ri], alpha=0.8)
+            axes[0][1].plot(v, p, "o-", ms=4, lw=1.0, color=COLOURS[ri], alpha=0.8)
+            if i.size > 1 and i[0] > 0 and p[0] > 0:
+                ratios.setdefault(run.name, []).append(
+                    (q, float(i[0] / i[-1]), float(p[0] / p[-1])))
+        axes[0][0].plot([], [], color=COLOURS[ri], lw=1.4, label=run.name)
+    for ax, lab, ttl in ((axes[0][0], "I on ch B  [nA]", "current"),
+                         (axes[0][1], "optical power  [pW]", "light")):
         ax.set_yscale("log")
-    ax.set_xticks(x, labels, fontsize=7.5)
-    ax.set_ylabel("time to 1 % of final  [s]")
-    ax.set_title("Current settles long after the light does. A missing electrical bar "
-                 "means it never reached 1 % inside the record.", fontsize=9.5)
-    ax.legend(fontsize=8)
-    ax.grid(axis="y", which="both", alpha=0.3)
+        ax.set_xlabel("bias  [V]")
+        ax.set_ylabel(lab)
+        ax.set_title(ttl, fontsize=10)
+        ax.grid(which="both", alpha=0.25)
+    axes[0][0].legend(fontsize=8)
+    fig.suptitle("Current and light against bias, High-C on. They do not fall together:"
+                 " the gap is current that makes no photons.", fontsize=10)
     fig.tight_layout()
-    fig.savefig(out / "settling_bars.png", dpi=DPI)
+    fig.savefig(out / "bias_response.png", dpi=DPI)
     plt.close(fig)
-    return dict(zip(labels, zip(el, op)))
+    return ratios
 
 
 # ------------------------------------------------------------------------------ main
@@ -678,12 +782,13 @@ def main(argv=None):
               "compare directly.\n  Array properties (leakage, EQE, yield) do NOT: "
               "these are different arrays.")
 
-    caps = fig_cap_per_quadrant(runs, out)
+    caps = fig_capacitance(runs, out)
     fig_cap_ramps(runs, out)
-    fig_step_fast(runs, out)
-    fits = fig_step_long(runs, out, t_min=a.fit_from)
-    verdict = fig_range_artifact(runs, out)
+    fig_charge_edge(runs, out)
     settle = fig_settling(runs, out)
+    fits = fig_power_law(runs, out, t_min=a.fit_from)
+    verdict = fig_highc_needed(runs, out)
+    ratios = fig_bias_response(runs, out)
 
     print(f"\n-- capacitance, lit, leakage-free setpoints {'-' * 34}")
     for name, (med, lo, hi) in caps.items():
@@ -691,16 +796,19 @@ def main(argv=None):
 
     print(f"\n-- power law |I-I_inf| ~ t^-alpha, fitted for t > {a.fit_from:g} s {'-' * 16}")
     if fits:
-        for (name, state, where), (alpha, iinf, r2, n, nsamp) in sorted(fits.items()):
+        for (name, where), (alpha, iinf, r2, n, nsamp) in sorted(fits.items()):
             if not np.isfinite(alpha):
-                print(f"  {name:14} {state:12} {where:12}  record of {nsamp} samples "
-                      f"is too short to fit -- raise --step-long-samples")
+                print(f"  {name:14} {where:5}  record of {nsamp} samples is too short "
+                      f"to fit -- raise --step-long-samples")
                 continue
             # Synthetic records with a known exponent all fit at r2 > 0.99, so
             # anything below that is a record without a resolvable power law in it,
             # not a measured exponent. Quoting it would be quoting noise.
-            flag = "" if r2 > 0.99 else "   << WEAK FIT, do not quote this exponent"
-            print(f"  {name:14} {state:12} {where:12}  alpha={alpha:5.2f}  "
+            # A clean synthetic power law fits at r2 > 0.998; the real High-C
+            # records sit at 0.97-0.99, because a device is not a pure power law.
+            # Below 0.95 there is no resolvable power law to quote.
+            flag = "" if r2 > 0.95 else "   << WEAK FIT, do not quote this exponent"
+            print(f"  {name:14} {where:5}  alpha={alpha:5.2f}  "
                   f"I_inf={iinf * 1e9:8.1f} nA  r2={r2:5.3f}  bins={n}{flag}")
     elif any(r["stage"] == "long" for run in runs for r in run.step):
         # The rows are there, so the captures happened -- what is missing is the raw
@@ -720,12 +828,20 @@ def main(argv=None):
             print(f"  {name:14} V={v:+.2f}  reading/range {frac:5.2f}  "
                   f"spans {decades:4.2f} decades  -> {tag}")
 
-    print(f"\n-- settling, electrical against optical {'-' * 37}")
-    for label, (e, p) in settle.items():
-        one = label.replace("\n", " / ")
-        ratio = (f"{e / p:7.1f}x" if (np.isfinite(e) and np.isfinite(p) and p > 0)
-                 else "    n/a")
-        print(f"  {one:42} {e:9.3f} s {p:8.3f} s {ratio}")
+    print(f"\n-- settling, High-C long: electrical against optical {'-' * 24}")
+    for (name, q), (e, o, e01) in sorted(settle.items()):
+        ratio = (f"{e / o:6.1f}x" if (np.isfinite(e) and np.isfinite(o) and o > 0)
+                 else "   n/a")
+        tail = "" if np.isfinite(e01) else "   (never within 0.1 % inside the record)"
+        print(f"  {name:14} {q:3}  current {e:8.2f} s   light {o:7.3f} s  "
+              f"{ratio}{tail}")
+
+    print(f"\n-- current against light across bias, High-C on {'-' * 29}")
+    for name, items in sorted(ratios.items()):
+        for q, fi, fp in sorted(items):
+            print(f"  {name:14} {q:3}  across the bias range the current falls "
+                  f"{fi:5.1f}x, the light {fp:5.1f}x  -> {fp / fi:4.1f}x more of the "
+                  f"current makes no photons")
 
     print(f"\nwrote {len(list(out.glob('*.png')))} figures to {out}\n")
     return 0
