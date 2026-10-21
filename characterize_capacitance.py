@@ -1003,6 +1003,17 @@ def exp_cap(pm, smu, smile, pixel, cfg, args, log):
             smu.set_voltage("b", float(park))
             time.sleep(max(0.5, 3 * charge_time_s(args.capacitance, park,
                                                   cfg.nvled_compliance)))
+            # Read the node BEFORE handing it to the current source. Without this the
+            # only voltage on record is the ramp's first sample, which is after the
+            # mode switch -- so a park that worked and a park destroyed by the switch
+            # look identical. On Array38 every ramp began 0.41-0.74 V from the park
+            # while Array42 began within 14 mV, and nothing could say which half of
+            # the sequence was at fault.
+            v_parked = float("nan")
+            try:
+                v_parked = float(m.read_voltage_b(smu, 3)[0])
+            except Exception:                 # a diagnostic must never fail the run
+                pass
             src = dataclasses.replace(cfg, current_source_range_i=cap_source_range(i_set))
             m.configure_current_source_b(smu, src)
             m.set_nplc(smu, max(args.nplc, 0.1))
@@ -1059,12 +1070,39 @@ def exp_cap(pm, smu, smile, pixel, cfg, args, log):
                     f"diode's leakage is a large fraction of the setpoint, so it steals "
                     f"ramp current and the slope under-reads. Trust the larger "
                     f"setpoints; this one is leakage-dominated.")
+            # Did the node actually get to the park bias? C = I/(dV/dt) assumes the
+            # ramp starts from a known sub-turn-on voltage. Array38 parked at -0.400 V
+            # and every ramp began at +0.334 V, which nothing noticed.
+            v0 = float(vsa[0]) if vsa.size else float("nan")
+            park_off = abs(v0 - park) if np.isfinite(v0) else float("nan")
+            park_bad = bool(np.isfinite(park_off) and park_off > args.cap_park_tol)
+            if park_bad:
+                suspect = True
+                blame = "unknown (no park reading)"
+                if np.isfinite(v_parked):
+                    blame = (f"the park itself settled to {v_parked:+.3f} V"
+                             if abs(v_parked - park) > args.cap_park_tol
+                             else f"the park reached {v_parked:+.3f} V and the "
+                                  f"voltage-to-current MODE SWITCH moved it "
+                                  f"{abs(v0 - v_parked)*1e3:.0f} mV")
+                log(f"    !! park MISSED by {park_off*1e3:.0f} mV: asked for "
+                    f"{park:+.3f} V, the ramp began at {v0:+.3f} V -- {blame}. "
+                    f"C = I/(dV/dt) assumes a known start, so this capture is "
+                    f"rejected. Note the settle wait is sized from --capacitance "
+                    f"({args.capacitance*1e6:.1f} uF): on a carrier with far less "
+                    f"than that, the same mode-switch charge moves the node much "
+                    f"further.")
             rows.append(dict(lit=lit, i_set=i_set, park_v=park, nplc=nplc_cap,
                              n_samples=int(tsa.size), n_captured=n_all,
                              n_requested=n_cap,
                              ramp_s=float(tsa[-1]) if tsa.size else 0.0,
-                             v_start=float(vsa[0]) if vsa.size else float("nan"),
+                             v_start=v0,
                              v_end=float(vsa[-1]) if vsa.size else float("nan"),
+                             v_parked=v_parked, park_off=park_off,
+                             park_kick=(abs(v0 - v_parked)
+                                        if np.isfinite(v_parked) and np.isfinite(v0)
+                                        else float("nan")),
+                             park_ok=int(not park_bad),
                              dvdt=slope, capacitance_F=cap,
                              leakage_suspect=suspect,
                              smu_errors=drain_errors(smu)))
@@ -1113,12 +1151,23 @@ def flag_cap_leakage(rows, log, tol=0.30):
                 f"NEITHER value is usable -- not even the one that looks plausible. "
                 f"Use a larger --cap-currents entry.")
     good = [r for r in rows if not r.get("leakage_suspect")
-            and np.isfinite(r["capacitance_F"])]
+            and r.get("park_ok", 1) and np.isfinite(r["capacitance_F"])]
     if good:
         cs = sorted(r["capacitance_F"] for r in good)
         med = cs[len(cs) // 2]
-        log(f"    C from {len(good)} usable capture(s): median {med*1e6:.2f} uF "
-            f"(spread {cs[0]*1e6:.2f}-{cs[-1]*1e6:.2f})")
+        # A median over readings that disagree by 100x is not a measurement of
+        # anything. BR printed "median 39.33 uF (spread 0.33-42.51)" and that is the
+        # line a reader quotes, so it has to refuse rather than average.
+        span = cs[-1] / cs[0] if cs[0] > 0 else float("inf")
+        if span > 3.0:
+            log(f"    !! the {len(good)} surviving capture(s) span {span:.0f}x "
+                f"({cs[0]*1e6:.2f} to {cs[-1]*1e6:.2f} uF). These cannot all be the "
+                f"same capacitance, so there is no median to report. Look at which "
+                f"setpoints they came from: a ramp too fast for the sample rate and "
+                f"one too slow to leave the noise both survive the paired test.")
+        else:
+            log(f"    C from {len(good)} usable capture(s): median {med*1e6:.2f} uF "
+                f"(spread {cs[0]*1e6:.2f}-{cs[-1]*1e6:.2f})")
     else:
         log(f"    !! no usable capture: every setpoint is leakage-dominated or failed "
             f"to fit. Raise --cap-currents, or park further below turn-on with "
@@ -2166,6 +2215,13 @@ def build_parser():
                     help="ch B source current range while holding 0 A. The finest range "
                          "minimises the regulation error that would add to the decay "
                          "current; the blanked run cancels what is left")
+    ap.add_argument("--cap-park-tol", type=float, default=0.05, metavar="V",
+                    help="how far the ramp may begin from the park bias before the "
+                         "capture is rejected (default 0.05 V). C = I/(dV/dt) assumes "
+                         "the ramp starts from a known sub-turn-on voltage. Array42 "
+                         "parked at -0.400 V and began at -0.401; Array38 began at "
+                         "+0.334 V, 0.73 V away and on the wrong side of zero, and "
+                         "reported capacitances anyway.")
     ap.add_argument("--cap-currents", nargs="+", type=float, default=[1e-6, 1e-5, 1e-4],
                     help="known currents for the C = I/(dV/dt) ramp (A)")
     ap.add_argument("--cap-park", type=float, default=-0.40,
