@@ -47,16 +47,24 @@ def _git(*args: str, cwd: Path | None = None) -> str | None:
     return out.stdout.strip()
 
 
-def _changed_paths(status: str | None) -> list[str]:
-    """Paths out of ``git status --porcelain``.
+def _changed_paths(status: str | None) -> tuple[list[str], list[str]]:
+    """``(tracked_edits, untracked)`` out of ``git status --porcelain``.
 
     Slicing ``ln[3:]`` is the obvious way and it is wrong: it silently eats the first
     character of a path whenever the prefix is not exactly three columns, and the only
     symptom is a plausible-looking filename (``RUN_FORMAT.md`` arriving as
     ``UN_FORMAT.md``). Split on whitespace after the status columns instead, and take
     the destination of a rename, which is the file that actually differs.
+
+    The two kinds are kept apart because only one of them can change what ran. An
+    UNTRACKED file -- status "??" -- is a file git has never seen: a scratch
+    ``run.bat``, an editor backup, a stray CSV. It cannot affect the code that
+    executed, so a run taken beside one is still reproducible from its commit. Lumping
+    the two together made every run from a bench machine with a scratch file announce
+    "this run cannot be reproduced from the commit alone", which is both false and the
+    fastest way to teach someone to ignore the warning that matters.
     """
-    out = []
+    edits, untracked = [], []
     for ln in (status or "").splitlines():
         m = re.match(r"^(..)\s+(.*)$", ln)
         if not m:
@@ -66,8 +74,8 @@ def _changed_paths(status: str | None) -> list[str]:
             path = path.split(" -> ", 1)[1]
         path = path.strip('"')                   # git quotes paths with odd characters
         if path:
-            out.append(path)
-    return out
+            (untracked if m.group(1) == "??" else edits).append(path)
+    return edits, untracked
 
 
 @functools.lru_cache(maxsize=1)
@@ -80,7 +88,7 @@ def _snapshot() -> tuple[tuple[str, Any], ...]:
     because lru_cache needs the result to be hashable; callers get a fresh dict.
     """
     status = _git("status", "--porcelain")
-    changed = _changed_paths(status)
+    changed, untracked = _changed_paths(status)
     diff = _git("diff", "HEAD") if changed else None
     out: dict[str, Any] = {
         "commit": _git("rev-parse", "HEAD"),
@@ -89,8 +97,12 @@ def _snapshot() -> tuple[tuple[str, Any], ...]:
         "committed": _git("log", "-1", "--format=%cI"),
         # --always so a commit with no tag behind it still yields something
         "describe": _git("describe", "--tags", "--always", "--dirty"),
+        # Only edits to TRACKED files make a run unreproducible. Untracked ones are
+        # recorded beside them, because knowing a stray file was on disk is sometimes
+        # useful, but they never set this flag.
         "dirty": bool(changed),
         "changed": sorted(changed)[:50],
+        "untracked": sorted(untracked)[:50],
         "diff_sha256": hashlib.sha256(diff.encode()).hexdigest()[:16] if diff else None,
         "started": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
         "host": socket.gethostname(),
@@ -184,10 +196,20 @@ def demo() -> None:
 
     # the porcelain parse: the bug this replaced ate the first character of a path
     got = _changed_paths(" M RUN_FORMAT.md\n?? ROADMAP.md\nA  a/b.py\n")
-    assert got == ["RUN_FORMAT.md", "ROADMAP.md", "a/b.py"], got
-    assert _changed_paths("R  old/x.py -> new/y.py") == ["new/y.py"]
-    assert _changed_paths('A  "odd name.py"') == ["odd name.py"]
-    assert _changed_paths(None) == [] and _changed_paths("") == []
+    assert got == (["RUN_FORMAT.md", "a/b.py"], ["ROADMAP.md"]), got
+    assert _changed_paths("R  old/x.py -> new/y.py") == (["new/y.py"], [])
+    assert _changed_paths('A  "odd name.py"') == (["odd name.py"], [])
+    assert _changed_paths(None) == ([], []) and _changed_paths("") == ([], [])
+
+    # An UNTRACKED file must not make a run "unreproducible". Run 261020-1454 was
+    # flagged dirty over a scratch run.bat: git had never seen the file, the stored
+    # diff_sha256 was None, and the run was reproducible from its commit all along.
+    # A warning that fires on every bench run with a scratch file beside it teaches
+    # people to ignore the warning that matters.
+    edits, stray = _changed_paths("?? run.bat\n?? notes.txt\n")
+    assert edits == [] and stray == ["run.bat", "notes.txt"], (edits, stray)
+    assert _changed_paths(" M measure_iqe/acquire.py\n?? run.bat\n")[0] == [
+        "measure_iqe/acquire.py"], "a real edit must still be caught"
 
     # _git must never return something other than str|None, whatever the diff holds
     for args in (("rev-parse", "HEAD"), ("diff", "HEAD"), ("not-a-git-command",)):
@@ -203,8 +225,12 @@ def demo() -> None:
     assert p["commit"] is None or len(p["commit"]) == 40, p["commit"]
     # dirty and changed must agree -- a dirty tree with no named files is useless
     assert p["dirty"] == bool(p["changed"]) or len(p["changed"]) == 50
+    assert isinstance(p["untracked"], list)
+    assert not (p["untracked"] and not p["changed"] and p["dirty"]), (
+        "an untracked file alone must never set dirty")
     print(f"ok  provenance: {p['describe']} on {p['branch']}, "
-          f"dirty={p['dirty']} ({len(p['changed'])} file(s))")
+          f"dirty={p['dirty']} ({len(p['changed'])} edit(s), "
+          f"{len(p['untracked'])} untracked)")
 
 
 if __name__ == "__main__":

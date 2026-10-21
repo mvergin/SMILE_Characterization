@@ -2952,9 +2952,21 @@ def stamp_run(out_dir: Path, cfg: IQEConfig, log: Logger) -> None:
     prov = provenance()
     write_provenance(out_dir, {"sample_name": cfg.sample_name,
                                "calibration_source": cfg.calibration_source})
-    log(f"  code: {prov['describe']} on {prov['branch']}"
-        + (f"  !! WORKING TREE DIRTY ({len(prov['changed'])} file(s)): this run cannot "
-           f"be reproduced from the commit alone" if prov["dirty"] else ""))
+    # Name the files. "1 file(s)" sent the reader to git status weeks later to find out
+    # whether it was a source file or a scratch run.bat, and the answer changes whether
+    # the run is reproducible. Untracked files are listed separately and are harmless.
+    edits = prov.get("changed") or []
+    stray = prov.get("untracked") or []
+    note = ""
+    if prov["dirty"]:
+        note = (f"  !! UNCOMMITTED EDITS to {', '.join(edits[:4])}"
+                + (f" (+{len(edits) - 4} more)" if len(edits) > 4 else "")
+                + ": this run cannot be reproduced from the commit alone")
+    elif stray:
+        note = (f"  (untracked, does not affect the code that ran: "
+                + ", ".join(stray[:3]) + (f" +{len(stray) - 3}" if len(stray) > 3 else "")
+                + ")")
+    log(f"  code: {prov['describe']} on {prov['branch']}{note}")
     src = Path(cfg.calibration_source) if cfg.calibration_source else None
     if src and src.is_file():
         dst = out_dir / f"{run_slug(cfg.sample_name, out_dir)}_calibration_applied{src.suffix}"
