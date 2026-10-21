@@ -919,12 +919,24 @@ def acquire_autoranged(pm, smu, n_smu: int, n_pm: int, cfg: IQEConfig):
     return acquire_point(pm, smu, n_smu, n_pm)
 
 
-def configure_current_source_b(smu, cfg: IQEConfig) -> None:
-    """ch B = current source / voltage measure, with a voltage compliance."""
+def configure_current_source_b(smu, cfg: IQEConfig, level_i: float = 0.0) -> None:
+    """ch B = current source / voltage measure, with a voltage compliance.
+
+    ``level_i`` is what the source is set to AS the mode changes. It used to be a
+    hard 0, which hands the node to a 0 A source: it then floats to wherever its own
+    junction and leakage put it, and how far it gets before the caller sets the real
+    setpoint depends entirely on the capacitance. On the 43 uF carrier that drift was
+    6 mV and nobody noticed for months. On a de-capped one, 130x less charge is needed
+    and the node arrives at its equilibrium immediately -- Array38 parked at -0.400 V
+    and began its ramp at +0.326 V, and parked at -1.050 V began at +0.299 V. Same
+    landing from parks 650 mV apart, which is the signature of a float, not a kick.
+
+    Callers that want the old behaviour get it by leaving level_i at 0.
+    """
     if hasattr(smu, "inst"):
         smu.inst.write("smub.source.func = smub.OUTPUT_DCAMPS")
         smu.inst.write(f"smub.source.limitv = {abs(cfg.nvled_v_limit)}")
-        smu.inst.write("smub.source.leveli = 0")
+        smu.inst.write(f"smub.source.leveli = {float(level_i)}")
         smu.inst.write("smub.source.autorangei = smub.AUTORANGE_OFF")
         smu.inst.write(f"smub.source.rangei = {cfg.current_source_range_i}")
         smu.inst.write("smub.measure.autorangev = smub.AUTORANGE_OFF")

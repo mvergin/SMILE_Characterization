@@ -1015,7 +1015,12 @@ def exp_cap(pm, smu, smile, pixel, cfg, args, log):
             except Exception:                 # a diagnostic must never fail the run
                 pass
             src = dataclasses.replace(cfg, current_source_range_i=cap_source_range(i_set))
-            m.configure_current_source_b(smu, src)
+            # Hand the node straight to the real setpoint. Going via 0 A lets it float
+            # to its own equilibrium first, and on a small capacitance it gets all the
+            # way there before the ramp begins -- which is what destroyed every
+            # Array38 capture.
+            # Same sign as the set_current_b below: a SINK, driving the node negative.
+            m.configure_current_source_b(smu, src, level_i=-abs(i_set))
             m.set_nplc(smu, max(args.nplc, 0.1))
             # Buffered V(t) on ch B, with the INSTRUMENT's timestamps. Polling this
             # from Python gave host-clock times and, worse, threw the raw ramp away --
