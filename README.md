@@ -951,6 +951,32 @@ at 1.0. The 2× is the burst reading **both** channels sequentially
 previous `max(2·nplc/50, 200e-6)` was 2.65× short at NPLC 0.01, so every record length
 derived from it was wrong by that factor.
 
+**Only channel B is measured, by default.** `--step-channels 1`. The burst used to read
+both channels — `smua.measure.i` then `smub.measure.i` — but channel A is the VLED anode
+drive and its record produced one unused sanity number. Dropping it halves the
+integration per sample, and the 660 µs fixed overhead makes the gain very uneven:
+
+| NPLC | 2 channels | 1 channel | gain |
+|---|---|---|---|
+| 0.01 | 1.060 ms | 0.860 ms | 1.23× |
+| 1.0 | 40.66 ms | 20.66 ms | **1.97×** |
+
+So the fast stage is overhead-bound and barely moves while the long stage nearly halves.
+That gain is spent on **margin and resolution, not wall clock**: `--step-long-samples`
+is 20000, giving a 413 s record at 20.66 ms — a 1.72× margin over the 240 s faint-end
+settle, where 10000 samples would have been 207 s and **short of it**. `i_a_settled` is
+NaN when channel A is not read, rather than a stale column. `--step-channels 2` restores
+the old path.
+
+> **Untested on hardware.** `measure_burst_i_b`, `read_buffer_b` and `measure_burst_v_b`
+> are all behind `hasattr(smu, "inst")`, and the simulator has no `.inst` — so no sim
+> run reaches them. Smoke-test on one pixel before committing to a long run:
+> `--what cap step --pixels 35,36 --compliance 1e-3 --step-voltages -0.90 --samples 500
+> --step-long-samples 500 --cap-seconds 1`, about 1.3 min. Check that `cap` gives a
+> finite C, `step` gives a sane `I` and `t1%`, `traces.npz` has `v_*` and `pm_*` keys,
+> and `smu_errors` is empty. `--step-channels 2` falls back to the burst that has run
+> all campaign.
+
 **`step` also records optical settling.** A background PM thread starts *at* the step —
 through the same `trigger` hook `switch` uses — so `I(t)` and `P(t)` share `t = 0`.
 Columns `p_settled_W`, `p_t_1pct`, `p_settled_ok`, `p_n`, `p_rate_hz`, and the trace

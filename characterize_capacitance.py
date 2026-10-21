@@ -247,7 +247,7 @@ def sample_interval_s(nplc: float, channels: int = 2) -> float:
 def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
                  chunk=2000, log=None, limit_a=None, capacitance=45.7e-6,
                  max_presettle_s=60.0, cfg=None, charge_limit=None,
-                 switch_settle_s=0.5, trigger=None):
+                 switch_settle_s=0.5, trigger=None, channels=2):
     """Step ch B from v_from to v_to, then burst-capture I(t) with timestamps.
 
     `trigger` replaces the voltage step with any other perturbation -- `exp_switch`
@@ -320,14 +320,17 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
     # -- and the 660 us is per-sample TSP and interface overhead. The old
     # max(2*nplc/50, 200e-6) underestimated 0.01 by 2.65x, so every record-length claim
     # built on it was short.
-    per_sample_s = sample_interval_s(nplc)
+    per_sample_s = sample_interval_s(nplc, channels)
     old_timeout = smu.inst.timeout
     smu.inst.timeout = max(10_000, int(chunk * per_sample_s * 4_000))
     done = 0
     try:
         while done < int(n_samples):
             k = min(int(chunk), int(n_samples) - done)
-            smu.measure_burst(k)
+            if channels == 1:
+                smu.measure_burst_i_b(k)       # ch B only: half the integration
+            else:
+                smu.measure_burst(k)
             done += k
     except Exception as exc:
         try:
@@ -341,7 +344,11 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
         # the buffer read is a single large ASCII transfer; give it room too
         smu.inst.timeout = max(old_timeout, 30_000)
         try:
-            ia, ib, ta, _tb = smu.read_buffer_with_timestamps()
+            if channels == 1:
+                ta, ib = smu.read_buffer_b()
+                ia = [float("nan")] * len(ib)
+            else:
+                ia, ib, ta, _tb = smu.read_buffer_with_timestamps()
         finally:
             smu.inst.timeout = old_timeout
     if not ib:
@@ -368,12 +375,25 @@ class PowerTrace:
     sample-by-sample, bin both onto a common grid first.
     """
 
-    def __init__(self, pm, n=1):
+    def __init__(self, pm, n=1, averaging=None):
         self.pm, self.n, self.rows = pm, int(n), []
+        self.averaging = averaging        # set on start(), restored on stop()
+        self._prev_avg = None
         self._stop = threading.Event()
         self._th = None
 
     def start(self):
+        # Drop the meter's internal averaging for the trace. pm_averaging=3 is three
+        # averages plus a USB round-trip per sample, which caps the record at 30-80 Hz
+        # where the PM400 can do roughly 1 kHz. A settling trace wants resolution; the
+        # settled reading afterwards is taken at the configured averaging, so the EQE
+        # point stays comparable with every other run in the project.
+        if self.averaging is not None:
+            try:
+                self._prev_avg = self.averaging
+                self.pm.set_averaging(int(self.averaging))
+            except Exception:
+                self._prev_avg = None
         t0 = time.perf_counter()
 
         def run():
@@ -387,11 +407,16 @@ class PowerTrace:
         self._th = threading.Thread(target=run, daemon=True)
         self._th.start()
 
-    def stop(self):
+    def stop(self, restore_averaging=None):
         """``(t, P)``. Empty arrays if it never started or the meter failed."""
         self._stop.set()
         if self._th is not None:
             self._th.join(timeout=2.0)
+        if self._prev_avg is not None and restore_averaging is not None:
+            try:
+                self.pm.set_averaging(int(restore_averaging))
+            except Exception:
+                pass
         return (np.array([r[0] for r in self.rows], float),
                 np.array([r[1] for r in self.rows], float))
 
@@ -691,7 +716,8 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                 # this -- "replaces the voltage step with any other perturbation" -- so
                 # the step and the optical record start on the same statement and share
                 # t = 0. exp_switch has used it since the switch-deviation work.
-                ptrace = (PowerTrace(pm, args.step_pm_trace)
+                ptrace = (PowerTrace(pm, args.step_pm_trace,
+                                     averaging=args.step_pm_averaging)
                           if args.step_pm_trace else None)
 
                 def _step(_v=v):
@@ -706,10 +732,11 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                                      max_presettle_s=args.max_presettle_s,
                                       cfg=cfg, charge_limit=args.charge_limit,
                                       switch_settle_s=args.switch_settle_s,
-                                      trigger=_step)
+                                      trigger=_step, channels=args.step_channels)
                 p_t = p_p = np.array([])
                 if ptrace is not None:
-                    p_t, p_p = ptrace.stop()
+                    # restore the configured averaging before the settled reading
+                    p_t, p_p = ptrace.stop(restore_averaging=cfg.pm_averaging)
                 met = settling_metrics(t, np.abs(ib))
                 # Say it when the record cannot have seen the asymptote. settled is the
                 # median of the last 20 % of the window, which is a number whatever the
@@ -780,8 +807,11 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                                  power_W=pw, power_lit_W=pw_lit, power_dark_W=pw_dark,
                                  power_sem=pw_sem, eqe_ext=eqe,
                                  power_sigma=abs(pw) / pw_sem if pw_sem else float("nan"),
+                                 # NaN on --step-channels 1: ch A is not read at
+                                 # all there, so this is absent rather than zero.
                                  i_a_settled=float(np.median(ia_ok[int(0.8 * ia_ok.size):]))
                                  if ia_ok.size else float("nan"),
+                                 channels=args.step_channels,
                                  record_s=float(t[-1]) if t.size else 0.0,
                                  charge_limit=args.charge_limit or "",
                                  **{f"spec_{k}": v2 for k, v2 in spec.items()},
@@ -1765,7 +1795,8 @@ def estimate_seconds(what, cfg, args, n_pixels):
     """
     pre = min(max(2.0, 3 * charge_time_s(args.capacitance, args.v_start,
                                          cfg.nvled_compliance)), args.max_presettle_s)
-    rec = args.samples * sample_interval_s(args.nplc)
+    ch = getattr(args, "step_channels", 2)
+    rec = args.samples * sample_interval_s(args.nplc, ch)
     pm_s = args.step_n_pm * 4e-3
     per_capture = pre + rec
     total = 0.0
@@ -1783,7 +1814,7 @@ def estimate_seconds(what, cfg, args, n_pixels):
         if args.step_long_nplc and args.step_long_samples > 0:
             n_long = len(args.step_long_voltages or [1])
             total += n_pixels * n_long * (
-                args.step_long_samples * sample_interval_s(args.step_long_nplc)
+                args.step_long_samples * sample_interval_s(args.step_long_nplc, ch)
                 + pm_s * (2 if args.step_dark else 1))
     if "leak" in what:
         # three frame states per bias: lit, addressed-at-bitval-0, blanked
@@ -1946,6 +1977,25 @@ def build_parser():
                     help="stop the ramp here, before the LED turns on and starts taking "
                          "a share of the setpoint")
     ap.add_argument("--cap-seconds", type=float, default=5.0, help="max ramp duration")
+    ap.add_argument("--step-channels", type=int, default=1, choices=(1, 2),
+                    help="SMU channels measured per buffered sample. 1 (the default) "
+                         "reads only ch B, which is the one being stepped. 2 also reads "
+                         "ch A, the VLED anode drive, whose record yields one sanity "
+                         "number (i_a_settled) that nothing else uses -- and doubles "
+                         "the integration per sample. Measured: NPLC 1.0 costs 20.66 ms "
+                         "per sample on one channel against 40.67 ms on two, so the "
+                         "long stage runs in 207 s instead of 407 s, or gets twice the "
+                         "resolution for the same duration. At NPLC 0.01 the 660 us "
+                         "fixed overhead dominates and the gain is only 1.23x.")
+    ap.add_argument("--step-pm-averaging", type=int, default=1,
+                    help="PM400 internal averaging DURING a step trace. The config "
+                         "default of 3 means three averages plus a USB round-trip per "
+                         "sample, which is why the optical record runs at 30-80 Hz "
+                         "where the meter can do roughly 1 kHz. For a settling trace "
+                         "that trade is backwards: resolution matters and the asymptote "
+                         "is found by averaging the tail. The SETTLED reading still "
+                         "uses pm_averaging, so the EQE point stays comparable with "
+                         "every other run.")
     ap.add_argument("--step-pm-trace", type=int, default=1,
                     help="PM reads per optical sample during a step capture, on a "
                          "background thread started AT the step. 0 disables. step used "
@@ -1963,9 +2013,12 @@ def build_parser():
                          "asymptote and its `settled` is the median of a window that "
                          "never got there. 1.0 gives 40 ms per sample, so 10000 "
                          "samples is a 400 s record. 0 disables the long stage.")
-    ap.add_argument("--step-long-samples", type=int, default=10000,
-                    help="buffer samples for the long step capture. 10000 at NPLC 1.0 "
-                         "is 400 s, comfortably past the 240 s measured on Array42.")
+    ap.add_argument("--step-long-samples", type=int, default=20000,
+                    help="buffer samples for the long step capture. 20000 at NPLC 1.0 "
+                         "on one channel is 413 s, which clears the 240 s faint-end "
+                         "settle measured on Array42 with 1.7x margin. 10000 would be "
+                         "207 s -- SHORT of it, which is the mistake --step-channels 1 "
+                         "quietly introduced by halving the per-sample time.")
     ap.add_argument("--step-long-voltages", nargs="+", type=float, default=None,
                     help="biases to run the long capture at. Default: the faintest of "
                          "--voltages, which is where slow settling lives. Every "

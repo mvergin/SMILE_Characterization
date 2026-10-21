@@ -208,6 +208,21 @@ class Keithley2602B:
             f"end print('DONE')"
         )
 
+    def measure_burst_i_b(self, n):
+        """Burst-measure ch B CURRENT only. Half the integration of measure_burst.
+
+        measure_burst reads both channels sequentially, which doubles the integration
+        per sample. Channel A is the VLED anode drive and its record yields one sanity
+        number, so a settling capture that only needs ch B should not pay for it. At
+        NPLC 1.0 this is 20.66 ms per sample against 40.67 ms.
+        """
+        self.inst.query(
+            f"for i=1,{n} do smub.measure.i(smub.nvbuffer1) end print('DONE')")
+
+    def measure_burst_i_b_fire(self, n):
+        self.inst.write(
+            f"for i=1,{n} do smub.measure.i(smub.nvbuffer1) end print('DONE')")
+
     def measure_burst_v_b(self, n):
         """Burst-measure ch B VOLTAGE into its buffer. One channel, so no 2x.
 
