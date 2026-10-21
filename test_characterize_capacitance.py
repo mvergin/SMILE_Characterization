@@ -439,6 +439,48 @@ def test_cluster_k_is_nested_so_the_comparison_is_the_same_pixels():
     for r in rows:
         assert abs(r["rel_scatter_x_sqrt_k"] - r["rel_scatter"] * np.sqrt(r["k"])) < 1e-12
 
+
+
+def test_both_highc_states_get_exactly_one_long_record():
+    """The de-capped carrier exists to answer "does it settle without High-C".
+
+    Only a long record answers that, and for a while only High-C had one: the guard
+    read `if args.highc_both and not highc: return out`, so the non-High-C pass got
+    fast captures only. The reason was cost -- non-High-C sweeps --ranges, and five
+    long captures is 33 min a pixel -- but the cure threw away the measurement.
+
+    So: one long record per High-C state, and the non-High-C one at a single range.
+    """
+    from characterize_capacitance import build_parser, step_stages
+
+    a = build_parser().parse_args(["--what", "step", "--highc-both",
+                                  "--ranges", "1e-3", "1e-5", "1e-6"])
+    longs = [(highc, rng, st[3])
+             for highc in (False, True)
+             for rng in ([None] if highc else a.ranges)
+             for v in a.step_voltages
+             for st in step_stages(v, highc, rng, a) if st[0] == "long"]
+
+    assert len(longs) == 2, f"want one long record per High-C state, got {longs}"
+    assert {h for h, _, _ in longs} == {False, True}, longs
+
+    (_, rng_off, lim_off), (_, rng_on, lim_on) = sorted(longs, key=lambda r: r[0])
+    assert rng_off == 1e-6 and rng_off in a.ranges, longs
+    # High-C: the limit IS the range, so it must drop or the ~13 nA tail at 8 s is
+    # buried under ~100 nA of 1 mA-range noise.
+    assert lim_on == a.step_long_compliance, longs
+    # High-C off: the range comes from --ranges, so taking the low limit would only
+    # smear the charge edge from 9 ms to 940 ms for nothing.
+    assert lim_off is None, longs
+
+    # a range absent from --ranges yields no non-High-C long record, not a crash
+    b = build_parser().parse_args(["--what", "step", "--highc-both",
+                                   "--ranges", "1e-3", "--step-long-ranges", "1e-9"])
+    off = [st for rng in b.ranges for v in b.step_voltages
+           for st in step_stages(v, False, rng, b) if st[0] == "long"]
+    assert off == [], off
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

@@ -697,10 +697,17 @@ def step_stages(v: float, highc: bool, rng, args):
             else [max(args.step_voltages)])
     if v not in want:
         return out
-    if args.highc_both and not highc:
-        return out                  # one long capture per point, in the sweep's state
+    # Both High-C states get a long record: whether the node settles WITHOUT High-C
+    # is the question a de-capped carrier exists to answer, and only a long record
+    # answers it. But non-High-C sweeps ranges, and five long captures is 33 min a
+    # pixel, so it runs at --step-long-ranges only.
+    if not highc and rng is not None and rng not in args.step_long_ranges:
+        return out
+    # The limit is the measure range ONLY in High-C, and there it has to drop so the
+    # tail resolves (~1 nA/sample instead of ~100). With High-C off the range comes
+    # from --ranges, so the run limit stays and the charge edge stays 9 ms.
     out.append(("long", args.step_long_nplc, args.step_long_samples,
-                args.step_long_compliance or None))
+                (args.step_long_compliance or None) if highc else None))
     return out
 
 
@@ -730,8 +737,21 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                 if comp_s is not None:
                     m.configure_voltage_source_b(
                         smu, dataclasses.replace(scfg, highc_b=highc), log)
+                    if rng is not None:
+                        # configure_channel writes cfg.nvled_range_i, which silently
+                        # replaces the range --ranges asked for. In High-C the limit
+                        # IS the range so there is nothing to restore, but with High-C
+                        # off the capture would land on the wrong range and nothing in
+                        # the row would show it: range_i records what we asked for.
+                        m.set_measure_range_b(smu, rng)
                     log(f"      {stage}: ch B limit {comp_s:g} A"
-                        + (" (also the High-C measure range)" if highc else ""))
+                        + (" (also the High-C measure range)" if highc
+                           else f" at range {rng:g}" if rng is not None else ""))
+                elif stage != "fast":
+                    # Announce it even when nothing was reconfigured. A long capture is
+                    # ~7 min of silence otherwise, with no way to tell it from a hang.
+                    log(f"      {stage}: ch B limit {scfg.nvled_compliance:g} A"
+                        + (f" at range {rng:g}" if rng is not None else ""))
                 # P(t) beside I(t). capture_step's `trigger` hook exists for exactly
                 # this -- "replaces the voltage step with any other perturbation" -- so
                 # the step and the optical record start on the same statement and share
@@ -819,6 +839,8 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                 if comp_s is not None:      # put the run's limit back for the next point
                     m.configure_voltage_source_b(
                         smu, dataclasses.replace(cfg, highc_b=highc), log)
+                    if rng is not None:
+                        m.set_measure_range_b(smu, rng)
                 rows.append(dict(stage=stage, highc=highc, **p_met,
                                  range_i=rng if rng is not None else "limit",
                                  compliance_a=scfg.nvled_compliance, nplc=nplc_s,
@@ -2099,7 +2121,11 @@ def build_parser():
                          "never got there. 1.0 gives 40 ms per sample, so 10000 "
                          "samples is a 400 s record. 0 disables the long stage.")
     ap.add_argument("--step-long-compliance", type=float, default=1e-5,
-                    help="ch B limit for the LONG step capture, separate from "
+                    help="ch B limit for the LONG step capture IN HIGH-C, where the "
+                         "limit selects the measure range. Ignored with High-C off, "
+                         "because there the range comes from --ranges and the run "
+                         "limit gives a 9 ms charge edge instead of 940 ms. Separate "
+                         "from "
                          "--compliance because in High-C the limit selects the measure "
                          "range and the two stages want opposite things. At 1 mA the "
                          "charge edge is clean (9 ms) but a 1 mA range leaves ~100 "
@@ -2109,6 +2135,14 @@ def build_parser():
                          "939 ms charge that only matters to the fast stage. The long "
                          "stage runs at the faintest bias, where the current is well "
                          "under 10 uA. 0 uses --compliance for both.")
+    ap.add_argument("--step-long-ranges", nargs="+", type=float, default=[1e-6],
+                    metavar="A",
+                    help="ranges at which the NON-High-C long capture runs. The "
+                         "non-High-C pass sweeps --ranges, and a long capture at each "
+                         "is 33 min a pixel, so it runs only at these. Default 1e-6, "
+                         "the range that fits the ~0.5 uA a faint pixel really draws. "
+                         "A value not in --ranges produces no non-High-C long record. "
+                         "In High-C there is no range to choose: the limit selects it.")
     ap.add_argument("--step-long-samples", type=int, default=20000,
                     help="buffer samples for the long step capture. 20000 at NPLC 1.0 "
                          "on one channel is 413 s, which clears the 240 s faint-end "
