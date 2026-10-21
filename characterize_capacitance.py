@@ -687,7 +687,7 @@ def step_stages(v: float, highc: bool, rng, args):
     sweep actually uses), and -- when --highc-both sweeps ranges with High-C off -- not
     repeated per range, since the long stage is about the device and not the range.
     """
-    out = [("fast", args.nplc, args.samples)]
+    out = [("fast", args.nplc, args.samples, None)]
     if not args.step_long_nplc or args.step_long_samples <= 0:
         return out
     # The FAINTEST bias is the LEAST negative, i.e. max(): the sweep runs -0.8 V (faint,
@@ -699,7 +699,8 @@ def step_stages(v: float, highc: bool, rng, args):
         return out
     if args.highc_both and not highc:
         return out                  # one long capture per point, in the sweep's state
-    out.append(("long", args.step_long_nplc, args.step_long_samples))
+    out.append(("long", args.step_long_nplc, args.step_long_samples,
+                args.step_long_compliance or None))
     return out
 
 
@@ -720,7 +721,17 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
             for v in args.step_voltages:
               # Two captures per point, because one cannot be both fast and long. The
               # long stage is narrow on purpose -- see step_long_points().
-              for stage, nplc_s, nsamp in step_stages(v, highc, rng, args):
+              for stage, nplc_s, nsamp, comp_s in step_stages(v, highc, rng, args):
+                # The stage's own limit. In High-C this is also a range change, so it
+                # goes through configure_voltage_source_b -- which leaves High-C, writes
+                # the range and re-enables it, the only order the 2602B accepts.
+                scfg = cfg if comp_s is None else dataclasses.replace(
+                    cfg, nvled_compliance=comp_s)
+                if comp_s is not None:
+                    m.configure_voltage_source_b(
+                        smu, dataclasses.replace(scfg, highc_b=highc), log)
+                    log(f"      {stage}: ch B limit {comp_s:g} A"
+                        + (" (also the High-C measure range)" if highc else ""))
                 # P(t) beside I(t). capture_step's `trigger` hook exists for exactly
                 # this -- "replaces the voltage step with any other perturbation" -- so
                 # the step and the optical record start on the same statement and share
@@ -736,10 +747,10 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
 
                 t, ia, ib = capture_step(smu, args.v_start, v, nsamp, nplc_s,
                                      chunk=args.chunk, log=log,
-                                     limit_a=cfg.nvled_compliance,
+                                     limit_a=scfg.nvled_compliance,
                                      capacitance=args.capacitance,
                                      max_presettle_s=args.max_presettle_s,
-                                      cfg=cfg, charge_limit=args.charge_limit,
+                                      cfg=scfg, charge_limit=args.charge_limit,
                                       switch_settle_s=args.switch_settle_s,
                                       trigger=_step, channels=args.step_channels)
                 p_t = p_p = np.array([])
@@ -801,13 +812,16 @@ def exp_step(pm, smu, smile, pixel, cfg, args, log):
                 # is in compliance: it is current-sourcing and the node never reached
                 # the requested voltage, so v_to is not the operating point.
                 at_lim = bool(np.isfinite(met["settled"])
-                              and abs(met["settled"]) >= 0.95 * cfg.nvled_compliance)
+                              and abs(met["settled"]) >= 0.95 * scfg.nvled_compliance)
                 if at_lim:
-                    log(f"      at compliance ({cfg.nvled_compliance:g} A): V={v:+.2f} is "
+                    log(f"      at compliance ({scfg.nvled_compliance:g} A): V={v:+.2f} is "
                         f"not reachable at this limit, the node is current-limited")
+                if comp_s is not None:      # put the run's limit back for the next point
+                    m.configure_voltage_source_b(
+                        smu, dataclasses.replace(cfg, highc_b=highc), log)
                 rows.append(dict(stage=stage, highc=highc, **p_met,
                                  range_i=rng if rng is not None else "limit",
-                                 compliance_a=cfg.nvled_compliance, nplc=nplc_s,
+                                 compliance_a=scfg.nvled_compliance, nplc=nplc_s,
                                  n_requested=nsamp, record_span_s=span,
                                  record_truncated=truncated,
                                  at_compliance=at_lim,
@@ -2084,6 +2098,17 @@ def build_parser():
                          "asymptote and its `settled` is the median of a window that "
                          "never got there. 1.0 gives 40 ms per sample, so 10000 "
                          "samples is a 400 s record. 0 disables the long stage.")
+    ap.add_argument("--step-long-compliance", type=float, default=1e-5,
+                    help="ch B limit for the LONG step capture, separate from "
+                         "--compliance because in High-C the limit selects the measure "
+                         "range and the two stages want opposite things. At 1 mA the "
+                         "charge edge is clean (9 ms) but a 1 mA range leaves ~100 "
+                         "nA/sample of noise, and the relaxation this stage exists to "
+                         "fit is 38 nA at 4 s -- buried. At 10 uA the range gives ~1 "
+                         "nA/sample and the tail resolves past 8 s, at the price of a "
+                         "939 ms charge that only matters to the fast stage. The long "
+                         "stage runs at the faintest bias, where the current is well "
+                         "under 10 uA. 0 uses --compliance for both.")
     ap.add_argument("--step-long-samples", type=int, default=20000,
                     help="buffer samples for the long step capture. 20000 at NPLC 1.0 "
                          "on one channel is 413 s, which clears the 240 s faint-end "
