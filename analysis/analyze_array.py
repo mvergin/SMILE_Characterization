@@ -963,6 +963,105 @@ def fastscan_other_biases(fs, extra, out, plt):
     return rows
 
 
+def _bias_tag(v):
+    """-1.35 -> 'm1p35V': a file name without signs or dots."""
+    return f"{v:+.2f}V".replace("+", "p").replace("-", "m").replace(".", "p")
+
+
+def _sweep_eqe_at(sw, v):
+    """Each swept pixel's EQE_LED interpolated (linear in log EQE) to bias v, or NaN where
+    the pixel's sweep does not span v."""
+    out = {}
+    for (x, y), g in sw.groupby(["X", "Y"]):
+        g = g.sort_values("NVLED_V")
+        V = g["NVLED_V"].to_numpy(float)
+        E = g["EQE_LED"].to_numpy(float)
+        ok = np.isfinite(E) & (E > 0)
+        if ok.sum() >= 2 and V[ok].min() <= v <= V[ok].max():
+            out[(int(x), int(y))] = float(np.exp(np.interp(v, V[ok], np.log(E[ok]))))
+    return pd.Series(out, dtype=float)
+
+
+def fastscan_bias_maps(by_bias, eta, enr, out_dir, plt):
+    """One figure per fast-scan bias: optical power, current, and IQE, every pixel.
+
+    IQE = EQE / eta, the ABC model's own relation, with eta from the sweep's fit. The fast
+    scan's EQE is first scaled by k(v): the median, over the swept single pixels alive at
+    that bias, of the sweep's EQE interpolated to v over the fast scan's EQE. k absorbs
+    what the fast scan does differently -- a ~10 ms dwell and no leakage reference -- and
+    is reported; k = 1 where the sweep does not span the bias. This is IQE AT that bias,
+    not each pixel's peak IQE: for that see the plateau-only peak-IQE proxy.
+
+    Power and current are drawn for every pixel, dead ones included: a dead pixel that
+    draws current is a short, one that draws none is open, and only the current map can
+    tell them apart. IQE is drawn for the alive pixels only.
+    """
+    sw = None
+    if enr is not None and {"EQE_LED", "RELIABLE", "NVLED_V"} <= set(enr.columns):
+        keep = enr["RELIABLE"].astype(bool)
+        if "POOL_K_EFF" in enr.columns:
+            keep &= enr["POOL_K_EFF"].astype(float) <= 1.0     # a group is K pixels' light
+        sw = enr[keep][["X", "Y", "NVLED_V", "EQE_LED"]]
+    from matplotlib.colors import LogNorm
+    stats = []
+    for v, df in by_bias.items():
+        df = df.groupby(["X", "Y"], as_index=False).mean(numeric_only=True)
+        P = df["PM400_POWER_MEAN"].abs().to_numpy(float)
+        I = df["NVLED_CURR_MEAN"].abs().to_numpy(float)
+        alive = P >= DEAD_THRESHOLD_FRAC * np.nanpercentile(P, FASTSCAN_ALIVE_PCTL)
+        eqe = np.where(alive, compute_eqe(P, I, WAVELENGTH_NM), np.nan)
+        k, n_k = np.nan, 0
+        if sw is not None:
+            ref = _sweep_eqe_at(sw, v)
+            fe = pd.Series(eqe, index=pd.MultiIndex.from_arrays([df["X"], df["Y"]]))
+            r = (ref / fe.reindex(ref.index)).replace([np.inf, -np.inf], np.nan).dropna()
+            if len(r):
+                k, n_k = float(r.median()), int(len(r))
+        iqe = (eqe * (k if np.isfinite(k) else 1.0) / eta * 100.0
+               if eta and np.isfinite(eta) and eta > 0 else None)
+        X = df["X"].to_numpy(int); Y = df["Y"].to_numpy(int)
+        ext = (X.min() - .5, X.max() + .5, Y.max() + .5, Y.min() - .5)
+
+        def grid(vals):
+            g = np.full((Y.max() - Y.min() + 1, X.max() - X.min() + 1), np.nan)
+            g[Y - Y.min(), X - X.min()] = vals
+            return g
+
+        panels = [("optical power (nW)", grid(np.clip(P, 1e-13, None) * 1e9), "magma", True),
+                  ("current |I_NVLED| (µA)", grid(np.clip(I, 1e-12, None) * 1e6), "cividis", True)]
+        if iqe is not None:
+            panels.append((f"IQE at this bias (%), k = {k:.3f}" if np.isfinite(k)
+                           else "IQE at this bias (%), uncalibrated (k = 1)",
+                           grid(iqe), "viridis", False))
+        fig, ax = plt.subplots(1, len(panels), figsize=(5.4 * len(panels), 4.9), squeeze=False)
+        for a, (lab, g, cmap, log) in zip(ax[0], panels):
+            fin = g[np.isfinite(g) & (g > 0)] if log else g[np.isfinite(g)]
+            if fin.size == 0:
+                a.set_axis_off(); continue
+            lo, hi = np.nanpercentile(fin, 1), np.nanpercentile(fin, 99.5)
+            norm = LogNorm(vmin=max(lo, hi * 1e-4), vmax=hi) if log else None
+            im = a.imshow(g, origin="upper", cmap=cmap, interpolation="nearest", extent=ext,
+                          norm=norm, **({} if log else dict(vmin=np.nanpercentile(fin, 2),
+                                                             vmax=np.nanpercentile(fin, 98))))
+            plt.colorbar(im, ax=a, fraction=0.046, label=lab)
+            a.set_title(lab, fontsize=9); a.set_xlabel("X"); a.set_ylabel("Y")
+        J_alive = float(np.nanmedian(I[alive])) / (PIXEL_AREA_UM2 * 1e-8) if alive.any() else np.nan
+        fig.suptitle(f"Fast scan at {v:+.3f} V: {int(alive.sum())}/{alive.size} alive, "
+                     f"median J of the alive {J_alive:.1f} A/cm²", fontsize=10)
+        fig.tight_layout()
+        name = f"fastscan_maps_{_bias_tag(v)}.png"
+        fig.savefig(out_dir / name, dpi=200)
+        plt.close(fig)
+        iv = iqe[np.isfinite(iqe)] if iqe is not None else np.array([])
+        stats.append(dict(v=v, alive=int(alive.sum()), n=int(alive.size),
+                          P=float(np.nanmedian(P[alive])) if alive.any() else np.nan,
+                          J=J_alive, k=k, n_k=n_k, file=name,
+                          iqe=float(np.median(iv)) if iv.size else np.nan,
+                          iqe_lo=float(np.percentile(iv, 10)) if iv.size else np.nan,
+                          iqe_hi=float(np.percentile(iv, 90)) if iv.size else np.nan))
+    return stats
+
+
 def plot_fastscan_overview(fs, cls, out, plt):
     fig, ax = plt.subplots(1, 2, figsize=(13, 5))
     piv = fs.pivot_table(
@@ -2216,6 +2315,7 @@ def write_report(
     fs_spatial=None,
     fs_biases=(),
     fs_v0=None,
+    fs_maps=(),
 ):
     run_dir = Path(run_dir)
     lines = []
@@ -2344,6 +2444,24 @@ def write_report(
               f"| {r['lost']} | {r['gained']} | {r['ratio']:.3f} "
               f"({r['ratio_iqr'][0]:.3f}–{r['ratio_iqr'][1]:.3f}) |")
         A("\n![Fast scan at every bias](REPORT_assets/fastscan_biases.png)\n")
+    if fs_maps:
+        A("- **Optical power, current and IQE at every fast-scan bias.** IQE = EQE / η with η "
+          "from the sweep's ABC fit, after scaling the fast scan's EQE by k: the median, over the "
+          "swept single pixels, of the sweep's EQE at that bias over the fast scan's. k absorbs "
+          "the fast scan's ~10 ms dwell and missing leakage reference. This is IQE *at* the "
+          "bias, not each pixel's peak IQE. The current map shows dead pixels too: one that "
+          "draws current is a short, one that draws none is open.\n")
+        A("| bias | alive | median P, alive | median J, alive | k (pixels) | IQE median (10–90 %) |")
+        A("|---|---|---|---|---|---|")
+        for m in fs_maps:
+            A(f"| {m['v']:+.3f} V | {m['alive']}/{m['n']} | {m['P'] * 1e9:.2f} nW | "
+              f"{m['J']:.1f} A/cm² | "
+              + (f"{m['k']:.3f} ({m['n_k']}) | " if np.isfinite(m['k']) else "— | ")
+              + (f"{m['iqe']:.0f} % ({m['iqe_lo']:.0f}–{m['iqe_hi']:.0f} %) |"
+                 if np.isfinite(m['iqe']) else "no sweep fit |"))
+        for m in fs_maps:
+            A(f"\n![Fast scan at {m['v']:+.3f} V](REPORT_assets/{m['file']})")
+        A("")
     A("")
 
     A("## 3. NVLED sweep — IQE / EQE\n")
@@ -3007,6 +3125,23 @@ def analyse_run(run_dir, log):
             if s:
                 s["label"] = f"NVLEDSweep/{grp.name}"
                 summaries.append(s)
+    # Power, current and IQE maps at EVERY fast-scan bias. eta and the sweep's EQE come
+    # from the first sweep whose fit succeeded; without one the IQE panel is left out.
+    fit_s = next((s for s in summaries if s.get("fit_ok") and s.get("median_fit")), None)
+    eta = fit_s["median_fit"].get("eta_LEE") if fit_s else None
+    enr = None
+    if fit_s:
+        ep = run_dir / fit_s["label"] / "IQE_EQE" / "enriched_points.csv"
+        enr = pd.read_csv(ep) if ep.exists() else None
+    fs_maps = []
+    try:
+        v0 = float(fs["NVLED_V"].astype(float).round(4).iloc[0]) if "NVLED_V" in fs else 0.0
+        fs_maps = fastscan_bias_maps({v0: fs, **fs_extra}, eta, enr, out, plt)
+        for m in fs_maps:
+            log(f"  fast-scan maps {m['v']:+.3f} V: {m['alive']}/{m['n']} alive, "
+                f"J~{m['J']:.1f} A/cm2, IQE median {m['iqe']:.0f}% (k={m['k']:.3f})")
+    except Exception as e:
+        log(f"  (skipped the per-bias fast-scan maps: {e})")
     # Full-coverage peak-IQE proxy from the fast scan, calibrated to the sweep's pooled peak IQE.
     # Only produced when the fast-scan bias is on the EQE plateau (J≈8–30, i.e. NVLED ≈ −1.35 V);
     # skipped for a droop-side fast scan (old −2.6 V), where EQE ≠ peak.
@@ -3082,6 +3217,7 @@ def analyse_run(run_dir, log):
     write_report(
         run_dir, cfg, cls, ratio, summaries, log, fs_eff=fs_eff, fs_spatial=fs_spatial,
         fs_biases=fs_biases, fs_v0=float(fs["NVLED_V"].iloc[0]) if "NVLED_V" in fs else None,
+        fs_maps=fs_maps,
     )
 
 

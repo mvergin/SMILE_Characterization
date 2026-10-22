@@ -230,6 +230,10 @@ def test_a_fast_scan_at_several_biases_is_split_not_pooled():
         row = next(l for l in report.splitlines() if l.startswith("| -2.600 V"))
         assert row.split("|")[3].strip() == str(len(dark)), row
         assert (run / "REPORT_assets" / "fastscan_biases.png").exists()
+        # power, current (and IQE when the sweep fits) at EVERY bias, not just the first
+        for v in (v0, -2.6):
+            assert (run / "REPORT_assets" / f"fastscan_maps_{aa._bias_tag(v)}.png").exists(), v
+        assert "Optical power, current and IQE at every fast-scan bias" in report
 
 
 if __name__ == "__main__":
