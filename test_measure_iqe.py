@@ -850,6 +850,23 @@ def _norm(v):
     return list(v) if isinstance(v, (list, tuple)) else v
 
 
+def test_a_hardware_run_must_name_its_array():
+    """No --array, no hardware run.
+
+    The default sample_name is one real array. Without the guard a run on any other
+    array is recorded as that one, gets no calibration of its own, and --calibrate
+    overwrites that array's measured calibration file.
+    """
+    cal = Path(__file__).resolve().parent / "calibrations"
+    before = {p.name: p.read_bytes() for p in cal.glob("*.yaml")} if cal.is_dir() else {}
+    assert cli_main([]) == 2, "an unnamed hardware sweep must be refused"
+    assert cli_main(["--calibrate"]) == 2, "an unnamed hardware calibration must be refused"
+    after = {p.name: p.read_bytes() for p in cal.glob("*.yaml")} if cal.is_dir() else {}
+    assert before == after, "a refused run touched calibrations/"
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert cli_main(["--print-config"]) == 0, "inspecting the config needs no name"
+
+
 def test_bias_major_pays_each_dwell_once_for_all_pixels():
     """The point of the order: n_pixels x the dwell becomes 1 x the dwell."""
     import time as _time

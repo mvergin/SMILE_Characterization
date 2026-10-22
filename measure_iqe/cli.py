@@ -144,8 +144,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--out", metavar="DIR",
                     help="output root, overriding base_dir from the config")
     ap.add_argument("--array", metavar="NAME",
-                    help="which physical array this is. Sets sample_name, and picks up "
-                         "calibrations/NAME.yaml if --calibrate has been run for it")
+                    help="which physical array this is. REQUIRED for a hardware run, "
+                         "unless --set sample_name=... names it. Sets sample_name, and picks "
+                         "up calibrations/NAME.yaml if --calibrate has been run for it")
     ap.add_argument("--calibrate", action="store_true",
                     help="measure THIS array's settling and write a calibration file, "
                          "instead of sweeping. Run once per array. One pixel per quadrant, so "
@@ -208,6 +209,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.dump_config:
         print(f"wrote {cfg.write_file(args.dump_config)}")
         return 0
+
+    named = args.array or any(k == "sample_name" for k, _v in (args.set or []))
+    if (not named and not args.simulate
+            and cfg.sample_name == IQEConfig.__dataclass_fields__["sample_name"].default):
+        # Refuse rather than mislabel, as characterize_capacitance does. The default
+        # name is one particular array, so without this a run on any other array is
+        # recorded as that one, gets no calibration of its own -- the lookup needs
+        # --array -- and --calibrate overwrites THAT array's measured calibration.
+        print(f"config error: name the mounted array with --array NAME (e.g. --array "
+              f"Array38). Without it this run would be recorded as "
+              f"{cfg.sample_name!r}, the config default, whatever is on the stage"
+              + (", and --calibrate would overwrite calibrations/"
+                 f"{cfg.sample_name}.yaml" if args.calibrate else "")
+              + ". --simulate needs no name.", file=sys.stderr)
+        return 2
 
     if args.array and not args.calibrate and not args.calibration:
         auto = calibration_path(args.array)

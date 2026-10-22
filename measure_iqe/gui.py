@@ -59,7 +59,8 @@ _PROG = re.compile(r"(?:\[|PIXEL )(\d+)/(\d+)")
 # stays reachable on the All parameters tab, which is generated from the dataclass and
 # therefore cannot drift from it.
 SHAPE: list[tuple[str, str, str]] = [
-    ("sample_name", "Sample", "goes in the run directory name and every filename"),
+    ("sample_name", "Sample",
+     "the default is refused on hardware: set --array on the command tab, or this"),
     ("roi", "ROI", 'FULL / TL / TR / BL / BR, or [x1,y1,x2,y2]'),
     ("sweep_select", "Selection", "blocks | spatial | stride"),
     ("block_size", "Block edge (px)", "ROI/block_size blocks per axis"),
