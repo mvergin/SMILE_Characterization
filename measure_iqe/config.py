@@ -44,7 +44,10 @@ class IQEConfig:
     # ── Run identity & output ───────────────────────────────────────────
     # base_dir is relative to the working directory unless you pass an absolute
     # path.  Nothing outside it is ever written.
-    sample_name: str = "Array42_IQE"  # override per array with --array NAME
+    sample_name: str = "Array42_IQE"  # which array is mounted. Set it with --array NAME, which
+                                      # also applies calibrations/NAME.yaml. A hardware run that
+                                      # leaves this default is REFUSED: it is one real array, so
+                                      # any other array would be recorded as it. --simulate is exempt.
     base_dir: str = "results"          # output root; a timestamped run dir is created inside
 
     # ── ROI & pixel selection ───────────────────────────────────────────

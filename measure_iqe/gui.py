@@ -186,7 +186,10 @@ class Opt:
         if self.choices:
             t += f"\nchoices: {' '.join(map(str, self.choices))}"
         if self.kind == "value":
-            t += f"\ndefault: {self.default or '(none)'}"
+            # "default: (none)" on a required option reads as "optional"; it is not.
+            t += ("\nno default: must be given for a hardware run"
+                  if not self.default and "REQUIRED" in self.help.upper()
+                  else f"\ndefault: {self.default or '(none)'}")
         return f"{' / '.join(self.flags)}\n{t}".strip()
 
 
