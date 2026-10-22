@@ -282,15 +282,15 @@ class IQEConfig:
     nvled_v_coarse_start: float = -0.8  # least-negative sweep voltage (just below turn-on)
     nvled_v_coarse_stop: float = -2.6  # most-negative sweep voltage (below saturation knee)
     n_coarse: int = 26  # coarse pre-sweep points
-    coarse_settle_ms: float = 6.0
-    coarse_n_smu: int = 4
+    coarse_settle_ms: float = 6.0  # settle before each coarse pre-sweep point (ms)
+    coarse_n_smu: int = 4  # SMU readings per coarse pre-sweep point
     # Where the fit actually needs data: across 140 per-pixel fits the device's IQE peak
     # sits at J ≈ 5 A/cm² (≈5 µA) and the trustworthy fits only reach down to J ≈ 1 (≈1 µA)
     # on the rising side. So target J ≈ 1–10, NOT sub-µA: below ~1 µA the data is unneeded
     # AND that is exactly where the fine measure range takes ~seconds to settle. Starting at
     # ~1 µA keeps every point on a fast-settling range and puts the points where the peak is.
     low_current_target_a: float = 1e-6  # lowest LED current the sweep targets (~J 1, the rise foot)
-    high_current_frac: float = 0.97
+    high_current_frac: float = 0.97  # the fine grid's top target, as a fraction of the coarse pre-sweep's max current
     n_fine: int = 30  # fine voltage-sweep points. Lowered from 45 once the settle time was
                       # measured: the dwell dominates the budget, so fewer points with a
                       # real settle beat more points that never settled. 30 points x 2
@@ -341,10 +341,9 @@ class IQEConfig:
     warmup_diag_v: float = -0.85  # ≈J 1: stresses current readout, light still > dark
     warmup_diag_n_pixels: int = 3  # how many of the selected pixels to characterise
     warmup_diag_seconds: float = 30.0  # log duration per phase (fresh turn-on / conditioned)
-    warmup_diag_nplc: float = 1.0
-    warmup_diag_n_smu: int = 8
-    warmup_diag_n_pm: int = 4
-
+    warmup_diag_nplc: float = 1.0  # SMU integration (NPLC) for the warm-up diagnostic
+    warmup_diag_n_smu: int = 8  # SMU readings per warm-up diagnostic sample
+    warmup_diag_n_pm: int = 4  # PM400 readings per warm-up diagnostic sample
     # ── Adaptive per-point effort by current zone ───────────────────────
     # The warmup-diag (260629-0733) showed the LIGHT is the clean channel (~3% at a
     # fixed point) and the CURRENT is the noisy one. So the effort budget is on the SMU:
@@ -357,29 +356,27 @@ class IQEConfig:
     # The fine low-J range also settles more slowly, so low-J points get a longer per-point
     # settle (LOWJ_SETTLE_MS) than the fast high-J points (HIGHJ_SETTLE_MS).
     adaptive_threshold_a: float = 1e-5  # 10 µA: boundary between the low-J and high-J zones
-    lowj_nplc: float = 2.0
-    lowj_n_pm: int = 8
+    lowj_nplc: float = 2.0  # low-J zone (below adaptive_threshold_a): SMU integration (NPLC)
+    lowj_n_pm: int = 8  # low-J zone: PM400 readings per point
     lowj_n_smu: int = 16  # low J: integrate the CURRENT harder
-    highj_nplc: float = 0.5
-    highj_n_pm: int = 4
+    highj_nplc: float = 0.5  # high-J zone (above adaptive_threshold_a): SMU integration (NPLC)
+    highj_n_pm: int = 4  # high-J zone: PM400 readings per point
     highj_n_smu: int = 8  # high J: fast
-    lowj_settle_ms: float = 200.0
+    lowj_settle_ms: float = 200.0  # low-J zone: settle per point (ms); the fine range settles slower
     highj_settle_ms: float = 15.0  # fine low-J range needs more settle time
 
     # ── Instruments ─────────────────────────────────────────────────────
-    pm400_addr: str = "USB0::0x1313::0x8075::P5006526::INSTR"
-    smu_addr: str = "USB0::0x05E6::0x2602::4649721::INSTR"
-
+    pm400_addr: str = "USB0::0x1313::0x8075::P5006526::INSTR"  # VISA address of the Thorlabs PM400 power meter
+    smu_addr: str = "USB0::0x05E6::0x2602::4649721::INSTR"  # VISA address of the Keithley 2602B SMU
     # ── PM400 ───────────────────────────────────────────────────────────
-    pm_wavelength: float = 440.0
+    pm_wavelength: float = 440.0  # wavelength (nm) the PM400 uses for its responsivity; also sets the photon energy
     pm_range: float = 1e-7  # W, fixed (no autorange)
     pm_averaging: int = 3  # internal averaging per reading
 
     # ── VLED (ch A) — constant LED anode drive ──────────────────────────
-    vled_voltage: float = 1.8
-    vled_compliance: float = 1.0
-    vled_range_i: float = 10e-3
-
+    vled_voltage: float = 1.8  # ch A: constant VLED anode supply (V)
+    vled_compliance: float = 1.0  # ch A current limit (A)
+    vled_range_i: float = 10e-3  # ch A current measure range (A)
     # ── NVLED (ch B) — voltage-mode current range ───────────────────────
     nvled_compliance: float = 1e-5  # current compliance (voltage mode). In High-C this ALSO
                                      # selects the measure range, so it sets the noise floor:
@@ -664,16 +661,16 @@ class IQEConfig:
                                        # bought with current, not with waiting -- which
                                        # is exactly why 20 s changed nothing. See
                                        # section 17.
-    vramp_perseg_effort: bool = True
+    vramp_perseg_effort: bool = True  # true: use the vramp_lowv_* / vramp_highv_* effort per segment (split at vramp_knee_v); false: sweep_nplc, n_pm_samples, n_smu_samples, settle_ms everywhere
     vramp_lowv_nplc: float = 2.0  # integer NPLC, so the mains line is nulled by integration
-    vramp_lowv_n_pm: int = 32
-    vramp_lowv_n_smu: int = 12
+    vramp_lowv_n_pm: int = 32  # rising segment (above vramp_knee_v): PM400 readings per point
+    vramp_lowv_n_smu: int = 12  # rising segment: SMU readings per point
     vramp_lowv_settle_s: float = 8.0  # rising side: 1% needs 5-55 s. 8 s is the compromise
                                       # that keeps a 30-point sweep under ~10 min/pixel.
     vramp_lowv_limit_a: float = 1e-5  # the rising side never exceeds ~5 uA
     vramp_highv_nplc: float = 1.0  # was 0.5 -- not an integer, so it nulled no mains at all
-    vramp_highv_n_pm: int = 8
-    vramp_highv_n_smu: int = 8
+    vramp_highv_n_pm: int = 8  # droop segment (below vramp_knee_v): PM400 readings per point
+    vramp_highv_n_smu: int = 8  # droop segment: SMU readings per point
     vramp_highv_settle_s: float = 2.0  # droop side: large currents, the relaxation is a much
                                        # smaller fraction of the reading
     vramp_highv_limit_a: float = 1e-3  # -2.6 V draws ~175 uA, far above the rising-side limit
@@ -844,9 +841,8 @@ class IQEConfig:
                                      # A high percentile tracks the lit population as long as the lit
                                      # fraction exceeds (100−pctl)% = 10%.
 
-    pixel_area_um2: float = 100.0
-    smu_display_off: bool = False
-
+    pixel_area_um2: float = 100.0  # emitting area of one pixel (um^2), for J = I / area
+    smu_display_off: bool = False  # turn the SMU front panel off during a run (fewer display updates on the instrument)
     # ── Derived / helpers ───────────────────────────────────────────────
 
     @property

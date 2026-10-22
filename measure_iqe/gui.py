@@ -1,37 +1,43 @@
-"""Operator console for ``measure_iqe`` -- tkinter, stdlib only.
+"""Operator console for ``measure_iqe`` and ``characterize_capacitance`` -- tkinter, stdlib only.
 
     python -m measure_iqe --gui
 
-ROADMAP item 6. Two decisions it is built on, both of which cost nothing and buy a
+ROADMAP item 6. Three decisions it is built on, all of which cost nothing and buy a
 lot:
 
 * **tkinter**, because it ships with Python. A measurement machine that needs a pip
   install before it can run a sweep is a machine that will not run the sweep.
-* **the CLI as a subprocess**, never ``import measure_iqe`` into this process. The log
-  window is then free (it is the child's stdout), the Stop button actually works, and
-  a crash inside a sweep cannot take the window down with it. Everything this window
-  can do, it does by building an argument list a person could have typed -- and it
-  shows that list, so they can.
+* **the CLI as a subprocess**, never ``import measure_iqe`` into this process to run
+  it. The log window is then free (it is the child's stdout), the Stop button actually
+  works, and a crash inside a sweep cannot take the window down with it. Everything
+  this window can do, it does by building an argument list a person could have typed
+  -- and it shows that list, so they can.
+* **generated, not hand-built**: the command-line options of both tools come from
+  their own argparse parsers, every config field from the IQEConfig dataclass, and
+  every tooltip from the parser's help or the field's comment in config.py. A new
+  option or field appears here without touching this file, and a test fails if one
+  has no explanation.
 
-Stop sends **CTRL_BREAK**, not a kill. ``measure_iqe.safeexit`` catches it and parks
-the hardware: outputs off, frame blanked. A killed process leaves the SMU driving the
-array. That is the one thing in this file that is not a convenience.
+Stop sends **CTRL_BREAK**, not a kill. ``measure_iqe.safeexit`` catches it in both tools
+and parks the hardware: outputs off, frame blanked. A killed process leaves the SMU
+driving the array. That is the one thing in this file that is not a convenience.
 
 The queue is a list of argument lists run in sequence, so an operator can leave a
-night's work and come back to it.
+night's work and come back to it. Jobs of both tools can share one queue.
 """
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import json
 import os
 import queue
+import re
 import shlex
 import signal
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 
 import tkinter as tk
@@ -39,9 +45,11 @@ from tkinter import filedialog, messagebox, ttk
 
 from .config import IQEConfig
 
-# A run prints "  [3/16] pixel (x,y)" (pixel_major) or "  [2/30] -1.300 V" (bias_major).
-# Both are the same shape, which is why the progress bar can be one regex.
-_PROG = __import__("re").compile(r"\[(\d+)/(\d+)\]")
+REPO = Path(__file__).resolve().parent.parent
+
+# measure_iqe prints "  [3/16] pixel (x,y)" or "  [2/30] -1.300 V"; characterize_capacitance
+# prints "PIXEL 2/4 (x,y)". One regex for the progress bar.
+_PROG = re.compile(r"(?:\[|PIXEL )(\d+)/(\d+)")
 
 
 # ----------------------------------------------------------------------
@@ -120,39 +128,129 @@ def _defaults() -> dict[str, str]:
     return {f.name: _as_text(getattr(d, f.name)) for f in dataclasses.fields(IQEConfig)}
 
 
-def build_argv(values: dict[str, str], defaults: dict[str, str], *,
-               config_file: str = "", array: str = "", out_dir: str = "",
-               simulate: bool = False, extra: str = "", mode: str = "sweep",
-               calibration: str = "", resume: str = "") -> list[str]:
-    """The command the window would run. Exactly what a person could have typed.
+_FIELD = re.compile(r"^    (\w+)\s*:\s*[^=#]+=.*?(?:#\s?(.*))?$")
+_COMMENT = re.compile(r"^(\s+)#\s?(.*)$")
 
-    Only fields the operator CHANGED become ``--set``. Sending all 132 every time
+
+def field_docs() -> dict[str, str]:
+    """Every IQEConfig field's explanation, read from its comment in config.py.
+
+    The comments ARE the documentation of this project -- configs/standard.yaml copies
+    them -- so the tooltips read them rather than keep a second copy that would drift.
+    Three layouts occur, tried in this order: an inline comment plus its deeper-indented
+    continuation lines; a comment block directly above the field; a comment block
+    directly below it. Section rulers (``# ── … ──``) are skipped.
+    """
+    src = (Path(__file__).with_name("config.py")).read_text(encoding="utf-8").splitlines()
+    names = {f.name for f in dataclasses.fields(IQEConfig)}
+    docs: dict[str, str] = {}
+    for k, line in enumerate(src):
+        m = _FIELD.match(line)
+        if not m or m.group(1) not in names or m.group(1) in docs:
+            continue
+        text = [m.group(2)] if m.group(2) else []
+        j = k + 1
+        while j < len(src) and (c := _COMMENT.match(src[j])) and len(c.group(1)) > 4:
+            text.append(c.group(2)); j += 1
+        if not text:                                   # block above
+            j = k - 1
+            while j >= 0 and (c := _COMMENT.match(src[j])) and len(c.group(1)) == 4:
+                text.insert(0, c.group(2)); j -= 1
+        if not text:                                   # block below
+            j = k + 1
+            while j < len(src) and (c := _COMMENT.match(src[j])) and len(c.group(1)) == 4:
+                text.append(c.group(2)); j += 1
+        docs[m.group(1)] = " ".join(t.strip() for t in text if t.strip() and "──" not in t)
+    return docs
+
+
+# ----------------------------------------------------------------------
+#  Command-line options, generated from a tool's own parser
+# ----------------------------------------------------------------------
+@dataclasses.dataclass(frozen=True)
+class Opt:
+    """One argparse option as the console shows it."""
+    dest: str
+    flags: tuple[str, ...]
+    kind: str            # "flag" (store_true), "bool" (--x/--no-x), "value"
+    nargs: object
+    default: str         # as typed; "" = no default
+    choices: tuple = ()
+    help: str = ""
+    metavar: str = ""
+
+    @property
+    def tip(self) -> str:
+        t = self.help or ""
+        if self.choices:
+            t += f"\nchoices: {' '.join(map(str, self.choices))}"
+        if self.kind == "value":
+            t += f"\ndefault: {self.default or '(none)'}"
+        return f"{' / '.join(self.flags)}\n{t}".strip()
+
+
+def _opt_text(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, (list, tuple)):
+        return " ".join(_opt_text(x) for x in v)
+    return str(v)
+
+
+def option_specs(parser: argparse.ArgumentParser,
+                 skip: tuple[str, ...] = ("--help", "--set", "--gui")) -> list[Opt]:
+    """Every option of ``parser`` except ``skip``, in the parser's order."""
+    out = []
+    for a in parser._actions:                      # noqa: SLF001 -- the public way is --help text
+        if not a.option_strings or set(a.option_strings) & set(skip):
+            continue
+        if isinstance(a, argparse.BooleanOptionalAction):
+            kind = "bool"
+        elif isinstance(a, argparse._StoreTrueAction):  # noqa: SLF001
+            kind = "flag"
+        else:
+            kind = "value"
+        out.append(Opt(dest=a.dest, flags=tuple(a.option_strings), kind=kind,
+                       nargs=a.nargs,
+                       default=("true" if a.default else "false") if kind != "value"
+                       else _opt_text(a.default),
+                       choices=tuple(a.choices or ()),
+                       help=(a.help or "").replace("%%", "%"),
+                       metavar=a.metavar if isinstance(a.metavar, str) else ""))
+    return out
+
+
+def options_argv(specs: list[Opt], values: dict[str, str]) -> list[str]:
+    """The options the operator changed, as argv. Unchanged ones are left to the tool."""
+    out: list[str] = []
+    for o in specs:
+        v = values.get(o.dest, o.default).strip()
+        if v == o.default:
+            continue
+        if o.kind == "flag":
+            out += [o.flags[0]] if v == "true" else []
+        elif o.kind == "bool":
+            out += [o.flags[0] if v == "true" else o.flags[1]]
+        elif v:
+            multi = o.nargs in ("+", "*") or (isinstance(o.nargs, int) and o.nargs > 1)
+            out += [o.flags[0], *(v.split() if multi else [v])]
+    return out
+
+
+def build_argv(values: dict[str, str], defaults: dict[str, str], *,
+               opts: list[str] | tuple[str, ...] = (), extra: str = "") -> list[str]:
+    """The measure_iqe command the window would run. Exactly what a person could type.
+
+    ``opts`` are the command-line options (``options_argv`` of the Command tab). Only
+    config fields the operator CHANGED become ``--set``. Sending all of them every time
     would bury the two that matter and make every run log unreadable -- and it would
     also defeat ``--config`` and ``configs/local.yaml``, because an explicit ``--set``
     outranks both, so a window that always sent everything would silently override the
     machine's own settings with this window's idea of the defaults.
 
-    ``mode`` is what the run does: ``sweep`` (fast scan + sweep, or the fast scan alone
-    with ``fastscan_only``), ``calibrate`` (``--calibrate``) or ``warmup`` (``--warmup-diag``).
-
     Separated from the widgets so it can be tested without a display.
     """
-    flag = {"sweep": [], "calibrate": ["--calibrate"], "warmup": ["--warmup-diag"]}
-    if mode not in flag:
-        raise ValueError(f"mode={mode!r}; expected one of {sorted(flag)}")
-    a = [sys.executable, "-m", "measure_iqe", *flag[mode]]
-    if config_file.strip():
-        a += ["--config", config_file.strip()]
-    if array.strip():
-        a += ["--array", array.strip()]
-    if out_dir.strip():
-        a += ["--out", out_dir.strip()]
-    if calibration.strip():
-        a += ["--calibration", calibration.strip()]
-    if resume.strip():
-        a += ["--resume", resume.strip()]
-    if simulate:
-        a += ["--simulate"]
+    a = [sys.executable, "-m", "measure_iqe", *opts]
     for k in values:
         v = values[k].strip()
         if v != defaults[k]:
@@ -162,6 +260,17 @@ def build_argv(values: dict[str, str], defaults: dict[str, str], *,
         if line and not line.startswith("#"):
             a += ["--set", line]
     return a
+
+
+def capacitance_parser() -> argparse.ArgumentParser | None:
+    """characterize_capacitance's parser, or None when it cannot be imported here."""
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    try:
+        import characterize_capacitance as cc
+    except Exception:                                  # noqa: BLE001 - shown in the tab
+        return None
+    return cc.build_parser()
 
 
 # ----------------------------------------------------------------------
@@ -226,8 +335,7 @@ class Runner:
 
     def _run_one(self, argv: list[str]) -> int:
         kw: dict = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        text=True, bufsize=1,
-                        cwd=str(Path(__file__).resolve().parent.parent))
+                        text=True, bufsize=1, cwd=str(REPO))
         if os.name == "nt":
             # Its own process group, or CTRL_BREAK would hit this window too.
             kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -248,25 +356,119 @@ class Runner:
 
 
 # ----------------------------------------------------------------------
+#  Widgets
+# ----------------------------------------------------------------------
+class Tip:
+    """A tooltip: the text appears below the widget while the pointer is on it."""
+
+    def __init__(self, widget: tk.Widget, text: str) -> None:
+        self.w, self.text, self.top = widget, text[:1500], None
+        widget.bind("<Enter>", self.show, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+
+    def show(self, _e=None) -> None:
+        if self.top or not self.text:
+            return
+        x = self.w.winfo_rootx() + 12
+        y = self.w.winfo_rooty() + self.w.winfo_height() + 4
+        self.top = tk.Toplevel(self.w)
+        self.top.wm_overrideredirect(True)
+        self.top.wm_geometry(f"+{x}+{y}")
+        tk.Label(self.top, text=self.text, justify="left", background="#ffffe0",
+                 relief="solid", borderwidth=1, wraplength=560, padx=4, pady=2).pack()
+
+    def hide(self, _e=None) -> None:
+        if self.top:
+            self.top.destroy()
+            self.top = None
+
+
+def _scrolled(master) -> tuple[ttk.Frame, ttk.Frame]:
+    """(outer, inner): a vertically scrolling frame. The wheel scrolls whichever is
+    under the pointer, so several of them can coexist."""
+    outer = ttk.Frame(master)
+    canvas = tk.Canvas(outer, highlightthickness=0)
+    sb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+    inner = ttk.Frame(canvas)
+    inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0, 0), window=inner, anchor="nw")
+    canvas.configure(yscrollcommand=sb.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    sb.pack(side="right", fill="y")
+    wheel = lambda e: canvas.yview_scroll(int(-e.delta / 120), "units")  # noqa: E731
+    canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", wheel))
+    canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+    return outer, inner
+
+
+class OptionForm(ttk.Frame):
+    """One row per command-line option: the flag, a widget, and its help as a tooltip."""
+
+    PATHS = {"PATH": "file", "FILE": "file", "DIR": "dir", "RUN_DIR": "dir"}
+
+    def __init__(self, master, specs: list[Opt]) -> None:
+        super().__init__(master)
+        self.specs = specs
+        self.vars: dict[str, tk.StringVar] = {}
+        outer, inner = _scrolled(self)
+        outer.pack(fill="both", expand=True)
+        for r, o in enumerate(specs):
+            var = self.vars[o.dest] = tk.StringVar(value=o.default)
+            lab = ttk.Label(inner, text=" / ".join(o.flags), anchor="e")
+            lab.grid(row=r, column=0, sticky="e", padx=(4, 6), pady=1)
+            if o.kind in ("flag", "bool"):
+                w = ttk.Checkbutton(inner, variable=var, onvalue="true", offvalue="false")
+            elif o.choices and o.nargs in (None, "?"):
+                w = ttk.Combobox(inner, textvariable=var, width=30, state="readonly",
+                                 values=[str(c) for c in o.choices])
+            else:
+                w = ttk.Entry(inner, textvariable=var, width=34)
+            w.grid(row=r, column=1, sticky="w", pady=1)
+            pick = self.PATHS.get(o.metavar)
+            if pick:
+                ttk.Button(inner, text="...", width=3,
+                           command=lambda v=var, k=pick: self._pick(v, k)
+                           ).grid(row=r, column=2, sticky="w")
+            short = o.help.split(". ")[0][:90]
+            hint = ttk.Label(inner, text=short, foreground="#666")
+            hint.grid(row=r, column=3, sticky="w", padx=(6, 4))
+            for widget in (lab, w, hint):
+                Tip(widget, o.tip)
+
+    @staticmethod
+    def _pick(var: tk.StringVar, kind: str) -> None:
+        p = filedialog.askdirectory() if kind == "dir" else filedialog.askopenfilename()
+        if p:
+            var.set(p)
+
+    def values(self) -> dict[str, str]:
+        return {k: v.get() for k, v in self.vars.items()}
+
+    def argv(self) -> list[str]:
+        return options_argv(self.specs, self.values())
+
+    def reset(self) -> None:
+        for o in self.specs:
+            self.vars[o.dest].set(o.default)
+
+
+# ----------------------------------------------------------------------
 #  The window
 # ----------------------------------------------------------------------
 class App(ttk.Frame):
     def __init__(self, master: tk.Tk) -> None:
         super().__init__(master, padding=8)
         master.title("measure_iqe - operator console")
-        master.geometry("1180x820")
+        master.geometry("1280x880")
         self.pack(fill="both", expand=True)
 
+        from .cli import build_parser
         self.defaults = _defaults()
+        self.docs = field_docs()
         self.vars: dict[str, tk.StringVar] = {
             k: tk.StringVar(value=v) for k, v in self.defaults.items()}
-        self.simulate = tk.BooleanVar(value=False)
-        self.array = tk.StringVar(value="")
-        self.config_file = tk.StringVar(value="")
-        self.out_dir = tk.StringVar(value="")
-        self.mode = tk.StringVar(value="sweep")
-        self.calibration = tk.StringVar(value="")
-        self.resume = tk.StringVar(value="")
+        self.iqe_specs = option_specs(build_parser())
+        self.cc_parser = capacitance_parser()
         self.jobs: list[list[str]] = []
         self.runner = Runner()
 
@@ -277,83 +479,80 @@ class App(ttk.Frame):
     def _build(self) -> None:
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True)
-        nb.add(self._tab_shape(nb), text="Run shape")
-        nb.add(self._tab_all(nb), text="All parameters")
+        self.iqe_form = OptionForm(nb, self.iqe_specs)
+        nb.add(self.iqe_form, text="measure_iqe: command")
+        nb.add(self._tab_shape(nb), text="measure_iqe: run shape")
+        nb.add(self._tab_all(nb), text="measure_iqe: all parameters")
+        nb.add(self._tab_cc(nb), text="characterize_capacitance")
         nb.add(self._tab_queue(nb), text="Queue")
-
-        bar = ttk.Frame(self)
-        bar.pack(fill="x", pady=(8, 4))
-        ttk.Checkbutton(bar, text="Simulate (no hardware)",
-                        variable=self.simulate).pack(side="left")
-        ttk.Label(bar, text="  --array ").pack(side="left")
-        ttk.Entry(bar, textvariable=self.array, width=16).pack(side="left")
-        ttk.Label(bar, text="  --config ").pack(side="left")
-        ttk.Entry(bar, textvariable=self.config_file, width=22).pack(side="left")
-        ttk.Button(bar, text="...", width=3, command=self._pick_config).pack(side="left")
-        ttk.Label(bar, text="  --out ").pack(side="left")
-        ttk.Entry(bar, textvariable=self.out_dir, width=22).pack(side="left")
-        ttk.Button(bar, text="...", width=3, command=self._pick_out).pack(side="left")
-
-        bar1 = ttk.Frame(self)
-        bar1.pack(fill="x", pady=(0, 4))
-        ttk.Label(bar1, text="Mode ").pack(side="left")
-        ttk.Combobox(bar1, textvariable=self.mode, width=10, state="readonly",
-                     values=("sweep", "calibrate", "warmup")).pack(side="left")
-        ttk.Label(bar1, text="  --calibration ").pack(side="left")
-        ttk.Entry(bar1, textvariable=self.calibration, width=28).pack(side="left")
-        ttk.Button(bar1, text="...", width=3, command=self._pick_calibration
-                   ).pack(side="left")
-        ttk.Label(bar1, text="  --resume ").pack(side="left")
-        ttk.Entry(bar1, textvariable=self.resume, width=28).pack(side="left")
-        ttk.Button(bar1, text="...", width=3, command=self._pick_resume).pack(side="left")
 
         bar2 = ttk.Frame(self)
         bar2.pack(fill="x", pady=4)
-        ttk.Button(bar2, text="Preview command", command=self._preview).pack(side="left")
-        ttk.Button(bar2, text="Check config", command=self._check).pack(side="left", padx=4)
-        ttk.Button(bar2, text="Add to queue", command=self._enqueue).pack(side="left")
-        ttk.Button(bar2, text="Run now", command=self._run_now).pack(side="left", padx=4)
+        ttk.Label(bar2, text="measure_iqe:").pack(side="left")
+        for text, cmd, tip in (
+                ("Preview command", self._preview, "show the command, run nothing"),
+                ("Check config", self._check,
+                 "build the effective config with --print-config: no hardware touched"),
+                ("Add to queue", self._enqueue, "append this command to the Queue tab"),
+                ("Run now", self._run_now, "run this command alone, now")):
+            b = ttk.Button(bar2, text=text, command=cmd)
+            b.pack(side="left", padx=2)
+            Tip(b, tip)
+        ttk.Separator(bar2, orient="vertical").pack(side="left", fill="y", padx=8)
         self.btn_start = ttk.Button(bar2, text="Start queue", command=self._start)
         self.btn_start.pack(side="left")
+        Tip(self.btn_start, "run every queued job in order; a nonzero exit stops the queue")
         self.btn_stop = ttk.Button(bar2, text="Stop (park hardware)",
                                    command=self._stop, state="disabled")
         self.btn_stop.pack(side="left", padx=4)
+        Tip(self.btn_stop, "CTRL_BREAK to the running job: it parks the hardware "
+                           "(outputs off, frame blanked) and writes what it has")
 
         self.progress = ttk.Progressbar(self, mode="determinate", maximum=100)
         self.progress.pack(fill="x", pady=(4, 2))
         self.status = ttk.Label(self, text="idle", anchor="w")
         self.status.pack(fill="x")
 
-        self.log = tk.Text(self, height=18, wrap="none", background="#101014",
+        self.log = tk.Text(self, height=16, wrap="none", background="#101014",
                            foreground="#d8d8d8", insertbackground="#d8d8d8")
         self.log.pack(fill="both", expand=True, pady=(4, 0))
         sb = ttk.Scrollbar(self, orient="horizontal", command=self.log.xview)
         sb.pack(fill="x")
         self.log.configure(xscrollcommand=sb.set)
 
+    def _field_tip(self, key: str) -> str:
+        return f"{key}\n{self.docs.get(key, '')}\ndefault: {self.defaults[key]}"
+
     def _tab_shape(self, master) -> ttk.Frame:
         f = ttk.Frame(master, padding=8)
         p = ttk.LabelFrame(f, text="Presets", padding=6)
         p.pack(fill="x")
         for name in PRESETS:
-            ttk.Button(p, text=name, command=lambda n=name: self._preset(n)
-                       ).pack(side="left", padx=3)
+            b = ttk.Button(p, text=name, command=lambda n=name: self._preset(n))
+            b.pack(side="left", padx=3)
+            Tip(b, "reset every field, then set: " + ", ".join(
+                f"{k}={_as_text(v)}" for k, v in PRESETS[name].items()))
         ttk.Button(p, text="Reset to defaults", command=self._reset).pack(side="right")
 
         g = ttk.Frame(f)
         g.pack(fill="both", expand=True, pady=(8, 0))
         for i, (key, label, hint) in enumerate(SHAPE):
-            r, c = i % 10, (i // 10) * 3
-            ttk.Label(g, text=label).grid(row=r, column=c, sticky="e", padx=(8, 4), pady=2)
-            ttk.Entry(g, textvariable=self.vars[key], width=20).grid(
-                row=r, column=c + 1, sticky="w", pady=2)
-            ttk.Label(g, text=hint, foreground="#666").grid(
-                row=r, column=c + 2, sticky="w", padx=(6, 12))
+            r, c = i % 11, (i // 11) * 3
+            lab = ttk.Label(g, text=label)
+            lab.grid(row=r, column=c, sticky="e", padx=(8, 4), pady=2)
+            ent = ttk.Entry(g, textvariable=self.vars[key], width=20)
+            ent.grid(row=r, column=c + 1, sticky="w", pady=2)
+            h = ttk.Label(g, text=hint, foreground="#666")
+            h.grid(row=r, column=c + 2, sticky="w", padx=(6, 12))
+            for w in (lab, ent, h):
+                Tip(w, self._field_tip(key))
         n = ttk.LabelFrame(f, text="Extra --set overrides (one per line, KEY=VALUE)",
                            padding=6)
         n.pack(fill="x", pady=(10, 0))
         self.extra_box = tk.Text(n, height=4, wrap="none")
         self.extra_box.pack(fill="x")
+        Tip(self.extra_box, "anything the tabs do not show, or a value to force even when "
+                            "it equals the default. Lines starting with # are ignored")
         return f
 
     def _tab_all(self, master) -> ttk.Frame:
@@ -366,27 +565,42 @@ class App(ttk.Frame):
         e.pack(side="left", padx=4)
         e.bind("<KeyRelease>", lambda _e: self._refilter())
         ttk.Label(top, text="every IQEConfig field, generated from the dataclass so it "
-                            "cannot drift", foreground="#666").pack(side="left", padx=8)
+                            "cannot drift. Hover a field for its explanation.",
+                  foreground="#666").pack(side="left", padx=8)
 
-        canvas = tk.Canvas(f, highlightthickness=0)
-        sb = ttk.Scrollbar(f, orient="vertical", command=canvas.yview)
-        self.allframe = ttk.Frame(canvas)
-        self.allframe.bind("<Configure>",
-                           lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.allframe, anchor="nw")
-        canvas.configure(yscrollcommand=sb.set)
-        canvas.pack(side="left", fill="both", expand=True, pady=(6, 0))
-        sb.pack(side="right", fill="y")
-        canvas.bind_all("<MouseWheel>",
-                        lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
-
+        outer, self.allframe = _scrolled(f)
+        outer.pack(fill="both", expand=True, pady=(6, 0))
         self.rows: list[tuple[str, ttk.Label, ttk.Entry, ttk.Label]] = []
-        for i, fld in enumerate(dataclasses.fields(IQEConfig)):
+        for fld in dataclasses.fields(IQEConfig):
             lab = ttk.Label(self.allframe, text=fld.name, width=30, anchor="e")
             ent = ttk.Entry(self.allframe, textvariable=self.vars[fld.name], width=26)
-            typ = ttk.Label(self.allframe, text=f"{fld.type}", foreground="#666")
+            doc = self.docs.get(fld.name, "")
+            typ = ttk.Label(self.allframe, text=f"{fld.type}   {doc.split('. ')[0][:80]}",
+                            foreground="#666")
+            for w in (lab, ent, typ):
+                Tip(w, self._field_tip(fld.name))
             self.rows.append((fld.name, lab, ent, typ))
         self._refilter()
+        return f
+
+    def _tab_cc(self, master) -> ttk.Frame:
+        f = ttk.Frame(master, padding=8)
+        if self.cc_parser is None:
+            ttk.Label(f, text="characterize_capacitance.py could not be imported from "
+                              f"{REPO}. Run the console from the repository.").pack()
+            self.cc_form = None
+            return f
+        b = ttk.Frame(f)
+        b.pack(fill="x", pady=(0, 6))
+        ttk.Label(b, text="characterize_capacitance.py:").pack(side="left")
+        for text, cmd in (("Preview command", self._cc_preview),
+                          ("Add to queue", self._cc_enqueue), ("Run now", self._cc_run),
+                          ("Reset", lambda: self.cc_form.reset())):
+            ttk.Button(b, text=text, command=cmd).pack(side="left", padx=2)
+        ttk.Label(b, text="--sample-name is required for a hardware run",
+                  foreground="#a00").pack(side="left", padx=10)
+        self.cc_form = OptionForm(f, option_specs(self.cc_parser))
+        self.cc_form.pack(fill="both", expand=True)
         return f
 
     def _tab_queue(self, master) -> ttk.Frame:
@@ -405,7 +619,7 @@ class App(ttk.Frame):
         q = self.filter.get().strip().lower()
         r = 0
         for name, lab, ent, typ in self.rows:
-            if q and q not in name.lower():
+            if q and q not in name.lower() and q not in self.docs.get(name, "").lower():
                 lab.grid_remove(); ent.grid_remove(); typ.grid_remove()
                 continue
             lab.grid(row=r, column=0, sticky="e", padx=4, pady=1)
@@ -424,44 +638,29 @@ class App(ttk.Frame):
         for k, v in self.defaults.items():
             self.vars[k].set(v)
 
-    def _pick_config(self) -> None:
-        p = filedialog.askopenfilename(
-            filetypes=[("config", "*.yaml *.yml *.json"), ("all", "*.*")])
-        if p:
-            self.config_file.set(p)
-
-    def _pick_calibration(self) -> None:
-        p = filedialog.askopenfilename(filetypes=[("calibration", "*.yaml *.yml"),
-                                                  ("all", "*.*")])
-        if p:
-            self.calibration.set(p)
-
-    def _pick_resume(self) -> None:
-        p = filedialog.askdirectory()
-        if p:
-            self.resume.set(p)
-
-    def _pick_out(self) -> None:
-        p = filedialog.askdirectory()
-        if p:
-            self.out_dir.set(p)
-
     def argv(self) -> list[str]:
         return build_argv({k: v.get() for k, v in self.vars.items()}, self.defaults,
-                          config_file=self.config_file.get(), array=self.array.get(),
-                          out_dir=self.out_dir.get(), simulate=self.simulate.get(),
-                          extra=self.extra_box.get("1.0", "end"), mode=self.mode.get(),
-                          calibration=self.calibration.get(), resume=self.resume.get())
+                          opts=self.iqe_form.argv(),
+                          extra=self.extra_box.get("1.0", "end"))
+
+    def cc_argv(self) -> list[str]:
+        return [sys.executable, "characterize_capacitance.py", *self.cc_form.argv()]
+
+    def _show(self, argv: list[str]) -> None:
+        self._say("$ " + " ".join(shlex.quote(x) for x in argv))
 
     def _preview(self) -> None:
-        self._say("$ " + " ".join(shlex.quote(x) for x in self.argv()))
+        self._show(self.argv())
+
+    def _cc_preview(self) -> None:
+        self._show(self.cc_argv())
 
     def _check(self) -> None:
         """Validate without touching hardware: --print-config does the whole build."""
         argv = self.argv() + ["--print-config"]
         try:
             r = subprocess.run(argv, capture_output=True, text=True, timeout=120,
-                               cwd=str(Path(__file__).resolve().parent.parent))
+                               cwd=str(REPO))
         except Exception as exc:
             self._say(f"!! could not run the check: {exc}")
             return
@@ -477,7 +676,9 @@ class App(ttk.Frame):
         self._say(f"config OK: roi={d.get('roi')} select={d.get('sweep_select')} "
                   f"block={d.get('block_size')} singles/block={d.get('pixels_per_block')} "
                   f"pool_groups={pg or '()'} n_fine={d.get('n_fine')} "
-                  f"order={d.get('sweep_order')} dir={d.get('sweep_direction')}")
+                  f"order={d.get('sweep_order')} dir={d.get('sweep_direction')}"
+                  + (f" FAST SCAN ONLY at {d.get('nvled_v_fastscan')} "
+                     f"{d.get('fastscan_voltages')}" if d.get("fastscan_only") else ""))
         if pg:
             self._say(f"   every block adds {len(pg)} group(s) of {list(pg)}, formed "
                       f"inside that block. Pooled rows carry POOL_K and the SUM of "
@@ -487,11 +688,16 @@ class App(ttk.Frame):
                       + (", and each group shares one of them so the comparison is "
                          "paired." if d.get("pool_include_singles") else "."))
 
-    def _enqueue(self) -> None:
-        argv = self.argv()
+    def _add(self, argv: list[str]) -> None:
         self.jobs.append(argv)
-        self.qlist.insert("end", " ".join(argv[2:]))
+        self.qlist.insert("end", " ".join(argv[1:]))
         self._say(f"queued job {len(self.jobs)}")
+
+    def _enqueue(self) -> None:
+        self._add(self.argv())
+
+    def _cc_enqueue(self) -> None:
+        self._add(self.cc_argv())
 
     def _dequeue(self) -> None:
         for i in reversed(self.qlist.curselection()):
@@ -504,6 +710,9 @@ class App(ttk.Frame):
 
     def _run_now(self) -> None:
         self._launch([self.argv()])
+
+    def _cc_run(self) -> None:
+        self._launch([self.cc_argv()])
 
     def _start(self) -> None:
         if not self.jobs:

@@ -91,6 +91,7 @@ import numpy as np
 import measure_iqe as m
 from measure_iqe.calibrate import RECORD_LIMITED_FRAC, SMOOTH_MAX_S
 from measure_iqe import IQEConfig
+from measure_iqe.safeexit import safe_exit
 
 # Voltages worth probing: the sub-turn-on region that reaches J < 1, the rising side
 # that pins peak IQE, the effort-split knee, and the droop.
@@ -2111,7 +2112,8 @@ def build_parser():
                     help="explicit pixels; otherwise --per-quadrant are found by scan")
     ap.add_argument("--per-quadrant", type=int, default=3,
                     help="alive pixels to characterise per quadrant (default 3)")
-    ap.add_argument("--quadrants", nargs="+", default=list(QUADRANTS), choices=QUADRANTS)
+    ap.add_argument("--quadrants", nargs="+", default=list(QUADRANTS), choices=QUADRANTS,
+                    help="quadrants to find --per-quadrant pixels in (ignored with --pixels)")
     ap.add_argument("--quadrant-window", type=int, default=24,
                     help="edge of the scan window at each quadrant centre")
     ap.add_argument("--alive-nw", type=float, default=2.0,
@@ -2130,7 +2132,8 @@ def build_parser():
     ap.add_argument("--out", default=None, help="output root (default: config base_dir)")
     ap.add_argument("--simulate", action="store_true",
                     help="plumbing only - the sim rig has no capacitance model")
-    ap.add_argument("--voltages", nargs="+", type=float, default=DEFAULT_VOLTAGES)
+    ap.add_argument("--voltages", nargs="+", type=float, default=DEFAULT_VOLTAGES,
+                    help="biases (V) for leak and switch")
     ap.add_argument("--step-voltages", nargs="+", type=float, default=STEP_VOLTAGES,
                     help="biases for step/stepdir. Defaults to the four that produced "
                          "the 'settling is not RC' result -- 0.05 to 0.20 V steps from "
@@ -2138,7 +2141,9 @@ def build_parser():
                          "with amplitude proportional to the step. --voltages keeps its "
                          "wide span because leak and switch want the whole sweep range, "
                          "not four neighbouring points.")
-    ap.add_argument("--ranges", nargs="+", type=float, default=DEFAULT_RANGES)
+    ap.add_argument("--ranges", nargs="+", type=float, default=DEFAULT_RANGES,
+                    help="ch B measure ranges (A) without High-C: step captures at every "
+                         "one, stepdir and switch use the first")
     ap.add_argument("--v-start", type=float, default=-1.0,
                     help="voltage to step FROM. -1.0, with --voltages -0.95..-0.80, is "
                          "the configuration that produced the 'settling is not RC' "
@@ -2207,13 +2212,19 @@ def build_parser():
                          "records are NOT synchronous: bin both onto a common grid "
                          "before dividing them. Answers whether the light follows the "
                          "current through a frame change (section 19, Q4).")
-    ap.add_argument("--stepdir-target", type=float, default=-0.85)
-    ap.add_argument("--stepdir-from", nargs="+", type=float, default=[-0.8, -1.0, -1.3, -2.6])
+    ap.add_argument("--stepdir-target", type=float, default=-0.85,
+                    help="stepdir: the bias every step goes TO (V)")
+    ap.add_argument("--stepdir-from", nargs="+", type=float, default=[-0.8, -1.0, -1.3, -2.6],
+                    help="stepdir: the biases to step FROM (V), one capture each, so the "
+                         "approach from above and below can be compared")
     ap.add_argument("--decay-from", type=float, default=-1.3,
                     help="charge to this voltage, then let it decay through the LED")
-    ap.add_argument("--decay-charge-s", type=float, default=3.0)
-    ap.add_argument("--decay-seconds", type=float, default=120.0)
-    ap.add_argument("--decay-period", type=float, default=0.5)
+    ap.add_argument("--decay-charge-s", type=float, default=3.0,
+                    help="decay: how long to charge at --decay-from before releasing (s)")
+    ap.add_argument("--decay-seconds", type=float, default=120.0,
+                    help="decay: how long to log the free decay (s)")
+    ap.add_argument("--decay-period", type=float, default=0.5,
+                    help="decay: log period (s)")
     ap.add_argument("--decay-n-v", type=int, default=8, help="voltage reads per decay sample")
     ap.add_argument("--decay-n-pm", type=int, default=16, help="PM reads per decay sample")
     ap.add_argument("--decay-source-range", type=float, default=1e-7,
@@ -2334,7 +2345,9 @@ def build_parser():
                     help="C used to turn dV/dt into a current. Default is the MEASURED "
                          "value: 45.7 +/- 3.8 uF, from the 10 uA and 100 uA cap ramps "
                          "on pixel (54,46), 261013")
-    ap.add_argument("--optfloor-n", nargs="+", type=int, default=[4, 8, 32, 128, 512])
+    ap.add_argument("--optfloor-n", nargs="+", type=int, default=[4, 8, 32, 128, 512],
+                    help="optfloor: PM400 readings per point to test; the floor should "
+                         "fall as N^-0.5")
     ap.add_argument("--optfloor-reps", type=int, default=12,
                     help="repeats per N_PM, for the repeatability spread")
     ap.add_argument("--responsivity-w-per-a", type=float, default=22e-9 / 25e-6,
@@ -2360,8 +2373,10 @@ def build_parser():
                          "construction. One acquisition takes about cluster_n_pm x 4 ms, "
                          "so probes much under that average over the transient. 0 "
                          "disables the probe entirely")
-    ap.add_argument("--cluster-n-pm", type=int, default=8)
-    ap.add_argument("--cluster-n-smu", type=int, default=16)
+    ap.add_argument("--cluster-n-pm", type=int, default=8,
+                    help="cluster: PM400 readings per acquisition")
+    ap.add_argument("--cluster-n-smu", type=int, default=16,
+                    help="cluster: SMU readings per acquisition")
     return ap
 
 
@@ -2433,6 +2448,11 @@ def main(argv=None):
         f"{n_px} pixel(s){'' if args.pixels else ' (plus the selection scan)'}")
     pm, smu, smile = m.connect(cfg, log, simulate=args.simulate)
     collected: dict[str, list[dict]] = {name: [] for name in what}
+    # try/finally alone does not park on Ctrl-Break (the console's Stop button), a closed
+    # console or a Windows shutdown: Python's default handlers end the process without
+    # unwinding. safe_exit catches all three and parks exactly once.
+    parked = safe_exit(lambda: m.shutdown(pm, smu, smile, cfg), log)
+    parked.__enter__()
     try:
         m.configure_common(pm, smu, cfg, log)
         smu.set_voltage("a", cfg.vled_voltage)
@@ -2481,7 +2501,7 @@ def main(argv=None):
                     # run is over an hour -- too long to see nothing until the end.
                     flush_traces(out_dir, log)
     finally:
-        m.shutdown(pm, smu, smile, cfg)
+        parked.__exit__(None, None, None)     # idempotent: shutdown() runs exactly once
         # Writing in the finally is the point: previously an exception here skipped
         # the writes entirely and a run that died partway lost every completed row.
         log("=" * 56)

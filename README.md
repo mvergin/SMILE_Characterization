@@ -25,7 +25,7 @@ sides have their own test for it (`test_run_format.py` for the writer,
 | `measure_iqe/` | **the measurement: library + CLI** — fast scan, pixel selection, IQE sweep |
 | `smile/`, `instruments/` | SMILE FPGA driver and the PM400 / Keithley 2602B instrument drivers |
 | `measurement/`, `data/`, `smile_postprocess.py` | **reference only, unmaintained** — the transient / ultra-fast / hardware-paced-TSP techniques that predate `measure_iqe`. See [MEASUREMENT_MODES.md](MEASUREMENT_MODES.md) |
-| `measure_iqe/gui.py` | the operator console: `python -m measure_iqe --gui`. tkinter, runs the CLI as a subprocess |
+| `measure_iqe/gui.py` | the operator console for both tools: `python -m measure_iqe --gui`. tkinter, runs them as subprocesses, a tooltip on every field |
 | `analysis/` | **the analysis: fits, figures, reports** — reads a run directory, needs no hardware. `python analysis/analyze_array.py "<run_dir>"` |
 | `characterize_capacitance.py` | the investigation tool: the array's ~50 µF capacitance, step transients, the leakage as a time series, and what each does to a low-current reading |
 
@@ -217,29 +217,39 @@ voltage sweep, so an interrupted run leaves directly analysable files.
 python -m measure_iqe --gui
 ```
 
-tkinter, so it needs no install, and it runs the CLI as a **subprocess** rather than
-importing the package. That gives the log window for free, makes Stop actually work,
-and means a crash inside a sweep cannot take the window down with it.
+tkinter, so it needs no install, and it runs both tools as a **subprocess** rather than
+importing them. That gives the log window for free, makes Stop actually work, and means
+a crash inside a sweep cannot take the window down with it.
 
-Everything the window can do, it does by building an argument list a person could
-have typed, and **Preview command** shows that list. There is nothing the console can
-reach that the CLI cannot.
+Everything the window can do, it does by building an argument list a person could have
+typed, and **Preview command** shows that list. It covers **every** option of both
+command lines, and nothing more:
 
 | tab | what it is for |
 |---|---|
-| **Run shape** | the ~20 fields that decide a run, plus four presets and a free-text `--set` box |
-| **All parameters** | every `IQEConfig` field, generated from the dataclass so it cannot drift, with a filter box |
-| **Queue** | argument lists run in sequence, so a night's work can be left to run |
+| **measure_iqe: command** | every `measure_iqe` command-line option (`--array`, `--calibrate`, `--fastscan`, `--resume`, `--simulate`, ...), generated from its argparse parser |
+| **measure_iqe: run shape** | the ~20 fields that decide a run, presets, and a free-text `--set` box |
+| **measure_iqe: all parameters** | every `IQEConfig` field, generated from the dataclass, with a filter that also searches the explanations |
+| **characterize_capacitance** | every `characterize_capacitance.py` option, generated from its parser, with its own Preview / Add to queue / Run now |
+| **Queue** | argument lists of either tool, run in sequence, so a night's work can be left to run |
 
-Three things worth knowing:
+**Hover any field for its explanation.** Command-line options show their `--help` text,
+choices and default; config fields show their comment from `measure_iqe/config.py` and
+their default. Nothing is typed twice: a new option or field appears in the console with
+its explanation, and `test_measure_iqe.py` fails if one has none, or if a field does not
+parse back to the value it showed.
+
+Four things worth knowing:
 
 * **Stop sends CTRL_BREAK, not a kill.** `measure_iqe.safeexit` turns it into an
-  orderly shutdown: outputs off, frame blanked, files flushed. A killed process leaves
-  the SMU driving the array.
-* **Only fields you changed become `--set`.** Sending all 132 every time would defeat
+  orderly shutdown in both tools: outputs off, frame blanked, files flushed. A killed
+  process leaves the SMU driving the array.
+* **Only what you changed is sent.** Sending every config field as `--set` would defeat
   `--config` and `configs/local.yaml`, because an explicit `--set` outranks both.
 * **Check config** runs `--print-config` in a subprocess and reports the realised
   shape, so a mistake costs a second rather than a night. It touches no hardware.
+* **`--print-config`, `--dump-config` and `--list-params`** are on the command tab as
+  well; ticked, the job prints and exits instead of measuring.
 
 The presets are the run shapes this project actually uses, and their labels are
 checked against the sampler in `test_measure_iqe.py` so they cannot lie:
@@ -247,8 +257,10 @@ checked against the sampler in `test_measure_iqe.py` so they cannot lie:
 | preset | targets |
 |---|---|
 | Full array, 100 singles | 10x10 blocks, 1 single each |
-| Full array, 25 singles + 50 pooled | 5x5 blocks, 1 single each, plus 50 pooled groups of 4 over 200 further pixels |
+| Full array, 200 singles + 100 pooled x4 | 10x10 blocks, 2 singles and one group of 4 each |
+| Full array, 36 singles + 36 each of K=2,4,8 | 6x6 blocks, 1 single and groups of 2, 4 and 8 each |
 | Full array, 1000 singles | 10x10 blocks, 10 singles each |
+| Fast scan only, full array | the fast scan at `nvled_v_fastscan` plus `fastscan_voltages`, no sweep |
 | Quick check, 16x16 ROI | 4 singles, 6 biases |
 
 ## Configuration reference

@@ -805,12 +805,49 @@ def test_fastscan_only_scans_every_bias_and_sweeps_nothing():
 
     d = _defaults()
     v = dict(d, fastscan_only="true", fastscan_voltages="[-2.6]")
-    argv = build_argv(v, d, mode="calibrate", calibration="c.yaml", resume="r")
-    for want in ("--calibrate", "fastscan_only=true", "fastscan_voltages=[-2.6]"):
+    argv = build_argv(v, d)
+    for want in ("fastscan_only=true", "fastscan_voltages=[-2.6]"):
         assert want in argv, f"{want} missing from {argv}"
-    assert argv[argv.index("--calibration") + 1] == "c.yaml"
-    assert argv[argv.index("--resume") + 1] == "r"
-    assert "--warmup-diag" in build_argv(d, d, mode="warmup")
+
+
+def test_the_console_covers_every_option_of_both_tools_and_explains_each():
+    """The console is a full replacement for both command lines.
+
+    Every option of measure_iqe and characterize_capacitance gets a field, every field
+    a tooltip, and every IQEConfig field an explanation read from config.py. And what a
+    field sends must parse back to what it showed: a field that round-trips wrong would
+    change a run the moment it is touched.
+    """
+    import characterize_capacitance as cc
+    from measure_iqe.cli import build_parser
+    from measure_iqe.gui import field_docs, option_specs, options_argv
+
+    docs = field_docs()
+    missing = [f.name for f in dataclasses.fields(IQEConfig) if not docs.get(f.name)]
+    assert not missing, f"config fields with no comment to show as a tooltip: {missing}"
+
+    for name, parser, skip in (("measure_iqe", build_parser(), {"--help", "--set", "--gui"}),
+                               ("characterize_capacitance", cc.build_parser(), {"--help"})):
+        specs = option_specs(parser)
+        want = {a.dest for a in parser._actions
+                if a.option_strings and not set(a.option_strings) & skip}
+        got = {o.dest for o in specs}
+        assert got == want, f"{name}: options without a console field: {sorted(want - got)}"
+        nohelp = [o.flags[0] for o in specs if not o.help]
+        assert not nohelp, f"{name}: options without help, so without a tooltip: {nohelp}"
+        assert options_argv(specs, {}) == [], f"{name}: an untouched form must send nothing"
+        # Send every option at its default text, as if typed, and parse it back.
+        forced = [dataclasses.replace(o, default="\0") for o in specs]
+        vals = {o.dest: o.default for o in specs if o.default}
+        back = vars(parser.parse_args(options_argv(forced, vals)))
+        ref = vars(parser.parse_args([]))
+        wrong = {o.dest: (back[o.dest], ref[o.dest]) for o in specs
+                 if o.default and _norm(back[o.dest]) != _norm(ref[o.dest])}
+        assert not wrong, f"{name}: fields that do not round-trip: {wrong}"
+
+
+def _norm(v):
+    return list(v) if isinstance(v, (list, tuple)) else v
 
 
 def test_bias_major_pays_each_dwell_once_for_all_pixels():
@@ -1544,7 +1581,7 @@ def test_the_console_only_sends_what_the_operator_changed():
     v = dict(d)
     v["pool_groups"] = "[2,4,8]"
     v["roi"] = "FULL"
-    argv = build_argv(v, d, simulate=True, array="Array42_IQE",
+    argv = build_argv(v, d, opts=["--simulate", "--array", "Array42_IQE"],
                       extra="# a comment\nn_fine=12\n\n")
     assert argv.count("--set") == 3, argv
     assert "--simulate" in argv and "--array" in argv
