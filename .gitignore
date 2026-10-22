@@ -246,4 +246,7 @@ INVESTIGATION_REPORT.md
 # from disk, so a fresh clone cannot rebuild the investigation figures. That is the
 # intended trade: see ROADMAP.md, "Measurement data must not live under the repo root".
 caprun/
-analysis/
+# analyze_cap_comparison.py writes one folder per run (pair) into analysis/. Those are
+# outputs; the scripts next to them are not. Ignoring all of analysis/ (21 Oct) hid
+# every NEW script there from git.
+analysis/26*/

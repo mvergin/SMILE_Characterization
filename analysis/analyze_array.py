@@ -102,6 +102,11 @@ LEAKAGE_MAX = 0.50  # DIAGNOSTIC ONLY (not a rejection gate): the value on
 # neighbour case is normal and the self-lit case is an order of magnitude low.
 REF_SWALLOWED_FRAC = 0.2   # net power below this fraction of the per-bias median...
 REF_POWER_SUSPECT = 0.1    # ...while the reference carried at least this much light
+SPLIT_AGREE_PTS = 5.0  # rising and droop branch peaks count as agreeing with the joint fit
+                       # within this many IQE points: ~3.5x the fit's own run-to-run
+                       # reproducibility of 1.4 points (report 28.4)
+FS_AGREE = 0.05        # fast scan and sweep agree when their power ratio, at the SAME
+                       # bias, is within 5 %. Section 16 measured -2.7 % at -1.35 V
 REF_SUSPECT_FACTOR = 3.0  # a leakage reference this far above its NEIGHBOURS in the
                           # same sweep was not taken at bitval 0; see enrich()
 NOISE_FLOOR_REF_A = 1e-8  # floor for a run that carries the leakage reference. With High-C
@@ -773,6 +778,22 @@ def enrich(df, dark_W=0.0):
             df["REF_CONTAMINATED"] = per_px > REF_POWER_SUSPECT
             df["REF_SWALLOWED"] = swallowed
             reliable &= ~(swallowed | df["REF_CONTAMINATED"]).fillna(False)
+            # ...and the median is blind to a pixel lit at SOME biases. Run 261015-0015,
+            # (342,147): the reference carried 0.39-1.00 of the light at 9 of 30 biases,
+            # its median stayed clean, three of the nine were adjacent so REF_SUSPECT's
+            # rolling median was contaminated too, and four stayed RELIABLE. So judge each
+            # point as well: reference light above the per-bias median reference (which
+            # removes the dark offset) by more than REF_POWER_SUSPECT of the lit light,
+            # and by more than 5 sigma of the reference's own burst, so the faint end's
+            # noise does not trip it. Pooled groups with one member still lit at bitval 0
+            # trip it too (14-23 % of their light): the same failure, one member wide.
+            keys = [c for c in ("BITVAL", "NVLED_V") if c in df.columns]
+            refx = refp - refp.groupby([df[c].round(4) for c in keys]).transform("median")
+            sig = (refx > 5 * df["PM400_POWER_REF_STD"].astype(float).abs()
+                   if "PM400_POWER_REF_STD" in df.columns else True)
+            df["REF_LIT_POINT"] = ((refx / lit.abs().replace(0, np.nan) > REF_POWER_SUSPECT)
+                                   & sig & (per_px <= REF_POWER_SUSPECT))
+            reliable &= ~df["REF_LIT_POINT"].fillna(False)
     if "NVLED_CURR_STD" in df.columns:
         relstd = df["NVLED_CURR_STD"].astype(float) / df["I_NVLED"].replace(0, np.nan)
         reliable &= relstd.fillna(np.inf) <= NVLED_RELSTD_MAX
@@ -907,10 +928,33 @@ def plot_fastscan_vs_sweep(fs, sweep, out, plt):
     if "NVLED_V" not in fs or fs["NVLED_V"].isna().all():
         return None
     v_fs = float(fs["NVLED_V"].median())
+    if "POOL_K" in sweep.columns:
+        # Single pixels only. A pooled row holds the SUM of its K members' light under
+        # its first member's coordinates, and the fast scan holds that one pixel: the
+        # ratio came out 2.0-2.8 on the pooled full-array runs for that reason alone.
+        sweep = sweep[sweep["POOL_K"].astype(float).fillna(1.0) <= 1.0]
     biases = np.asarray(sorted(sweep["NVLED_V"].unique()), float)
     v_sw = float(biases[int(np.argmin(np.abs(biases - v_fs)))])
     gap = abs(v_sw - v_fs)
-    s32 = sweep[np.isclose(sweep["NVLED_V"], v_sw)]
+    if biases.min() <= v_fs <= biases.max() and gap > 1e-4:
+        # Interpolate each pixel's sweep power TO the fast-scan bias (linear in log P
+        # between the two bracketing biases) instead of comparing at the nearest one.
+        # The nearest was 50 mV away in every full run (-1.30 vs -1.35 V), and on this
+        # I-V 50 mV is worth ~15 % by itself: run 261016-2252 reported "agree" at 0.847
+        # while the band was wide enough to call nearly anything agreement.
+        def _at(g):
+            g = g.sort_values("NVLED_V")
+            pw = g["PM400_POWER_MEAN"].abs().to_numpy(float)
+            ok = pw > 0
+            if ok.sum() < 2:
+                return np.nan
+            return float(np.exp(np.interp(v_fs, g["NVLED_V"].to_numpy(float)[ok],
+                                          np.log(pw[ok]))))
+        s32 = (sweep.groupby(["X", "Y"])[["NVLED_V", "PM400_POWER_MEAN"]].apply(_at)
+               .rename("PM400_POWER_MEAN").reset_index())
+        v_sw, gap = v_fs, 0.0
+    else:
+        s32 = sweep[np.isclose(sweep["NVLED_V"], v_sw)]
     m = fs.merge(s32, on=["X", "Y"], suffixes=("_fs", "_sw"))
     if m.empty:
         return None
@@ -2156,19 +2200,21 @@ def write_report(
         # The two are only comparable if the sweep actually has a point near the fast
         # scan's bias. The diode's I-V is steep here, so a 100 mV gap is already worth
         # tens of percent and must not be read as a disagreement.
+        where = (f"sweep interpolated to {v_fs:+.3f} V" if gap == 0 else
+                 f"fast scan {v_fs:+.3f} V vs the nearest sweep point {v_sw:+.3f} V, "
+                 f"gap **{1000 * gap:.0f} mV**")
         A(
-            f"- **Fast-scan vs sweep cross-check** (fast scan {v_fs:+.3f} V vs the "
-            f"nearest sweep point {v_sw:+.3f} V, gap **{1000 * gap:.0f} mV**): median "
-            f"power ratio **{r:.3f}** (1.00 = perfect) → "
-            + (f"the two acquisitions agree, so the data is reproducible."
-               if 0.8 <= r <= 1.25 else
-               (f"**inconclusive** — a {1000 * gap:.0f} mV gap on this I-V explains a "
-                f"ratio of this size on its own, so this says nothing about either "
-                f"acquisition. Sweep a point at {v_fs:+.3f} V to make it a real check."
-                if gap > 0.06 else
-                "**they do NOT agree.** The fast scan and the sweep are not measuring "
-                "the same thing at the same bias, so treat the fast-scan efficiency "
-                "map as relative only."))
+            f"- **Fast-scan vs sweep cross-check** ({where}): median power ratio "
+            f"**{r:.3f}** (1.00 = perfect) → "
+            + (f"**inconclusive** — a {1000 * gap:.0f} mV gap on this I-V explains a "
+               f"ratio of this size on its own, and the fast-scan bias lies outside the "
+               f"sweep, so it cannot be interpolated. Sweep a point at {v_fs:+.3f} V."
+               if gap > 0.01 else
+               f"they agree within {100 * FS_AGREE:.0f} % at the same bias."
+               if abs(r - 1) <= FS_AGREE else
+               f"**they differ by {100 * (r - 1):+.1f} %** at the same bias. The fast "
+               f"scan reads after a ~10 ms dwell, the sweep after its full one; treat "
+               f"the fast-scan map as relative only, or rescale it by this ratio.")
         )
     if fs_eff is not None:
         A(
@@ -2229,12 +2275,25 @@ def write_report(
             if np.isfinite(s.get("split_low", np.nan)) or np.isfinite(
                 s.get("split_high", np.nan)
             ):
+                lo, hi = s.get("split_low", np.nan), s.get("split_high", np.nan)
+                joint = f["peak_IQE"]
+                # The verdict has to come from the numbers. This sentence used to say
+                # "agreement => self-consistent" whatever they were: run 261020-1454 printed
+                # it under rising 92 % and droop 67 %.
+                agree = all(np.isfinite(b) and abs(b - joint) <= SPLIT_AGREE_PTS / 100
+                            for b in (lo, hi))
                 A(
                     f"- **Split-around-peak cross-check:** rising side "
-                    f"{_fmt(s.get('split_low', np.nan) * 100, '{:.0f}')}%, droop side "
-                    f"{_fmt(s.get('split_high', np.nan) * 100, '{:.0f}')}% (each branch fit "
-                    f"separately; agreement with the {_fmt(f['peak_IQE'] * 100, '{:.0f}')}% joint fit "
-                    f"⇒ ABC model self-consistent). See iqe_split_branch.png."
+                    f"{_fmt(lo * 100, '{:.0f}')}%, droop side {_fmt(hi * 100, '{:.0f}')}% "
+                    f"(each branch fit separately) against "
+                    f"{_fmt(joint * 100, '{:.0f}')}% joint → "
+                    + ("they agree within "
+                       f"{SPLIT_AGREE_PTS:g} points, so one ABC β describes both sides."
+                       if agree else
+                       f"**they disagree** by more than {SPLIT_AGREE_PTS:g} points: one ABC β "
+                       f"does not describe both sides, so the joint peak IQE depends on how "
+                       f"many points each side contributes. Quote the peak with that spread.")
+                    + " See iqe_split_branch.png."
                 )
         else:
             r2 = _fmt(f["R_squared"], "{:.2f}") if f is not None else "n/a"

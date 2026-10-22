@@ -624,18 +624,18 @@ Four bench runs on 19 October 2026 (`261019-0914`, `-0952`, `-1031`, `-1057`) pl
 | Does a group settle like a single pixel? | **the question is wrong.** A transient below 200 ms sits under a **+0.77 % drift at 6.4σ** that does not decay out to 20 s. No dwell removes it |
 | Does the optical floor scale with PM400 full scale? | **yes, as `range^0.74`** — 5.45× worse for a 10× range |
 | Can a pooled fast scan replace the census? | **as a screen only.** K = 4 finds 91.8 % of the dead pixels for 3.46× less time; 8.2 % are missed |
-| Where may a pooled sweep run? | **the faint segment only, today.** K = 4 reaches ~591 nW at −2.60 V against a 470 nW scale |
+| Where may a pooled sweep run? | **the whole range, since 20 October.** `pool_pm_range_below_v` reads pooled targets on `pool_pm_range` below that bias; run 261020-0842 swept K = 4 to −2.60 V with no step at the boundary |
+| Does it work in a production sweep? | **yes.** Runs 261019-2342, 261020-0842, 261020-1454 and 261022-0037 (full array, Array42 and Array38): pooled EQE equals the shared single's to ~1 %, and pooled peak IQE is 0.4–1.0 points below the singles' (report §26.19, §33.2) |
 
 **Not yet known**, in the order it matters:
 
-1. Whether the PM400 range may change per sweep segment. Until it can, a pooled sweep
-   stops short of the bright end. (Report Q23.)
-2. Whether the drift is worse for a group than for a single pixel. Unresolvable at K = 1,
+1. Whether the drift is worse for a group than for a single pixel. Unresolvable at K = 1,
    where the per-rep scatter is 6.8 % against a 0.77 % effect. (Report Q21.)
-3. **`pool_groups` has never run on hardware.** Every number above comes from
-   `--what cluster`, which lights one group at a time at one bias. The selection, the
-   pooled reference inside a real sweep and the analysis path are tested only against the
-   simulator and the fixture.
+2. Why pooled groups read 0.4–1.0 points below singles in peak IQE, and 4.8 % below their
+   shared single at −0.80 V on Array38. (Report Q41.)
+3. Whether the range switch holds when the brightest group overfills the fine range at the
+   boundary. 261022-0037 skipped its in-sweep check for that reason; the paired
+   group/single ratio across the boundary moved +0.22 ± 0.21 %, so no step is visible.
 
 **Averaging is the alternative lever and it is the expensive one.** `n_pm = 512` buys 11×
 over `n_pm = 8` for **64× the time per point**, where pooling buys 11.3× at K = 16 for one

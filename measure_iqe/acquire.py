@@ -2961,22 +2961,29 @@ def run_warmup_diag(pm, smu, smile, pixels: list[tuple[int, int]], run_dir: Path
 # ----------------------------------------------------------------------
 # Measured on the bench from the CSV timestamps of runs 261020-0842 (Array42) and
 # 261022-0037 (Array38), identical code, bias_major:
-#   * one point = the waits + n_smu*nplc/50 + n_pm*13.3 ms + 63 ms. Droop 2.33 s and
-#     rising 2.97 s per point (2 s switch each); 5.96 s with the per-point reference.
+#   * one read = the SMU burst, n_smu samples x 2 channels x (nplc/50 s + 0.66 ms). The
+#     PM400 reads run while the SMU integrates (acquire_point fires the burst first), so
+#     they only count if they take longer. That reproduces every bias_major run since
+#     14 October to the millisecond: 0.976 s rising (12 x 2 x 40.66 ms), 0.325 s droop.
+#     PM400 at pm_averaging 3: 32 reads fit inside 0.976 s, so <= 30 ms each; 25 ms used.
 #   * one bias change = its dwell + ~4 s (77.8 s at a 73.14 s dwell, 112.2 s at 107.59).
 #   * one fast-scan pixel = fastscan_settle_ms + 20.7 ms (262 144 px in 2 h 14 min).
 #   * the reference pre-pass = leak_ref_tries x (leak_ref_settle_s + one rising read)
 #     per target (385 targets in 3442 s); the PM-range check = one droop dwell plus two
 #     points per checked group (8 groups in 603 s).
+#   * NOT modelled: pixel_major runs that take the reference at every point ran ~1.2 s
+#     per point slower than this (261014-0048, -1616, 261015-1421), bias_major runs of
+#     the same days and code did not. The cause is in that loop and not yet found.
 # Re-measure these if the instruments or the acquisition code change.
-EST_PM_READ_S = 0.0133
-EST_POINT_OVERHEAD_S = 0.063
+EST_SMU_SAMPLE_OVERHEAD_S = 0.00066
+EST_PM_READ_S = 0.025
 EST_BIAS_OVERHEAD_S = 4.0
 EST_FASTSCAN_PX_S = 0.0207
 
 
 def _acq_s(nplc: float, n_smu: int, n_pm: int) -> float:
-    return n_smu * nplc / 50.0 + n_pm * EST_PM_READ_S + EST_POINT_OVERHEAD_S
+    smu = n_smu * 2 * (nplc / 50.0 + EST_SMU_SAMPLE_OVERHEAD_S)
+    return max(smu, n_pm * EST_PM_READ_S)
 
 
 def estimate_targets(cfg: IQEConfig) -> int:
