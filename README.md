@@ -152,6 +152,11 @@ python -m measure_iqe [options]
 | `--out` | `DIR` | output root, overriding `base_dir` |
 | `--simulate` | — | run against the built-in ABC-model rig, no hardware |
 | `--warmup-diag` | — | run the warm-up/conditioning diagnostic instead of the sweep |
+| `--fastscan` | `V [V ...]` | fast scan only, at each bias over the whole ROI; no selection, no sweep. The first bias judges alive/dead. Directory ends in `_FASTSCAN` |
+| `--array` | `NAME` | the mounted array: sets `sample_name` and applies `calibrations/NAME.yaml` |
+| `--calibrate` | — | measure this array's dwell, one pixel per quadrant, and write `calibrations/NAME.yaml` |
+| `--calibration` | `FILE` | apply this calibration file instead |
+| `--resume` | `RUN_DIR` | continue an interrupted run in that directory |
 | `--dump-config` | `PATH` | write the effective config to `PATH` (`.json`/`.yaml`) and exit |
 | `--print-config` | — | print the effective config as JSON and exit |
 | `--list-params` | — | list every field with its type and default, and exit |

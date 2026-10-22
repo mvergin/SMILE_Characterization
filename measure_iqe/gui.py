@@ -64,6 +64,7 @@ SHAPE: list[tuple[str, str, str]] = [
     ("pool_pm_range", "Pooled PM400 range (W)", "0 = same as pm_range"),
     ("nvled_v_fastscan", "Fast-scan bias (V)", "the ONLY bias that judges alive/dead"),
     ("fastscan_voltages", "Extra fast-scan biases", "e.g. [-1.05,-1.65]"),
+    ("fastscan_only", "Fast scan only", "true = scan every bias above, no sweep"),
     ("n_fine", "Sweep points", "biases per target"),
     ("nvled_v_coarse_start", "Sweep from (V)", ""),
     ("nvled_v_coarse_stop", "Sweep to (V)", ""),
@@ -95,6 +96,8 @@ PRESETS: dict[str, dict] = {
     "Full array, 1000 singles": dict(
         roi="FULL", sweep_select="blocks", block_size=52, pixels_per_block=10,
         sweep_order="bias_major"),
+    # --fastscan in the CLI. Add biases in "Extra fast-scan biases".
+    "Fast scan only, full array": dict(roi="FULL", fastscan_only=True),
     "Quick check, 16x16 ROI": dict(
         roi=(0, 0, 15, 15), sweep_select="blocks", block_size=8, pixels_per_block=1,
         n_fine=6),
@@ -119,7 +122,8 @@ def _defaults() -> dict[str, str]:
 
 def build_argv(values: dict[str, str], defaults: dict[str, str], *,
                config_file: str = "", array: str = "", out_dir: str = "",
-               simulate: bool = False, extra: str = "") -> list[str]:
+               simulate: bool = False, extra: str = "", mode: str = "sweep",
+               calibration: str = "", resume: str = "") -> list[str]:
     """The command the window would run. Exactly what a person could have typed.
 
     Only fields the operator CHANGED become ``--set``. Sending all 132 every time
@@ -128,15 +132,25 @@ def build_argv(values: dict[str, str], defaults: dict[str, str], *,
     outranks both, so a window that always sent everything would silently override the
     machine's own settings with this window's idea of the defaults.
 
+    ``mode`` is what the run does: ``sweep`` (fast scan + sweep, or the fast scan alone
+    with ``fastscan_only``), ``calibrate`` (``--calibrate``) or ``warmup`` (``--warmup-diag``).
+
     Separated from the widgets so it can be tested without a display.
     """
-    a = [sys.executable, "-m", "measure_iqe"]
+    flag = {"sweep": [], "calibrate": ["--calibrate"], "warmup": ["--warmup-diag"]}
+    if mode not in flag:
+        raise ValueError(f"mode={mode!r}; expected one of {sorted(flag)}")
+    a = [sys.executable, "-m", "measure_iqe", *flag[mode]]
     if config_file.strip():
         a += ["--config", config_file.strip()]
     if array.strip():
         a += ["--array", array.strip()]
     if out_dir.strip():
         a += ["--out", out_dir.strip()]
+    if calibration.strip():
+        a += ["--calibration", calibration.strip()]
+    if resume.strip():
+        a += ["--resume", resume.strip()]
     if simulate:
         a += ["--simulate"]
     for k in values:
@@ -250,6 +264,9 @@ class App(ttk.Frame):
         self.array = tk.StringVar(value="")
         self.config_file = tk.StringVar(value="")
         self.out_dir = tk.StringVar(value="")
+        self.mode = tk.StringVar(value="sweep")
+        self.calibration = tk.StringVar(value="")
+        self.resume = tk.StringVar(value="")
         self.jobs: list[list[str]] = []
         self.runner = Runner()
 
@@ -276,6 +293,19 @@ class App(ttk.Frame):
         ttk.Label(bar, text="  --out ").pack(side="left")
         ttk.Entry(bar, textvariable=self.out_dir, width=22).pack(side="left")
         ttk.Button(bar, text="...", width=3, command=self._pick_out).pack(side="left")
+
+        bar1 = ttk.Frame(self)
+        bar1.pack(fill="x", pady=(0, 4))
+        ttk.Label(bar1, text="Mode ").pack(side="left")
+        ttk.Combobox(bar1, textvariable=self.mode, width=10, state="readonly",
+                     values=("sweep", "calibrate", "warmup")).pack(side="left")
+        ttk.Label(bar1, text="  --calibration ").pack(side="left")
+        ttk.Entry(bar1, textvariable=self.calibration, width=28).pack(side="left")
+        ttk.Button(bar1, text="...", width=3, command=self._pick_calibration
+                   ).pack(side="left")
+        ttk.Label(bar1, text="  --resume ").pack(side="left")
+        ttk.Entry(bar1, textvariable=self.resume, width=28).pack(side="left")
+        ttk.Button(bar1, text="...", width=3, command=self._pick_resume).pack(side="left")
 
         bar2 = ttk.Frame(self)
         bar2.pack(fill="x", pady=4)
@@ -400,6 +430,17 @@ class App(ttk.Frame):
         if p:
             self.config_file.set(p)
 
+    def _pick_calibration(self) -> None:
+        p = filedialog.askopenfilename(filetypes=[("calibration", "*.yaml *.yml"),
+                                                  ("all", "*.*")])
+        if p:
+            self.calibration.set(p)
+
+    def _pick_resume(self) -> None:
+        p = filedialog.askdirectory()
+        if p:
+            self.resume.set(p)
+
     def _pick_out(self) -> None:
         p = filedialog.askdirectory()
         if p:
@@ -409,7 +450,8 @@ class App(ttk.Frame):
         return build_argv({k: v.get() for k, v in self.vars.items()}, self.defaults,
                           config_file=self.config_file.get(), array=self.array.get(),
                           out_dir=self.out_dir.get(), simulate=self.simulate.get(),
-                          extra=self.extra_box.get("1.0", "end"))
+                          extra=self.extra_box.get("1.0", "end"), mode=self.mode.get(),
+                          calibration=self.calibration.get(), resume=self.resume.get())
 
     def _preview(self) -> None:
         self._say("$ " + " ".join(shlex.quote(x) for x in self.argv()))

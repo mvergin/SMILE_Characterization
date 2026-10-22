@@ -777,6 +777,42 @@ def test_the_fast_scan_measures_every_bias_and_judges_on_the_first():
                      fastscan_voltages=(-1.65, -1.35, -1.05)).fastscan_v_list() ==         (-1.35, -1.65, -1.05), "nvled_v_fastscan must lead, and must not repeat"
 
 
+def test_fastscan_only_scans_every_bias_and_sweeps_nothing():
+    """``--fastscan V [V ...]`` is a fast scan and nothing else.
+
+    It must scan every requested bias over the whole ROI, write no sweep, name the
+    directory _FASTSCAN so it is not mistaken for a run whose sweep died, and the
+    console must be able to ask for the same thing and for the modes the CLI has.
+    """
+    from measure_iqe.cli import build_config, build_parser
+    from measure_iqe.gui import _defaults, build_argv
+
+    args = build_parser().parse_args(["--fastscan", "-1.35", "-2.6",
+                                      "--set", "nvled_v_fastscan=-1.0"])
+    cfg = build_config(args)
+    assert cfg.fastscan_only and cfg.fastscan_v_list() == (-1.35, -2.6), (
+        f"--fastscan must win over --set and keep its order: {cfg.fastscan_v_list()}")
+    assert cli_main(["--fastscan", "-1.35", "--calibrate"]) == 2, (
+        "--fastscan with --calibrate must be refused, not half-run")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = IQEConfig(**FAST, fastscan_only=True, fastscan_voltages=(-2.6,))
+        res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
+        assert res.run_dir.name.endswith("_FASTSCAN"), res.run_dir.name
+        fs = _agg_rows(res.run_dir, "FastScan")
+        assert len(fs) == 64 * 2 and res.n_points == 64 * 2, (len(fs), res.n_points)
+        assert not (res.run_dir / "NVLEDSweep").exists(), "fastscan_only swept anyway"
+
+    d = _defaults()
+    v = dict(d, fastscan_only="true", fastscan_voltages="[-2.6]")
+    argv = build_argv(v, d, mode="calibrate", calibration="c.yaml", resume="r")
+    for want in ("--calibrate", "fastscan_only=true", "fastscan_voltages=[-2.6]"):
+        assert want in argv, f"{want} missing from {argv}"
+    assert argv[argv.index("--calibration") + 1] == "c.yaml"
+    assert argv[argv.index("--resume") + 1] == "r"
+    assert "--warmup-diag" in build_argv(d, d, mode="warmup")
+
+
 def test_bias_major_pays_each_dwell_once_for_all_pixels():
     """The point of the order: n_pixels x the dwell becomes 1 x the dwell."""
     import time as _time

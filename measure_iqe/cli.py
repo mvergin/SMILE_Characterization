@@ -118,6 +118,10 @@ def build_config(args: argparse.Namespace, log=None) -> IQEConfig:
         data["calibration_source"] = str(cal)
     overrides = dict(args.set or [])
     data.update(overrides)
+    if getattr(args, "fastscan", None):
+        # After --set: the flag is the more specific request of the two.
+        data.update(fastscan_only=True, nvled_v_fastscan=args.fastscan[0],
+                    fastscan_voltages=list(args.fastscan[1:]))
     if args.simulate and "settle_scale" not in overrides:
         # A simulated run should take seconds, not the real multi-second dwells -- but
         # only when the user has not asked for them. This is the one place that can tell
@@ -144,7 +148,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "calibrations/NAME.yaml if --calibrate has been run for it")
     ap.add_argument("--calibrate", action="store_true",
                     help="measure THIS array's settling and write a calibration file, "
-                         "instead of sweeping. Run once per array (~6 min)")
+                         "instead of sweeping. Run once per array. One pixel per quadrant, so "
+                         "it takes a while: run 261021-2349 took 48 min at calibrate_seconds=150")
+    ap.add_argument("--fastscan", metavar="V", nargs="+", type=float,
+                    help="fast scan only, at one or more biases (e.g. --fastscan -1.35 -2.6): "
+                         "no selection, no sweep. The first bias judges alive/dead. Sets "
+                         "fastscan_only, nvled_v_fastscan and fastscan_voltages")
     ap.add_argument("--calibration", metavar="FILE",
                     help="apply a calibration file written by --calibrate")
     ap.add_argument("--resume", metavar="RUN_DIR",
@@ -182,6 +191,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # The logger is built BEFORE the config so configs/local.yaml can announce itself
     # at the top of the run rather than after the instruments are already connected.
+    if args.fastscan and (args.calibrate or args.warmup_diag):
+        print("--fastscan cannot be combined with --calibrate or --warmup-diag",
+              file=sys.stderr)
+        return 2
     log = make_logger()
     try:
         cfg = build_config(args, log)

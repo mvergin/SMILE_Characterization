@@ -784,6 +784,11 @@ class IQEConfig:
                                      # J≈25 keeps ~5 A/cm² of margin before the droop starts (~J30). The
                                      # current there (~25 µA) is high enough for a fast (NPLC 0.01) read.
                                      # (Was −2.6 V / J≈95 — the droop side at only ~78% of peak.)
+    fastscan_only: bool = False      # stop after the fast scan: no pixel selection, no
+                                     # sweep. Every bias in fastscan_v_list() is scanned over
+                                     # the whole ROI; the first still judges alive/dead in the
+                                     # log. The run directory ends in _FASTSCAN. The CLI's
+                                     # --fastscan V [V ...] sets this and both bias fields.
     fastscan_voltages: tuple[float, ...] = ()  # EXTRA fast-scan biases. Empty = just
                                      # nvled_v_fastscan, which is the historical behaviour and
                                      # stays the FIRST entry either way -- alive/dead

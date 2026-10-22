@@ -1519,6 +1519,8 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
         # select_sweep_pixels keeps the alive ones and the dead are never named again.
         dead = [r for r, p in zip(sel_rows, P) if p < thr]
         measure_dead_iv(pm, smu, smile, dead, alive, run_dir, cfg, log)
+    if cfg.fastscan_only:
+        return alive
     sel = select_sweep_pixels(alive, cfg, log)
     # Pooled groups come AFTER the rotation, deliberately: sweep_rotate exists to move a
     # different single pixel into slot 0 (section 17, open question 13), and a pooled
@@ -3182,8 +3184,8 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
         # separate argument, so --print-config and the saved settings both show it.
         cfg = dataclasses.replace(cfg, resume=True)
     x1, y1, x2, y2 = cfg.resolve_roi()
-    out_dir = Path(run_dir) if run_dir is not None else make_run_dir(cfg, base_dir,
-                                                                      simulated=simulate)
+    out_dir = Path(run_dir) if run_dir is not None else make_run_dir(
+        cfg, base_dir, suffix="FASTSCAN" if cfg.fastscan_only else None, simulated=simulate)
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"Output: {out_dir}   (source_mode={cfg.source_mode})")
     stamp_run(out_dir, cfg, log)
@@ -3213,7 +3215,10 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
         time.sleep(0.05)
 
         selected = run_fast_scan(pm, smu, smile, x1, y1, x2, y2, out_dir, cfg, log)
-        if not selected:
+        if cfg.fastscan_only:
+            n_points = (x2 - x1 + 1) * (y2 - y1 + 1) * len(cfg.fastscan_v_list())
+            log(f"fastscan_only: {n_points} fast-scan points written, no sweep.")
+        elif not selected:
             log("No alive pixels selected - nothing to sweep.")
         elif warmup_diag:
             # Singles only. The diagnostic watches one pixel turn on and relax; a
@@ -3227,7 +3232,7 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
         else:
             n_points = run_sweep_voltage(pm, smu, smile, selected, out_dir, cfg, log)
         log("=" * 56)
-        if selected and not warmup_diag:
+        if selected and not warmup_diag and not cfg.fastscan_only:
             log(f"DONE. {n_points} sweep points over {len(selected)} pixels.")
             log('Analyze separately:\n'
                 f'    python analysis/analyze_array.py "{out_dir}"')

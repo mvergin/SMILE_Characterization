@@ -363,6 +363,7 @@ leak_ref_prepass_v: -0.9  # the one bias the per-pixel cache is measured at, in 
 
 # ---- Dead-pixel threshold (fast scan) ----
 nvled_v_fastscan: -1.35   # single fast-scan bias — does DOUBLE duty. At −1.35 V the pixels sit at J≈25 A/cm², ...
+fastscan_only: false      # stop after the fast scan (no selection, no sweep). --fastscan V [V ...] sets it
 fastscan_voltages: []     # EXTRA fast-scan biases; nvled_v_fastscan is always first and
                           # is the only one alive/dead and pixel selection are judged on,
                           # so adding biases cannot change which pixels get swept. Each
