@@ -565,10 +565,10 @@ class IQEConfig:
                                # --simulate sets it to 0 so a dry run is seconds, not
                                # 15 minutes. Lower it on real hardware only to measure what
                                # the shortcut costs -- it costs the rising side.
-    sweep_order: str = "pixel_major"   # "pixel_major" | "bias_major"
+    sweep_order: str = "bias_major"   # "bias_major" (default since 22 Oct 2026) | "pixel_major"
     # WHICH LOOP IS OUTSIDE. This is the single biggest lever on run time.
     #
-    #   pixel_major  for pixel: for bias: settle, measure      <- the original
+    #   pixel_major  for pixel: for bias: settle, measure      <- the original default
     #   bias_major   for bias:  settle once; for pixel: measure
     #
     # The dwell is paid for the BIAS change, not the pixel change: the array carries one
@@ -983,7 +983,8 @@ class IQEConfig:
             # silently measuring one pixel's targets on every pixel.
             raise ValueError("sweep_order='bias_major' needs fine_sweep_mode='voltage': "
                              "in current mode every pixel has its own setpoints, so "
-                             "there is no shared bias to amortise.")
+                             "there is no shared bias to amortise. Add "
+                             "--set sweep_order=pixel_major.")
         if self.highc_b:
             # In High-C the LIMIT selects the measure range, so a limit too coarse for the
             # segment silently costs resolution rather than failing.

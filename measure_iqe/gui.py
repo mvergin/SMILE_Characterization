@@ -79,6 +79,11 @@ SHAPE: list[tuple[str, str, str]] = [
     ("nvled_v_coarse_stop", "Sweep to (V)", ""),
     ("sweep_order", "Order", "bias_major pays each dwell once for all targets"),
     ("sweep_direction", "Direction", "high_to_low | low_to_high"),
+    ("vramp_lowv_settle_s", "Rising dwell (s)",
+     "per bias, rising side. --array fills in the calibrated value; type to override"),
+    ("vramp_highv_settle_s", "Droop dwell (s)",
+     "per bias, droop side. --array fills in the calibrated value; type to override"),
+    ("highc_b", "High-C on ch B", "true: the limit picks the range. Off only on purpose"),
     ("leak_reference", "Leakage reference", "subtract the same target at bitval 0"),
     ("leak_ref_per_point_above_v", "Reference per point above (V)",
      "below this a cached per-pixel reference is used. null = every point"),
@@ -484,6 +489,9 @@ class App(ttk.Frame):
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True)
         self.iqe_form = OptionForm(nb, self.iqe_specs)
+        self.cal_keys: set[str] = set()
+        for name in ("array", "calibration"):
+            self.iqe_form.vars[name].trace_add("write", lambda *_a: self._apply_calibration())
         nb.add(self.iqe_form, text="measure_iqe: command")
         nb.add(self._tab_shape(nb), text="measure_iqe: run shape")
         nb.add(self._tab_all(nb), text="measure_iqe: all parameters")
@@ -497,6 +505,9 @@ class App(ttk.Frame):
                 ("Preview command", self._preview, "show the command, run nothing"),
                 ("Check config", self._check,
                  "build the effective config with --print-config: no hardware touched"),
+                ("Estimate time", self._estimate,
+                 "wall time per stage for these settings, with the calibration --array "
+                 "applies. Every target assumed alive, so an upper bound"),
                 ("Add to queue", self._enqueue, "append this command to the Queue tab"),
                 ("Run now", self._run_now, "run this command alone, now")):
             b = ttk.Button(bar2, text=text, command=cmd)
@@ -658,6 +669,51 @@ class App(ttk.Frame):
 
     def _cc_preview(self) -> None:
         self._show(self.cc_argv())
+
+    def _apply_calibration(self) -> None:
+        """Show the calibration --array (or --calibration) will apply, in the fields.
+
+        The baseline a field is compared against becomes the CALIBRATED value, so only a
+        value the operator types differently is sent as --set -- and that --set wins
+        over the calibration. Without this the fields showed the dataclass defaults:
+        typing the default (say 8 s) over a 107 s calibration sent nothing, and the
+        calibration silently stayed.
+        """
+        from .calibrate import calibration_path, load_calibration
+        base = _defaults()
+        for k in self.cal_keys:                         # undo the previous array's values
+            self.defaults[k] = base[k]
+            self.vars[k].set(base[k])
+        self.cal_keys = set()
+        explicit = self.iqe_form.vars["calibration"].get().strip()
+        name = self.iqe_form.vars["array"].get().strip()
+        path = Path(explicit) if explicit else (calibration_path(name) if name else None)
+        if path is None or not path.exists():
+            if name and not explicit:
+                self.status.configure(text=f"{name}: no calibration file, defaults apply")
+            return
+        try:
+            rec = load_calibration(path)
+        except Exception as exc:                        # noqa: BLE001 - shown, not fatal
+            self.status.configure(text=f"!! {path}: {exc}")
+            return
+        for k, v in rec.items():
+            self.defaults[k] = _as_text(v)
+            self.vars[k].set(_as_text(v))
+        self.cal_keys = set(rec)
+        self.status.configure(text=f"calibration {path.name}: " + ", ".join(
+            f"{k}={_as_text(v)}" for k, v in rec.items()))
+
+    def _estimate(self) -> None:
+        """--estimate in a subprocess: the same config build as a real run."""
+        try:
+            r = subprocess.run(self.argv() + ["--estimate"], capture_output=True,
+                               text=True, timeout=120, cwd=str(REPO))
+        except Exception as exc:
+            self._say(f"!! could not run the estimate: {exc}")
+            return
+        out = (r.stdout if r.returncode == 0 else "!! " + (r.stderr or r.stdout)).strip()
+        self._say("estimated wall time:\n" + out)
 
     def _check(self) -> None:
         """Validate without touching hardware: --print-config does the whole build."""

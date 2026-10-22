@@ -242,7 +242,7 @@ def test_voltage_sweep_writes_the_expected_files():
 
 def test_every_acquisition_mode_runs():
     modes = [dict(source_mode="current", current_sweep_n=4),
-             dict(fine_sweep_mode="current"),
+             dict(fine_sweep_mode="current", sweep_order="pixel_major"),
              dict(perpoint_range=True, highc_b=False),   # the two are incompatible by design
              dict(leak_reference=False),                 # runs from before the leakage fix
              dict(save_raw_samples=False),
@@ -867,6 +867,33 @@ def test_a_hardware_run_must_name_its_array():
         assert cli_main(["--print-config"]) == 0, "inspecting the config needs no name"
 
 
+def test_the_time_estimate_reproduces_a_measured_run():
+    """estimate_run against run 261022-0037, stage by stage.
+
+    Measured from its log: fast scan 8041 s, reference pre-pass 3442 s, PM-range check
+    603 s, sweep 20 684 s with 44 of 385 targets dropped after the first bias. The
+    estimate may not drift from those: a console that promises 9 h for a 20 h run, or
+    the reverse, is how a night gets wasted.
+    """
+    from measure_iqe.acquire import estimate_run, estimate_targets
+
+    cfg = IQEConfig(roi="FULL", block_size=36, pixels_per_block=1, pool_groups=(4,),
+                    pool_pm_range=1e-6, pool_pm_range_below_v=-1.6, n_fine=16,
+                    sweep_order="bias_major", vramp_lowv_settle_s=107.59,
+                    vramp_highv_settle_s=73.14).validate()
+    assert estimate_targets(cfg) == 392, "196 blocks x (1 single + 1 group)"
+    e = estimate_run(cfg, n_targets=385)
+    for stage, measured in (("fast scan", 8041), ("reference pre-pass", 3442),
+                            ("PM-range check", 603)):
+        assert abs(e[stage] / measured - 1) < 0.06, f"{stage}: {e[stage]:.0f} s vs {measured} s"
+    # 341 targets ran all 16 biases, 44 ran one: the measured sweep in those terms
+    sweep = e["bias dwell"] + e["sweep points"] * (341 + 44 / 16) / 385
+    assert abs(sweep / 20684 - 1) < 0.08, f"sweep {sweep:.0f} s vs 20684 s"
+    only = estimate_run(IQEConfig(roi="FULL", fastscan_only=True,
+                                  fastscan_voltages=(-2.6,)).validate())
+    assert set(only) == {"fast scan", "total"} and abs(only["total"] / (2 * 8041) - 1) < 0.06
+
+
 def test_bias_major_pays_each_dwell_once_for_all_pixels():
     """The point of the order: n_pixels x the dwell becomes 1 x the dwell."""
     import time as _time
@@ -1242,11 +1269,12 @@ def test_settle_time_criterion():
 
 
 def test_resume_skips_finished_pixels_and_keeps_their_data():
-    """A run killed mid-sweep must continue, not restart and not duplicate."""
+    """A pixel_major run killed mid-sweep must continue, not restart and not duplicate."""
     from measure_iqe.acquire import completed_pixels
 
+    PM = dict(FAST, sweep_order="pixel_major")
     with tempfile.TemporaryDirectory() as tmp:
-        first = _run(tmp)
+        first = _run(tmp, sweep_order="pixel_major")
         agg = next((first.run_dir / "NVLEDSweep" / "Sweep").glob("*aggregated_*.csv"))
         rows = list(csv.DictReader(agg.open()))
         done = completed_pixels(first.run_dir)
@@ -1254,7 +1282,7 @@ def test_resume_skips_finished_pixels_and_keeps_their_data():
         assert len(done) == len({(int(float(r["X"])), int(float(r["Y"]))) for r in rows})
 
         # resume a COMPLETE run: nothing left to do, and nothing lost
-        again = run_iqe_measurement(IQEConfig(**FAST), simulate=True, base_dir=tmp,
+        again = run_iqe_measurement(IQEConfig(**PM), simulate=True, base_dir=tmp,
                                     log=QUIET, run_dir=first.run_dir)
         after = list(csv.DictReader(agg.open()))
         assert again.run_dir == first.run_dir
@@ -1269,11 +1297,40 @@ def test_resume_skips_finished_pixels_and_keeps_their_data():
             w.writeheader()
             w.writerows(keep)
         assert victim not in completed_pixels(first.run_dir)
-        run_iqe_measurement(IQEConfig(**FAST), simulate=True, base_dir=tmp, log=QUIET,
+        run_iqe_measurement(IQEConfig(**PM), simulate=True, base_dir=tmp, log=QUIET,
                             run_dir=first.run_dir)
         final = list(csv.DictReader(agg.open()))
         assert len(final) == len(rows), f"expected {len(rows)} rows, got {len(final)}"
         assert victim in completed_pixels(first.run_dir)
+
+
+def test_bias_major_resume_skips_finished_biases_and_keeps_their_data():
+    """A bias_major run killed mid-sweep has every pixel part-swept: resume by BIAS.
+
+    The wiring is what this guards. completed_biases() was handed the folder ABOVE the
+    run, found nothing, and every resume re-measured the whole sweep, doubling its rows.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        first = _run(tmp, dead_abort=False)
+        agg = next((first.run_dir / "NVLEDSweep" / "Sweep").glob("*aggregated_*.csv"))
+        rows = list(csv.DictReader(agg.open()))
+        again = run_iqe_measurement(IQEConfig(**FAST, dead_abort=False), simulate=True,
+                                    base_dir=tmp, log=QUIET, run_dir=first.run_dir)
+        assert again.run_dir == first.run_dir
+        after = list(csv.DictReader(agg.open()))
+        assert len(after) == len(rows), f"{len(rows)} rows became {len(after)} on resume"
+        # lose the last bias, as a kill during it would: exactly that bias comes back
+        last = rows[-1]["NVLED_V"]
+        with agg.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=rows[0].keys())
+            w.writeheader()
+            w.writerows(r for r in rows if r["NVLED_V"] != last)
+        run_iqe_measurement(IQEConfig(**FAST, dead_abort=False), simulate=True,
+                            base_dir=tmp, log=QUIET, run_dir=first.run_dir)
+        final = list(csv.DictReader(agg.open()))
+        assert len(final) == len(rows), f"expected {len(rows)} rows, got {len(final)}"
+        assert sum(r["NVLED_V"] == last for r in final) == sum(r["NVLED_V"] == last
+                                                              for r in rows)
 
 
 def test_fast_scan_does_not_run_at_the_sweep_limit():

@@ -17,7 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-from .acquire import make_logger, run_calibration, run_iqe_measurement
+from .acquire import (estimate_run, format_estimate, make_logger, run_calibration,
+                      run_iqe_measurement)
 from .calibrate import calibration_path, load_calibration
 from .config import IQEConfig
 
@@ -166,6 +167,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="run the warm-up/conditioning diagnostic instead of the sweep")
     ap.add_argument("--dump-config", metavar="PATH",
                     help="write the effective config to PATH (.json/.yaml) and exit")
+    ap.add_argument("--estimate", action="store_true",
+                    help="print the wall-time estimate for this config, per stage, and exit. "
+                         "Uses the calibration --array applies; touches no hardware")
     ap.add_argument("--print-config", action="store_true",
                     help="print the effective config as JSON and exit")
     ap.add_argument("--list-params", action="store_true",
@@ -205,6 +209,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.print_config:
         print(json.dumps(cfg.to_dict(), indent=2))
+        return 0
+    if args.estimate:
+        print(format_estimate(estimate_run(cfg)))
         return 0
     if args.dump_config:
         print(f"wrote {cfg.write_file(args.dump_config)}")

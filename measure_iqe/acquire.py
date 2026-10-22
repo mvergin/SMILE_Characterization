@@ -2305,7 +2305,10 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
         log("  no fine voltages built - nothing to sweep")
         return 0
 
-    done_v = completed_biases(writer._agg_folder.parent.parent.parent) if cfg.resume else set()
+    # run_dir, not writer._agg_folder.parent.parent.parent: that is one level ABOVE the
+    # run (the folder is <run>/NVLEDSweep/Sweep), found nothing, and so every bias_major
+    # resume re-measured the whole sweep and doubled its rows.
+    done_v = completed_biases(run_dir) if cfg.resume else set()
     if done_v:
         log(f"  resuming: {len(done_v)} bias(es) already complete on every pixel")
 
@@ -2364,6 +2367,12 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
     for bitval in cfg.bitvals:
         for jpt, (v, _i_target) in enumerate(fine):
             if parked():
+                break
+            if not live:
+                # dead_abort dropped every target at the first bias. Nothing is left to
+                # light, and serving 15 more dwells to no pixel would only burn time.
+                log(f"  every target was dropped as dead; the remaining "
+                    f"{len(fine) - jpt} bias(es) are skipped.")
                 break
             if round(float(v), 4) in done_v:
                 continue
@@ -2947,6 +2956,134 @@ def run_warmup_diag(pm, smu, smile, pixels: list[tuple[int, int]], run_dir: Path
 #  Public entry point
 # =====================================================================
 
+# ----------------------------------------------------------------------
+#  Wall-clock estimate, before anything is measured
+# ----------------------------------------------------------------------
+# Measured on the bench from the CSV timestamps of runs 261020-0842 (Array42) and
+# 261022-0037 (Array38), identical code, bias_major:
+#   * one point = the waits + n_smu*nplc/50 + n_pm*13.3 ms + 63 ms. Droop 2.33 s and
+#     rising 2.97 s per point (2 s switch each); 5.96 s with the per-point reference.
+#   * one bias change = its dwell + ~4 s (77.8 s at a 73.14 s dwell, 112.2 s at 107.59).
+#   * one fast-scan pixel = fastscan_settle_ms + 20.7 ms (262 144 px in 2 h 14 min).
+#   * the reference pre-pass = leak_ref_tries x (leak_ref_settle_s + one rising read)
+#     per target (385 targets in 3442 s); the PM-range check = one droop dwell plus two
+#     points per checked group (8 groups in 603 s).
+# Re-measure these if the instruments or the acquisition code change.
+EST_PM_READ_S = 0.0133
+EST_POINT_OVERHEAD_S = 0.063
+EST_BIAS_OVERHEAD_S = 4.0
+EST_FASTSCAN_PX_S = 0.0207
+
+
+def _acq_s(nplc: float, n_smu: int, n_pm: int) -> float:
+    return n_smu * nplc / 50.0 + n_pm * EST_PM_READ_S + EST_POINT_OVERHEAD_S
+
+
+def estimate_targets(cfg: IQEConfig) -> int:
+    """Targets the selection would pick if every pixel in the ROI were alive.
+
+    Counted from the block grid instead of running the selection, which takes ~40 s on
+    the full array. A dark block gives no target, so a mostly dark array gets fewer.
+    """
+    x1, y1, x2, y2 = cfg.resolve_roi()
+    npx = (abs(x2 - x1) + 1) * (abs(y2 - y1) + 1)
+    if cfg.sweep_select == "blocks":
+        nbx = len(block_edges(min(x1, x2), max(x1, x2), cfg.block_size)) - 1
+        nby = len(block_edges(min(y1, y2), max(y1, y2), cfg.block_size)) - 1
+        return nbx * nby * (cfg.pixels_per_block + len(cfg.pool_groups))
+    if cfg.sweep_select == "stride":
+        return min(-(-npx // max(1, cfg.nth_pixel_sweep)), cfg.max_sweep_pixels)
+    return min(max(cfg.min_sweep_pixels, int(round(cfg.sweep_fraction * npx))),
+               cfg.max_sweep_pixels, npx)
+
+
+def estimate_run(cfg: IQEConfig, n_targets: int | None = None) -> dict[str, float]:
+    """Seconds per stage of a run with this config, from the config alone.
+
+    An UPPER bound on the sweep: every target is assumed alive and swept at every
+    bias, and ``dead_abort`` drops some after the first one (44 of 385 in 261022-0037,
+    which made that run 0.6 h shorter than this says). Voltage mode only is exact;
+    ``fine_sweep_mode='current'`` places its grid from a pre-sweep and is approximated
+    by ``n_fine`` points on the rising-side effort.
+    """
+    x1, y1, x2, y2 = cfg.resolve_roi()
+    npx = (abs(x2 - x1) + 1) * (abs(y2 - y1) + 1)
+    k = cfg.settle_scale
+    frac = (1.0 / cfg.fastscan_pool + cfg.fastscan_pool_rescan_frac) if cfg.fastscan_pool else 1.0
+    out: dict[str, float] = {
+        "fast scan": npx * frac * len(cfg.fastscan_v_list())
+        * (cfg.fastscan_settle_ms / 1000.0 + EST_FASTSCAN_PX_S)}
+    if cfg.fastscan_only:
+        out["total"] = out["fast scan"]
+        return out
+
+    T = estimate_targets(cfg) if n_targets is None else n_targets
+    rising = (cfg.vramp_lowv_nplc, cfg.vramp_lowv_n_smu, cfg.vramp_lowv_n_pm,
+              cfg.vramp_lowv_settle_s)
+    droop = (cfg.vramp_highv_nplc, cfg.vramp_highv_n_smu, cfg.vramp_highv_n_pm,
+             cfg.vramp_highv_settle_s)
+    flat = (cfg.sweep_nplc, cfg.n_smu_samples, cfg.n_pm_samples, cfg.settle_ms / 1000.0)
+    if cfg.fine_sweep_mode == "voltage":
+        grid = [v for v, _ in build_fine_voltages(None, None, cfg, lambda _m: None)]
+    else:
+        grid = [cfg.nvled_v_coarse_start] * cfg.n_fine
+    above = cfg.leak_ref_per_point_above_v
+
+    def seg(v):
+        if not cfg.vramp_perseg_effort:
+            return flat
+        return rising if (cfg.vramp_knee_v is None or v > cfg.vramp_knee_v) else droop
+
+    def ref(v):
+        return cfg.leak_reference and (above is None or v > above)
+
+    if cfg.leak_reference and above is not None:
+        out["reference pre-pass"] = T * max(1, cfg.leak_ref_tries) * (
+            cfg.leak_ref_settle_s * k + _acq_s(*rising[:3]))
+    n_groups = T * len(cfg.pool_groups) / max(1, cfg.pixels_per_block + len(cfg.pool_groups))
+    if cfg.pool_groups and cfg.pool_pm_range_below_v is not None and cfg.pm_range_check_targets:
+        out["PM-range check"] = min(cfg.pm_range_check_targets, n_groups) * (
+            droop[3] * k + 2 * (cfg.pixel_switch_settle_s * k + _acq_s(*droop[:3])
+                                + cfg.pm_range_settle_s))
+    dwell = points = 0.0
+    if cfg.sweep_order == "bias_major":
+        if cfg.bias_major_precondition:
+            out["precondition"] = T * cfg.warmup_ms / 1000.0
+        for v in grid:
+            nplc, n_smu, n_pm, settle = seg(v)
+            a = _acq_s(nplc, n_smu, n_pm)
+            dwell += settle * k + EST_BIAS_OVERHEAD_S
+            points += T * (cfg.pixel_switch_settle_s * k + a
+                           + (cfg.leak_ref_settle_s * k + a if ref(v) else 0.0))
+    else:
+        for v in grid:
+            nplc, n_smu, n_pm, settle = seg(v)
+            a = _acq_s(nplc, n_smu, n_pm)
+            dwell += T * settle * k
+            points += T * (a + (2 * cfg.leak_ref_settle_s * k + a if ref(v) else 0.0))
+        points += T * cfg.warmup_ms / 1000.0
+    out["bias dwell"] = dwell
+    out["sweep points"] = points
+    out["total"] = sum(out.values())
+    out["targets"] = T
+    out["points"] = T * len(grid)
+    return out
+
+
+def format_estimate(est: dict[str, float]) -> str:
+    """One line per stage, as the log and the console show it."""
+    lines = []
+    for name, s in est.items():
+        if name in ("targets", "points"):
+            continue
+        lines.append(f"  {name:<20} {s / 3600:6.2f} h"
+                     + (f"   ({100 * s / est['total']:.0f} %)" if name != "total" else ""))
+    if "targets" in est:
+        lines.append(f"  {int(est['targets'])} target(s) x {int(est['points'] / max(1, est['targets']))}"
+                     f" bias(es), every target assumed alive: an upper bound")
+    return "\n".join(lines)
+
+
 class IQEResult(NamedTuple):
     """What a finished run produced."""
 
@@ -3189,6 +3326,7 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"Output: {out_dir}   (source_mode={cfg.source_mode})")
     stamp_run(out_dir, cfg, log)
+    log("estimated wall time, from the config:\n" + format_estimate(estimate_run(cfg)))
 
     if simulate and cfg.settle_scale:
         # The CLI zeroes settle_scale under --simulate unless the user set it explicitly;

@@ -431,7 +431,7 @@ calibration_source: ""    # set BY the run, not by you: --array NAME fills it wi
 #   * the LIGHT does not follow: at -1.05 V the current is 1.0% low at 0-0.5 s and the
 #     light is +0.03%. The fast part is NON-RADIATIVE, so EQE at 2 s reads +0.50% HIGH,
 #     not 0.5% low. Every earlier number here was a statement about the current only.
-sweep_order: pixel_major
+sweep_order: bias_major     # default since 22 October 2026; pixel_major is the original loop
 pixel_switch_settle_s: 2.0   # bias_major only: the wait after a frame change. Leave it
                              # at 2 s -- not because the transient is over (it is not)
                              # but because the part you would wait out is non-emissive:

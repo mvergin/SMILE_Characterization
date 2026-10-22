@@ -26,3 +26,4 @@ vramp_highv_nplc: 0.5     # not an integer: no mains rejection
 n_fine: 45                # the old point count
 
 # Everything else stays at the new defaults so the comparison isolates the method.
+sweep_order: pixel_major     # the old method's loop; the default became bias_major on 22 Oct 2026
