@@ -875,6 +875,94 @@ def _plt():
     return plt
 
 
+def split_fastscan_biases(fs, cfg):
+    """(rows at the classifying bias, {other bias: its rows}).
+
+    measure_iqe's ``fastscan_voltages`` scans the whole ROI once per bias into ONE CSV,
+    told apart by NVLED_V. Everything downstream -- the alive threshold, the yield, the
+    spatial and efficiency maps, the sweep cross-check -- assumes one row per pixel, so
+    it gets the bias the measurement itself classified on: ``nvled_v_fastscan`` from the
+    run's config, else the bias scanned first. A single-bias run comes back unchanged.
+    """
+    if "NVLED_V" not in fs.columns:
+        return fs, {}
+    v = fs["NVLED_V"].astype(float).round(4)
+    biases = list(dict.fromkeys(v))
+    if len(biases) < 2:
+        return fs, {}
+    want = cfg.get("nvled_v_fastscan")
+    if want is not None and round(float(want), 4) in biases:
+        first = round(float(want), 4)
+    elif "TIME_START" in fs.columns:
+        first = float(v[fs["TIME_START"].astype(float).idxmin()])
+    else:
+        first = biases[0]
+    return (fs[v == first].copy(),
+            {b: fs[v == b].copy() for b in sorted(biases) if b != first})
+
+
+def _alive_mask(df):
+    """Alive per pixel at one bias, by the same rule as classify_fastscan."""
+    P = df.set_index(["X", "Y"])["PM400_POWER_MEAN"].abs()
+    return P, P >= DEAD_THRESHOLD_FRAC * np.nanpercentile(P.values, FASTSCAN_ALIVE_PCTL)
+
+
+def fastscan_other_biases(fs, extra, out, plt):
+    """Each extra fast-scan bias against the classifying one: yield, the pixels that
+    change state between them, and the light ratio of the pixels alive at both.
+
+    The state changes are the point. Array38 has pixels lit at -1.35 V that draw only
+    leakage at -2.60 V (report 29.3); a second fast-scan bias finds every one of them
+    across the whole ROI instead of the few the sweep happens to visit.
+    """
+    if not extra:
+        return []
+    v0 = float(fs["NVLED_V"].astype(float).round(4).iloc[0])
+    P0, a0 = _alive_mask(fs)
+    rows = []
+    fig, ax = plt.subplots(1, len(extra) + 1, figsize=(5.2 * (len(extra) + 1), 4.8),
+                           squeeze=False)
+    ax = ax[0]
+
+    def show(a, P, title, mark=None):
+        x = P.index.get_level_values(0); y = P.index.get_level_values(1)
+        img = np.full((y.max() - y.min() + 1, x.max() - x.min() + 1), np.nan)
+        img[y - y.min(), x - x.min()] = np.clip(P.values, 1e-12, None) * 1e9
+        from matplotlib.colors import LogNorm
+        im = a.imshow(img, origin="upper", cmap="magma", interpolation="nearest",
+                      extent=(x.min() - .5, x.max() + .5, y.max() + .5, y.min() - .5),
+                      norm=LogNorm(vmin=max(1e-3, np.nanpercentile(img, 1)),
+                                   vmax=np.nanpercentile(img, 99.5)))
+        if mark is not None and len(mark):
+            a.scatter(*zip(*mark), s=4, c="cyan", marker="s", lw=0,
+                      label=f"lit at {v0:+.2f} V, dark here: {len(mark)}")
+            a.legend(loc="lower left", fontsize=7)
+        a.set_title(title, fontsize=9)
+        plt.colorbar(im, ax=a, fraction=0.046, label="nW")
+
+    show(ax[0], P0, f"{v0:+.3f} V (classifies): {int(a0.sum())}/{len(a0)} alive")
+    for i, (v, df) in enumerate(extra.items(), 1):
+        P, a = _alive_mask(df)
+        P, a = P.reindex(P0.index), a.reindex(P0.index).fillna(False).astype(bool)
+        lost = a0 & ~a
+        gained = ~a0 & a
+        both = a0 & a
+        ratio = (P[both] / P0[both]).replace([np.inf, -np.inf], np.nan).dropna()
+        rows.append(dict(v=v, n=int(P.notna().sum()), alive=int(a.sum()),
+                         lost=int(lost.sum()), gained=int(gained.sum()),
+                         ratio=float(ratio.median()) if len(ratio) else np.nan,
+                         ratio_iqr=(float(ratio.quantile(.25)), float(ratio.quantile(.75)))
+                         if len(ratio) else (np.nan, np.nan)))
+        show(ax[i], P, f"{v:+.3f} V: {int(a.sum())}/{int(P.notna().sum())} alive",
+             mark=list(lost[lost].index))
+    fig.suptitle("Fast scan at every bias; alive = >= 20 % of that bias's 90th percentile",
+                 fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out, dpi=200)
+    plt.close(fig)
+    return rows
+
+
 def plot_fastscan_overview(fs, cls, out, plt):
     fig, ax = plt.subplots(1, 2, figsize=(13, 5))
     piv = fs.pivot_table(
@@ -1990,7 +2078,9 @@ def analyse_sweep(sweep_dir, label, log):
     J_ref = float(fit.get("J_at_peak_IQE", float("nan"))) if fit else float("nan")
     cfit = (
         df_fits[df_fits["clean_fit"] == True].dropna(subset=["peak_IQE"])
-        if "clean_fit" in df_fits
+        # peak_IQE is absent when no pixel produced a fit at all (a 4-pixel, 6-point
+        # sweep), and dropna then raised instead of skipping the map.
+        if "clean_fit" in df_fits and "peak_IQE" in df_fits
         else df_fits.iloc[:0]
     )
     if len(cfit) >= 4:
@@ -2124,6 +2214,8 @@ def write_report(
     log,
     fs_eff=None,
     fs_spatial=None,
+    fs_biases=(),
+    fs_v0=None,
 ):
     run_dir = Path(run_dir)
     lines = []
@@ -2240,6 +2332,18 @@ def write_report(
         A(
             f"\n![FastScan native row/column](REPORT_assets/fastscan_row_col_native.png)\n"
         )
+    if fs_biases:
+        A(f"- **Fast scan at {1 + len(fs_biases)} biases.** Everything above uses the "
+          f"classifying bias, {fs_v0:+.3f} V. Each other bias, against it, with alive judged "
+          f"at each bias by the same rule:\n")
+        A(f"| bias | alive | lit at {fs_v0:+.2f} V, dark here | dark at {fs_v0:+.2f} V, lit here "
+          f"| light ratio, pixels alive at both (IQR) |")
+        A("|---|---|---|---|---|")
+        for r in fs_biases:
+            A(f"| {r['v']:+.3f} V | {r['alive']}/{r['n']} ({100 * r['alive'] / max(1, r['n']):.1f} %) "
+              f"| {r['lost']} | {r['gained']} | {r['ratio']:.3f} "
+              f"({r['ratio_iqr'][0]:.3f}–{r['ratio_iqr'][1]:.3f}) |")
+        A("\n![Fast scan at every bias](REPORT_assets/fastscan_biases.png)\n")
     A("")
 
     A("## 3. NVLED sweep — IQE / EQE\n")
@@ -2861,10 +2965,19 @@ def analyse_run(run_dir, log):
     if fs is None:
         log("  no fast-scan data")
         return
-    cls = classify_fastscan(fs)
+    fs, fs_extra = split_fastscan_biases(fs, cfg)
     plt = _plt()
     out = run_dir / "REPORT_assets"
     out.mkdir(exist_ok=True)
+    fs_biases = []
+    if fs_extra:
+        log(f"  fast scan at {1 + len(fs_extra)} biases: classifying on "
+            f"{float(fs['NVLED_V'].iloc[0]):+.3f} V, the others compared against it")
+        try:
+            fs_biases = fastscan_other_biases(fs, fs_extra, out / "fastscan_biases.png", plt)
+        except Exception as e:
+            log(f"  (skipped the per-bias fast-scan comparison: {e})")
+    cls = classify_fastscan(fs)
     plot_fastscan_overview(fs, cls, out / "fastscan_overview.png", plt)
     try:
         fs_eff = plot_fastscan_efficiency(fs, out / "fastscan_efficiency.png", plt)
@@ -2967,7 +3080,8 @@ def analyse_run(run_dir, log):
         except Exception as e:
             log(f"  (skipped fast-scan peak-IQE map: {e})")
     write_report(
-        run_dir, cfg, cls, ratio, summaries, log, fs_eff=fs_eff, fs_spatial=fs_spatial
+        run_dir, cfg, cls, ratio, summaries, log, fs_eff=fs_eff, fs_spatial=fs_spatial,
+        fs_biases=fs_biases, fs_v0=float(fs["NVLED_V"].iloc[0]) if "NVLED_V" in fs else None,
     )
 
 

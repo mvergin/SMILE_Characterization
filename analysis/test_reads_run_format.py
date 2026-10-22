@@ -193,6 +193,45 @@ def test_run_settings_names_the_limit():
     assert pt.si(1e-5) == "10 uA" and pt.si(3.2e-7) == "320 nA", pt.si(1e-5)
 
 
+def test_a_fast_scan_at_several_biases_is_split_not_pooled():
+    """fastscan_voltages writes every bias into one CSV, told apart by NVLED_V.
+
+    Pooled, they doubled the pixel count, mixed the alive threshold across biases and
+    sent the sweep cross-check to the MEDIAN bias -- -1.975 V for a -1.35/-2.6 V scan,
+    which nobody measured. Built from the fixture: the same pixels again at -2.60 V,
+    twice as bright, with three of them dark there.
+    """
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run = Path(tmp) / "run"
+        shutil.copytree(FIXTURE, run)
+        agg = next((run / "FastScan").glob("*aggregated_bitval=*.csv"))
+        fs = pd.read_csv(agg)
+        v0 = float(fs["NVLED_V"].iloc[0])
+        hi = fs.copy()
+        hi["NVLED_V"] = -2.6
+        hi["PM400_POWER_MEAN"] *= 2.0
+        hi["TIME_START"] += 1e4
+        dark = fs[["X", "Y"]].iloc[:3]
+        hi.loc[hi.index[:3], "PM400_POWER_MEAN"] = 1e-13
+        pd.concat([fs, hi]).to_csv(agg, index=False)
+
+        cfg = aa._load_config(run / "FastScan")
+        first, extra = aa.split_fastscan_biases(aa._load_aggregated(run / "FastScan"), cfg)
+        assert len(first) == len(fs) and set(extra) == {-2.6}, (len(first), set(extra))
+        assert round(float(first["NVLED_V"].iloc[0]), 4) == round(v0, 4)
+
+        aa.analyse_run(run, lambda *_a: None)
+        report = (run / "REPORT.md").read_text(encoding="utf-8")
+        assert f"Pixels scanned: **{len(fs)}**" in report, "the pixel count doubled"
+        assert "Fast scan at 2 biases" in report
+        row = next(l for l in report.splitlines() if l.startswith("| -2.600 V"))
+        assert row.split("|")[3].strip() == str(len(dark)), row
+        assert (run / "REPORT_assets" / "fastscan_biases.png").exists()
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
