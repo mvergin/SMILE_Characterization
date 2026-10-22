@@ -2394,6 +2394,10 @@ def main(argv=None):
 
     root = Path(args.out) if args.out else Path(cfg.base_dir)
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", cfg.sample_name).strip("-")
+    # SIMULATED_ in the name, so a software-rig run can never pass for a hardware one in
+    # results/ -- 24 did before this (report, Appendix C.7).
+    if args.simulate:
+        slug = "SIMULATED_" + slug
     out_dir = root / f"{datetime.datetime.now():%y%m%d-%H%M}_{slug}_CAPACITANCE"
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"Output: {out_dir}")

@@ -1954,6 +1954,21 @@ def test_dead_iv_refuses_a_bias_that_would_measure_the_diode_instead():
     assert IQEConfig(roi=(0, 0, 7, 7)).validate().dead_iv_pixels == 0
 
 
+def test_a_simulated_run_says_so_in_its_directory_name():
+    """24 simulated runs once sat in results/ looking like hardware runs, among them
+    eight calibrations named Array42_IQE written while Array38 was on the stage (report,
+    Appendix C.7). The name is the one thing every listing shows, so it has to carry it."""
+    import tempfile
+    from measure_iqe.acquire import make_run_dir
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = IQEConfig(roi=(0, 0, 3, 3)).validate()
+        sim = make_run_dir(cfg, tmp, simulated=True)
+        real = make_run_dir(cfg, tmp, suffix="CALIBRATION")
+        assert "SIMULATED_" in sim.name, sim.name
+        assert "SIMULATED" not in real.name, real.name
+        assert sim.name.endswith("_ROI_(0, 0, 3, 3)") and real.name.endswith("_CALIBRATION")
+
+
 if __name__ == "__main__":
     # write_calibration() writes to every calibration root, the install tree included.
     # That is wanted for a real --calibrate and poison for a test: the suite once

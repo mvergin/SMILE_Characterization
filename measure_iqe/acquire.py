@@ -2992,19 +2992,26 @@ def stamp_run(out_dir: Path, cfg: IQEConfig, log: Logger) -> None:
 
 
 def make_run_dir(cfg: IQEConfig, base_dir: str | Path | None = None,
-                 suffix: str | None = None) -> Path:
-    """Create and return ``<base_dir>/<stamp>_<sample>_ROI_(x1, y1, x2, y2)``."""
+                 suffix: str | None = None, simulated: bool = False) -> Path:
+    """Create and return ``<base_dir>/<stamp>_<sample>_ROI_(x1, y1, x2, y2)``.
+
+    A simulated run gets ``SIMULATED_`` in front of the sample name. Without it a
+    software-rig run lands in results/ looking exactly like a hardware one: 24 did,
+    among them eight calibrations named Array42_IQE written while Array38 was on the
+    stage (report, Appendix C.7).
+    """
     x1, y1, x2, y2 = cfg.resolve_roi()
     stamp = datetime.datetime.now().strftime("%y%m%d-%H%M")
     root = Path(base_dir) if base_dir is not None else Path(cfg.base_dir)
     tail = f"_{suffix}" if suffix else ""
-    run_dir = root / f"{stamp}_{cfg.sample_name}_ROI_({x1}, {y1}, {x2}, {y2}){tail}"
+    name = ("SIMULATED_" if simulated else "") + cfg.sample_name
+    run_dir = root / f"{stamp}_{name}_ROI_({x1}, {y1}, {x2}, {y2}){tail}"
     # The stamp has minute resolution, so two runs started in the same minute with the
     # same sample and ROI would write into one directory and silently merge. Only the
     # resume path may reuse an existing directory, and it passes run_dir explicitly.
     if run_dir.exists() and any(run_dir.iterdir()):
         stamp2 = datetime.datetime.now().strftime("%y%m%d-%H%M%S")
-        run_dir = root / f"{stamp2}_{cfg.sample_name}_ROI_({x1}, {y1}, {x2}, {y2}){tail}"
+        run_dir = root / f"{stamp2}_{name}_ROI_({x1}, {y1}, {x2}, {y2}){tail}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
@@ -3108,7 +3115,7 @@ def run_calibration(config: IQEConfig | None = None, *, simulate: bool = False,
     """
     cfg = (config or IQEConfig()).validate()
     log = log or make_logger()
-    out_dir = make_run_dir(cfg, base_dir, suffix="CALIBRATION")
+    out_dir = make_run_dir(cfg, base_dir, suffix="CALIBRATION", simulated=simulate)
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"Output: {out_dir}")
     pm, smu, smile = connect(cfg, log, simulate=simulate)
@@ -3175,7 +3182,8 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
         # separate argument, so --print-config and the saved settings both show it.
         cfg = dataclasses.replace(cfg, resume=True)
     x1, y1, x2, y2 = cfg.resolve_roi()
-    out_dir = Path(run_dir) if run_dir is not None else make_run_dir(cfg, base_dir)
+    out_dir = Path(run_dir) if run_dir is not None else make_run_dir(cfg, base_dir,
+                                                                      simulated=simulate)
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"Output: {out_dir}   (source_mode={cfg.source_mode})")
     stamp_run(out_dir, cfg, log)
