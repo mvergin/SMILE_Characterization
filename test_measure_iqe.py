@@ -894,6 +894,34 @@ def test_the_time_estimate_reproduces_a_measured_run():
     assert set(only) == {"fast scan", "total"} and abs(only["total"] / (2 * 8041) - 1) < 0.06
 
 
+def test_a_completed_run_is_analysed_and_a_disabled_one_is_not():
+    """analyze_after: the CLI runs analysis/analyze_array.py on a finished run.
+
+    In its own process, its output in ANALYSIS_LOG.txt, and only when asked. Without
+    scipy (a measurement-only install) it must skip and say how to fix it, not fail
+    the run that just finished.
+    """
+    import importlib.util
+
+    tiny = ["--simulate", "--set", f"sample_name={TEST_ARRAY}", "--set", "roi=[0,0,7,7]",
+            "--set", "block_size=4", "--set", "n_fine=4", "--set", "warmup_ms=0"]
+    with tempfile.TemporaryDirectory() as tmp:
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert cli_main(tiny + ["--out", tmp, "--set", "analyze_after=false"]) == 0
+        run = next(Path(tmp).iterdir())
+        assert not (run / "REPORT.md").exists(), "analyze_after=false still analysed"
+    with tempfile.TemporaryDirectory() as tmp:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert cli_main(tiny + ["--out", tmp]) == 0, "the analysis must not fail the run"
+        run = next(Path(tmp).iterdir())
+        if importlib.util.find_spec("scipy") is None:
+            assert "analysis skipped: scipy is not installed" in buf.getvalue()
+        else:
+            assert (run / "REPORT.md").exists() and (run / "ANALYSIS_LOG.txt").exists()
+            assert "analysis done" in (run / "Console_LOG.txt").read_text(encoding="utf-8")
+
+
 def test_bias_major_pays_each_dwell_once_for_all_pixels():
     """The point of the order: n_pixels x the dwell becomes 1 x the dwell."""
     import time as _time

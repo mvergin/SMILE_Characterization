@@ -3379,7 +3379,7 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
         log("=" * 56)
         if selected and not warmup_diag and not cfg.fastscan_only:
             log(f"DONE. {n_points} sweep points over {len(selected)} pixels.")
-            log('Analyze separately:\n'
+            log('Analyse it again any time with:\n'
                 f'    python analysis/analyze_array.py "{out_dir}"')
     finally:
         parked.__exit__(None, None, None)      # idempotent: shutdown() runs exactly once

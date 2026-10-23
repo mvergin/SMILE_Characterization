@@ -153,6 +153,7 @@ python -m measure_iqe [options]
 | `--simulate` | — | run against the built-in ABC-model rig, no hardware |
 | `--warmup-diag` | — | run the warm-up/conditioning diagnostic instead of the sweep |
 | `--fastscan` | `V [V ...]` | fast scan only, at each bias over the whole ROI; no selection, no sweep. The first bias judges alive/dead. Directory ends in `_FASTSCAN` |
+| `--set analyze_after=false` | — | do not run `analysis/analyze_array.py` when the run completes (it does by default; needs `uv sync --extra analysis`) |
 | `--array` | `NAME` | the mounted array: sets `sample_name` and applies `calibrations/NAME.yaml` |
 | `--calibrate` | — | measure this array's dwell, one pixel per quadrant, and write `calibrations/NAME.yaml` |
 | `--calibration` | `FILE` | apply this calibration file instead |

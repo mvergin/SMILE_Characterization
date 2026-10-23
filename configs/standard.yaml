@@ -37,6 +37,7 @@
 # ---- Run identity & output ----
 sample_name: "Array42_IQE"   # base_dir is relative to the working directory unless you pass an absolute path. ...
 base_dir: "results"   # output root; a timestamped run dir is created inside
+analyze_after: true   # analyse the run directory when the run completes; needs `uv sync --extra analysis`
 
 # ---- ROI & pixel selection ----
 roi: [32, 32, 63, 63]   # (x1,y1,x2,y2) or "FULL"/"TL"/"TR"/"BL"/"BR"

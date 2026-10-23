@@ -49,6 +49,10 @@ class IQEConfig:
                                       # leaves this default is REFUSED: it is one real array, so
                                       # any other array would be recorded as it. --simulate is exempt.
     base_dir: str = "results"          # output root; a timestamped run dir is created inside
+    analyze_after: bool = True         # run analysis/analyze_array.py on the run directory when
+                                       # the run completes (CLI and console). Not after a run
+                                       # that was stopped, --calibrate or --warmup-diag. Needs
+                                       # the analysis extra (scipy); without it, says so and skips.
 
     # ── ROI & pixel selection ───────────────────────────────────────────
     roi: tuple[int, int, int, int] | str = (32, 32, 63, 63)  # (x1,y1,x2,y2) or "FULL"/"TL"/"TR"/"BL"/"BR"

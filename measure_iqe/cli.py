@@ -133,6 +133,36 @@ def build_config(args: argparse.Namespace, log=None) -> IQEConfig:
     return IQEConfig.from_dict(data)
 
 
+ANALYZER = Path(__file__).resolve().parent.parent / "analysis" / "analyze_array.py"
+
+
+def analyze_run_dir(run_dir: Path, log) -> int:
+    """Run analysis/analyze_array.py on a finished run, in its own process.
+
+    A subprocess, not an import: an exception or a hang in the analysis cannot touch the
+    measurement that just finished, and its output goes to ANALYSIS_LOG.txt beside the
+    data instead of interleaving with the run log. Returns the exit code, or -1 when it
+    could not start.
+    """
+    import importlib.util
+    import subprocess
+
+    if not ANALYZER.exists():
+        log(f"analysis skipped: {ANALYZER} not found (measurement-only install)")
+        return -1
+    if importlib.util.find_spec("scipy") is None:
+        log("analysis skipped: scipy is not installed. Run `uv sync --extra analysis` once, "
+            f'then: python analysis/analyze_array.py "{run_dir}"')
+        return -1
+    log(f"analysing {run_dir.name} -- a full array takes 10-20 min; output in ANALYSIS_LOG.txt")
+    with open(run_dir / "ANALYSIS_LOG.txt", "w", encoding="utf-8") as f:
+        rc = subprocess.run([sys.executable, str(ANALYZER), str(run_dir)],
+                            stdout=f, stderr=subprocess.STDOUT).returncode
+    log(f"analysis {'done' if rc == 0 else f'FAILED (exit {rc})'}: "
+        + (f"{run_dir / 'REPORT.md'}" if rc == 0 else f"see {run_dir / 'ANALYSIS_LOG.txt'}"))
+    return rc
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="python -m measure_iqe",
@@ -270,6 +300,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         log("interrupted — partial results are on disk")
         return 130
     log(f"run directory: {result.run_dir}")
+    if cfg.analyze_after and not args.warmup_diag:
+        # Only reached when the run COMPLETED: Ctrl-C returns above, and the console's
+        # Stop (CTRL_BREAK) and a closed window end the process through safe_exit.
+        analyze_run_dir(Path(result.run_dir), log)
     # Everything logged, saved beside the data. Nothing wrote this before: the
     # Console_LOG.txt in older run directories was the operator redirecting output by
     # hand, so a 30 h run's warnings -- the dropped frame writes, the compliance

@@ -2,6 +2,7 @@
   "settings": {
     "sample_name": "FixtureArray",
     "base_dir": "results",
+    "analyze_after": true,
     "roi": [
       0,
       0,

@@ -87,6 +87,7 @@ SHAPE: list[tuple[str, str, str]] = [
     ("leak_reference", "Leakage reference", "subtract the same target at bitval 0"),
     ("leak_ref_per_point_above_v", "Reference per point above (V)",
      "below this a cached per-pixel reference is used. null = every point"),
+    ("analyze_after", "Analyse when done", "run analyze_array.py on the finished run"),
     ("save_raw_samples", "Keep raw bursts", "every sample, not just the summary"),
     ("trace_settling", "Keep dwell traces", "poll through the dwell instead of sleeping"),
 ]
