@@ -390,8 +390,15 @@ class IQEConfig:
                                      # 10 uA gives ~9 nA/sample at NPLC 0.01, ~1 nA at NPLC 1.
                                      # Measured 261013. The sweep overrides it per segment
                                      # (VRAMP_*_LIMIT_A) because -2.6 V needs ~175 uA.
-    nvled_range_i: float = 10e-3  # default fixed measure current range (coarse pre-sweep,
-                                     # fast scan, and any point with no current target).
+    nvled_range_i: float | None = None  # ch B measure range WITHOUT High-C. None (the
+                                     # default since 23 Oct 2026): the range follows the
+                                     # compliance limit, exactly as High-C does -- the same
+                                     # ladder (pick_limit), the same ranges, in either mode.
+                                     # A number fixes the range for every point instead, as
+                                     # every run before 14 Oct did: the legacy config sets
+                                     # 0.01. Ignored under High-C, where the limit IS the range.
+                                     # (Was 10e-3 always: a 400 nA reading then sat at
+                                     # 0.004 % of full scale.)
     # Current readout is the dominant error: ~5 µA on the 10 mA range is 0.05% of full
     # scale (and the low-J rise, <1 µA, is ~0.01%) → 20–50% scatter. AUTORANGE was tried
     # (260629-0913/1000) and BROKE the measurement: with the fast zero-delay BURST read
@@ -967,6 +974,8 @@ class IQEConfig:
             raise ValueError(f"pool_pm_range={self.pool_pm_range}; expected 0 (use "
                              f"pm_range) or a positive power in W")
         for name in ("nvled_range_i", "probe_range_i", "current_source_range_i"):
+            if name == "nvled_range_i" and self.nvled_range_i is None:
+                continue                     # None: the range follows the limit
             if getattr(self, name) not in SMU_I_RANGES:
                 raise ValueError(f"{name}={getattr(self, name)}; the 2602B only has "
                                  f"the ranges {SMU_I_RANGES}")

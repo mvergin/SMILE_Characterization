@@ -454,7 +454,7 @@ def build_fine_voltages(pm, smu, cfg: IQEConfig, log: Logger,
         ramp = [(float(v), None) for v in V]
         out = sorted(ramp, reverse=(cfg.sweep_direction == "low_to_high"))
         log(f"    {tag}voltage ramp ({dens}), "
-            f"{'range from the limit (High-C)' if cfg.highc_b else f'fixed {cfg.nvled_range_i:g} A range'}, "
+            f"{'range from the limit (High-C)' if cfg.highc_b else f'fixed {cfg.nvled_range_i:g} A range' if cfg.nvled_range_i else 'range from the limit (High-C off)'}, "
             f"{cfg.sweep_direction}")
         return out
     set_nplc(smu, cfg.coarse_nplc)
@@ -810,7 +810,22 @@ def configure_common(pm, smu, cfg: IQEConfig, log: Logger) -> None:
             pass
 
 
-def pick_limit(i_last: float | None, cfg: IQEConfig) -> float:
+def range_for_limit(limit: float) -> float:
+    """The smallest standard current range that holds ``limit``."""
+    return next((r for r in sorted(SMU_I_RANGES) if r >= abs(limit) * (1 - 1e-9)),
+                max(SMU_I_RANGES))
+
+
+def measure_range_b(cfg: IQEConfig) -> float:
+    """ch B's measure range for the current limit: the limit's own range, as High-C sets
+    it, unless ``nvled_range_i`` fixes one (and High-C is off). One rule for both modes."""
+    if cfg.nvled_range_i and not cfg.highc_b:
+        return cfg.nvled_range_i
+    return range_for_limit(cfg.nvled_compliance)
+
+
+def pick_limit(i_last: float | None, cfg: IQEConfig,
+               v_from: float | None = None, v_to: float | None = None) -> float:
     """The compliance limit for the next sweep point, from the last measured current.
 
     The limit CANNOT come from the density knee. That was the first attempt and run
@@ -825,6 +840,13 @@ def pick_limit(i_last: float | None, cfg: IQEConfig) -> float:
 
     Under High-C the limit also picks the measure range, so this is what sets the noise
     floor too -- hence the floor at ``vramp_lowv_limit_a`` rather than going lower still.
+    Without High-C the range now follows the limit as well (``measure_range_b``).
+
+    With ``v_from``/``v_to`` it PREDICTS: the last current is scaled by the median I(V)
+    ratio between the two biases (``bias_scale``, measured over 1200 pixels) before the
+    headroom. Going down in bias the range then steps down at the bias that needs it,
+    not one bias late; going up (``low_to_high``) the rise is covered instead of left to
+    the 1.5x headroom, which a 0.03 V step on the rising side (x1.4) nearly uses up.
     """
     ladder = [r for r in SMU_I_RANGES
               if cfg.vramp_lowv_limit_a <= r <= cfg.vramp_highv_limit_a]
@@ -832,7 +854,10 @@ def pick_limit(i_last: float | None, cfg: IQEConfig) -> float:
         return cfg.vramp_highv_limit_a
     if i_last is None or not math.isfinite(i_last):
         return ladder[-1]                      # first point: widest, nothing is known yet
-    need = 1.5 * abs(i_last)
+    scale = 1.0
+    if v_from is not None and v_to is not None and v_from != v_to:
+        scale = bias_scale(v_to, v_from)[1]
+    need = 1.5 * abs(i_last) * scale
     return next((r for r in ladder if r >= need), ladder[-1])
 
 
@@ -863,7 +888,7 @@ def configure_voltage_source_b(smu, cfg: IQEConfig, log: Logger | None = None) -
         # whatever state the channel was left in by a previous call.
         smu.inst.write("smub.source.highc = smub.DISABLE")
     smu.configure_channel("b", cfg.nvled_compliance, cfg.sweep_nplc, False,
-                          zero_delays=not cfg.highc_b, range_i=cfg.nvled_range_i)
+                          zero_delays=not cfg.highc_b, range_i=measure_range_b(cfg))
     if hasattr(smu, "inst"):
         if cfg.highc_b:
             # order matters: range first (above), then High-C, then nothing else.
@@ -2375,6 +2400,7 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
     n_dead = 0
     cur_nplc = cur_range = None      # cur_limit is set by the preconditioning block
     i_last = None
+    v_last = None
     # The first sweep bias at or below the threshold -- the one whose pooled targets
     # switched range. None when the switch is off or no grid point is past it.
     dual_rows: list[Row] = []
@@ -2409,15 +2435,20 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
             else:
                 nplc, n_pm, n_smu, settle_s = (cfg.sweep_nplc, cfg.n_pm_samples,
                                                cfg.n_smu_samples, cfg.settle_ms / 1000.0)
-            limit = pick_limit(i_last, cfg)
+            # From the BRIGHTEST target of the previous bias, not the last one measured:
+            # with pooled groups a single pixel set a 100 uA limit and the next group,
+            # 4x the current, clamped (261022-0037; 261016-2252 had one more).
+            limit = pick_limit(i_last, cfg, v_last, v)
             if limit != cur_limit:
                 configure_voltage_source_b(
                     smu, dataclasses.replace(cfg, nvled_compliance=limit), log)
                 cur_limit, cur_nplc, cur_range = limit, None, None
             if nplc != cur_nplc:
                 set_nplc(smu, nplc); cur_nplc = nplc
-            if not cfg.perpoint_range and not cfg.highc_b and cfg.nvled_range_i != cur_range:
+            if (not cfg.perpoint_range and not cfg.highc_b and cfg.nvled_range_i
+                    and cfg.nvled_range_i != cur_range):
                 set_measure_range_b(smu, cfg.nvled_range_i); cur_range = cfg.nvled_range_i
+            i_bias = 0.0
 
             # --- the one dwell this bias costs, for all the pixels below it ---
             #
@@ -2480,7 +2511,7 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
                 if raw_s is not None:
                     samps.append((x, y, bitval, row["NVLED_V"], row["TIME_START"], raw_s))
                 rows.append(row)
-                i_last = abs(row["NVLED_CURR_MEAN"])
+                i_bias = max(i_bias, abs(row["NVLED_CURR_MEAN"]))
                 # Dead-pixel abort, judged at the FIRST bias only -- which under
                 # high_to_low is the brightest, exactly as in pixel_major. Here it
                 # drops the pixel from every remaining bias, so one judgement saves
@@ -2490,6 +2521,8 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
                             cfg.dead_abort_frac * float(np.median(
                                 [per_member_power(r) for r in rows]))):
                     dead_here.append((x, y))
+            if i_bias > 0:
+                i_last, v_last = i_bias, float(v)
             for px in dead_here:
                 live.remove(px)
                 n_dead += 1
@@ -2656,7 +2689,8 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
         # Under High-C the limit, not nvled_range_i, selects the measure range -- saying
         # "fixed 10 mA range" there would be a lie, and it was.
         rng = ("range from the limit (High-C)" if cfg.highc_b
-               else f"fixed {cfg.nvled_range_i:g} A range")
+               else f"fixed {cfg.nvled_range_i:g} A range" if cfg.nvled_range_i
+               else "range from the limit (High-C off, same ladder)")
         log(f"VOLTAGE SWEEP — {len(selected)} pixels, {cfg.sweep_direction}, V ramp "
             f"{cfg.nvled_v_coarse_start}→{cfg.nvled_v_coarse_stop} V ({cfg.n_fine} pts, low-J-dense @ knee "
             f"{cfg.vramp_knee_v} V), {rng}, {eff}")
@@ -2821,8 +2855,9 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                         nplc, n_pm, n_smu, settle_s = (
                             cfg.sweep_nplc, cfg.n_pm_samples, cfg.n_smu_samples,
                             cfg.settle_ms / 1000.0)
-                    # The LIMIT tracks the measured current, not the density knee.
-                    limit = pick_limit(i_last, cfg)
+                    # The LIMIT tracks the measured current, not the density knee,
+                    # scaled to this bias by the median I(V).
+                    limit = pick_limit(i_last, cfg, last_v if i_last is not None else None, v)
                 else:
                     # heavy current averaging + longer settle at low current; fast at high
                     nplc, n_pm, n_smu, settle_ms = adaptive_params(i_target, cfg)
@@ -2851,7 +2886,8 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                             (f"{x}_{y}_b{bitval}_v{v:+.4f}", *tr))
                 else:
                     time.sleep(dwell)
-                if not cfg.perpoint_range and not cfg.highc_b and cfg.nvled_range_i != cur_range:
+                if (not cfg.perpoint_range and not cfg.highc_b and cfg.nvled_range_i
+                        and cfg.nvled_range_i != cur_range):
                     # In High-C the limit governs the range — writing it here is the
                     # conflict that made earlier High-C runs fail. Leave it alone.
                     set_measure_range_b(smu, cfg.nvled_range_i); cur_range = cfg.nvled_range_i

@@ -989,6 +989,34 @@ def test_a_completed_run_is_analysed_and_a_disabled_one_is_not():
             assert "analysis done" in (run / "Console_LOG.txt").read_text(encoding="utf-8")
 
 
+def test_the_measure_range_follows_the_limit_with_or_without_high_c():
+    """One ranging rule for both modes, and a limit that looks ahead.
+
+    Without High-C the range used to stay at 10 mA for every point while only the
+    limit moved; now it follows the limit as High-C's does. A fixed nvled_range_i
+    still pins it, which the legacy config needs to reproduce the old method.
+    """
+    import dataclasses as dc
+    from measure_iqe.acquire import measure_range_b, pick_limit
+
+    base = IQEConfig()
+    assert base.nvled_range_i is None, "the default is: the range follows the limit"
+    for lim in (1e-5, 1e-4, 1e-3):
+        on = measure_range_b(dc.replace(base, highc_b=True, nvled_compliance=lim))
+        off = measure_range_b(dc.replace(base, highc_b=False, nvled_compliance=lim))
+        assert on == off == lim, (lim, on, off)
+    assert measure_range_b(dc.replace(base, highc_b=False, nvled_range_i=0.01,
+                                      nvled_compliance=1e-5)) == 0.01
+    legacy = IQEConfig.from_file(Path(__file__).parent / "configs" / "legacy_pre261014.yaml")
+    assert legacy.nvled_range_i == 0.01 and not legacy.highc_b, "legacy must keep 10 mA"
+    # The limit predicts from the median I(V): down a range one bias earlier, and
+    # wide enough before a rise.
+    assert pick_limit(7.7e-6, base) == 1e-4                       # reactive: 11.5 uA
+    assert pick_limit(7.7e-6, base, -1.05, -1.02) == 1e-5         # predicted ~6.2 uA
+    assert pick_limit(6e-6, base, -1.02, -1.05) == 1e-4           # rise to ~7.5 uA
+    assert pick_limit(None, base, -1.0, -0.9) == base.vramp_highv_limit_a
+
+
 def test_bias_major_pays_each_dwell_once_for_all_pixels():
     """The point of the order: n_pixels x the dwell becomes 1 x the dwell."""
     import time as _time

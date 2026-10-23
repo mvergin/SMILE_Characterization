@@ -2532,8 +2532,11 @@ def write_report(
           f"{g('vramp_lowv_limit_a')} A on the rising side, "
           f"{g('vramp_highv_limit_a')} A on the droop side")
     else:
-        A(f"- **High-C OFF**, fixed I-range {g('nvled_range_i')} A -- readings below "
-          f"~10 uA are range artifacts, not currents (see INVESTIGATION_REPORT.md section 1)")
+        A(f"- **High-C OFF**, "
+          + (f"fixed I-range {g('nvled_range_i')} A" if cfg.get("nvled_range_i")
+             else "the measure range follows the limit (same ladder as High-C)")
+          + " -- on a carrier with its capacitors (Array42) readings below ~10 uA are "
+            "range artifacts, not currents (INVESTIGATION_REPORT.md section 1)")
     A(f"- **Effort:** NPLC {g('vramp_lowv_nplc')}/{g('vramp_highv_nplc')} "
       f"(rising/droop), settle {g('vramp_lowv_settle_s')}/{g('vramp_highv_settle_s')} s, "
       f"PM averaging {g('vramp_lowv_n_pm')}/{g('vramp_highv_n_pm')}")
