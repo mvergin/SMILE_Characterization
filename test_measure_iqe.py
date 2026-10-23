@@ -303,11 +303,16 @@ def test_a_failed_bitval0_write_is_retried_and_then_reported():
     LIT = 1e-9
 
     def _stub(ref_powers):
-        """Lit reading, then one reference per attempt from `ref_powers`."""
+        """Lit reading (10 uA), then one reference per attempt from `ref_powers` (250 nA,
+        the backplane leakage -- a reference drawing the lit current would itself look
+        like a lit frame that did not land)."""
         seq = [LIT] + list(ref_powers)
+        first = [True]
         def _f(*a, **k):
             w = seq.pop(0) if len(seq) > 1 else seq[0]
-            return (w, 0.0, 1e-5, 0.0, -1e-5, 0.0, 0.0, 0.0)
+            i = -1e-5 if first[0] else -2.5e-7
+            first[0] = False
+            return (w, 0.0, 1e-5, 0.0, i, 0.0, 0.0, 0.0)
         return _f
 
     BAD, OK = 0.6e-9, 2e-13          # 60 % of the lit light, and 2e-4 of it
@@ -348,6 +353,68 @@ def test_a_failed_bitval0_write_is_retried_and_then_reported():
         row, _ = acquire.measure_point(None, None, _Smile(), 7, 9, 15, -2.6, 1e-3,
                                        8, 8, cfg, 0.0, lambda m: None, restore=False)
         assert row["LEAK_REF_TRIES"] == 1 and row["PM400_POWER_REF"] == BAD
+    finally:
+        acquire.acquire_point = real
+        acquire._ref_warned.clear()
+
+
+def test_a_lit_frame_that_did_not_land_is_rewritten_once():
+    """A lit read that draws only its reference current did not light the pixel.
+
+    261016-2252, (489,181): 300 nA, about its reference, and no light at two biases.
+    The bitval-0 write was verified; the lit write was not. Now: rewrite it once,
+    settle, read again; if it is still dark, say so and keep the point for the gates.
+    """
+    class _Smile:
+        def __init__(self):
+            self.writes = []
+
+        def set_pixel(self, x, y, bv):
+            self.writes.append((x, y, bv))
+
+        def blank_frame(self):
+            self.writes.append("blank")
+
+    def _stub(lit_currents):
+        """The lit reads from `lit_currents`, then a clean reference at 280 nA."""
+        seq = list(lit_currents)
+        def _f(*a, **k):
+            if seq:
+                i = seq.pop(0)
+                return (1e-9 if abs(i) > 1e-6 else 1e-13, 0.0, 1e-5, 0.0, -i, 0.0, 0.0, 0.0)
+            return (2e-13, 0.0, 1e-5, 0.0, -2.8e-7, 0.0, 0.0, 0.0)
+        return _f
+
+    real = acquire.acquire_point
+    try:
+        for lits, want_lit, want_msg, who in (
+                ([1e-5], 1e-5, None, "healthy: no rewrite"),
+                ([3e-7, 1e-5], 1e-5, "did not land", "dropped, the rewrite lands"),
+                ([3e-7, 3e-7], 3e-7, "still", "dark twice: kept and reported")):
+            calls = {"n": 0}
+            stub = _stub(lits)
+
+            def _f(*a, **k):
+                calls["n"] += 1
+                # lit, reference, then the re-read of the lit frame if there is one
+                if calls["n"] == 2:
+                    return (2e-13, 0.0, 1e-5, 0.0, -2.8e-7, 0.0, 0.0, 0.0)
+                return stub()
+            acquire.acquire_point = _f
+            acquire._ref_warned.clear()
+            cfg = IQEConfig(**dict(FAST, leak_reference=True, perpoint_range=False,
+                                   save_raw_samples=False, leak_ref_tries=1,
+                                   leak_ref_per_point_above_v=None))
+            smile, said = _Smile(), []
+            row, _ = acquire.measure_point(None, None, smile, 4, 5, 15, -1.2, 1e-3,
+                                           8, 8, cfg, 0.0, said.append, restore=False)
+            assert abs(abs(row["NVLED_CURR_MEAN"]) - want_lit) < 1e-12, (who, row["NVLED_CURR_MEAN"])
+            rewrites = [w for w in smile.writes if w == (4, 5, 15)]
+            assert len(rewrites) == (0 if want_msg is None else 1), (who, smile.writes)
+            if want_msg is None:
+                assert not any("did not land" in m for m in said), who
+            else:
+                assert any(want_msg in m for m in said), (who, said)
     finally:
         acquire.acquire_point = real
         acquire._ref_warned.clear()

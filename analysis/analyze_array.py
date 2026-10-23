@@ -229,11 +229,27 @@ def _abc_eqe_norm(J, beta, J0, eta):
     return out
 
 
-def median_eqe_curve(J, eqe, min_count=3, n_bins=30):
-    """Median EQE vs J, binned in log(J). Returns a DataFrame[J, EQE, n, EQE_err].
+def shared_bias_grid(df):
+    """True when the targets share one bias grid (every voltage-mode sweep), so the
+    median curve can be taken per bias. Current mode gives each pixel its own biases."""
+    if "NVLED_V" not in df.columns or df.empty:
+        return False
+    per = df.groupby(["X", "Y"]).size().max()
+    return df["NVLED_V"].round(4).nunique() <= 2 * per
 
-    EQE_err is the spread of the bin's median: 1.4826·MAD / √n (robust standard error),
-    for display error bars. Works whether pixels share voltages or each has its own.
+
+def median_eqe_curve(J, eqe, min_count=3, n_bins=30, V=None):
+    """Median EQE vs J. Returns a DataFrame[J, EQE, n, EQE_err].
+
+    With V, the bias of every point, the curve is the median PER BIAS: one point per bias,
+    placed at that bias's median J. Use it whenever the targets share a bias grid. Equal
+    log-J bins put a voltage grid's six brightest biases into two bins, so the droop lost
+    most of its weight in the joint fit: 261016-2252 read 80.3 % binned against a 75.9 %
+    per-pixel median. Without V the points are binned in log(J), which still works when
+    every pixel has its own biases (current mode).
+
+    EQE_err is the spread of the median: 1.4826·MAD / √n (robust standard error), for
+    display error bars.
     """
     J = np.asarray(J, float)
     eqe = np.asarray(eqe, float)
@@ -241,11 +257,15 @@ def median_eqe_curve(J, eqe, min_count=3, n_bins=30):
     J, eqe = J[m], eqe[m]
     if J.size < min_count:
         return pd.DataFrame(columns=["J", "EQE", "n", "EQE_err"])
-    edges = np.logspace(np.log10(J.min()), np.log10(J.max()), n_bins + 1)
-    idx = np.clip(np.digitize(J, edges) - 1, 0, n_bins - 1)
+    if V is not None:
+        Vr = np.round(np.asarray(V, float)[m], 4)
+        groups = [Vr == v for v in np.unique(Vr)]
+    else:
+        edges = np.logspace(np.log10(J.min()), np.log10(J.max()), n_bins + 1)
+        idx = np.clip(np.digitize(J, edges) - 1, 0, n_bins - 1)
+        groups = [idx == b for b in range(n_bins)]
     rows = []
-    for b in range(n_bins):
-        sel = idx == b
+    for sel in groups:
         if sel.sum() >= min_count:
             e = eqe[sel]
             med = float(np.median(e))
@@ -707,13 +727,23 @@ def enrich(df, dark_W=0.0):
     # range -- and that floor would throw away the entire J < 1 region this whole
     # investigation was about (run 261014-0048 reaches J = 0.17).
     floor = NOISE_FLOOR_REF_A if "NVLED_CURR_REF" in df.columns else NOISE_FLOOR_A
-    reliable = df["I_LED"] >= floor
+    reliable = pd.Series(True, index=df.index)
+
+    def gate(name, fails):
+        """Apply one reliability gate and keep what it fails as FAIL_<name>, so the
+        report can count each gate in order (gate_table) instead of only the total."""
+        nonlocal reliable
+        fails = pd.Series(fails, index=df.index).fillna(False).astype(bool)
+        df[f"FAIL_{name}"] = fails
+        reliable &= ~fails
+
+    gate("CURRENT_FLOOR", ~(df["I_LED"] >= floor))
     # A point that sat on the compliance limit is not a measurement of the device -- the
     # current is the instrument's. Run 261014-0007 had 8 such points in a row reading
     # exactly 10000.4 nA, which would otherwise have entered the fit as a plateau.
     if "NVLED_AT_COMPLIANCE" in df.columns:
         clamped = df["NVLED_AT_COMPLIANCE"].astype(str).str.lower().isin(("true", "1"))
-        reliable &= ~clamped
+        gate("COMPLIANCE", clamped)
     # A reference reading that jumps far above the rest of that pixel's sweep did not
     # measure the pixel at bitval 0 -- the drive had not actually come off yet, or the
     # frame write did not take. Run 261014-0048 had exactly one such point in 720:
@@ -737,7 +767,7 @@ def enrich(df, dark_W=0.0):
         local = (o.groupby(["X", "Y"])["I_NVLED_REF"]
                   .transform(lambda v: v.rolling(5, center=True, min_periods=2).median()))
         df["REF_SUSPECT"] = (o["I_NVLED_REF"] > REF_SUSPECT_FACTOR * local).reindex(df.index)
-        reliable &= ~df["REF_SUSPECT"].fillna(False)
+        gate("REF_SUSPECT", df["REF_SUSPECT"])
 
         # The reference swallowed the signal: see REF_SWALLOWED_FRAC above. Needs the
         # optical reference, because the CURRENT alone cannot tell "the neighbour was
@@ -777,7 +807,8 @@ def enrich(df, dark_W=0.0):
             # .fillna(False) below gives every other missing input.
             df["REF_CONTAMINATED"] = per_px > REF_POWER_SUSPECT
             df["REF_SWALLOWED"] = swallowed
-            reliable &= ~(swallowed | df["REF_CONTAMINATED"]).fillna(False)
+            gate("REF_SWALLOWED", swallowed)
+            gate("REF_CONTAMINATED", df["REF_CONTAMINATED"])
             # ...and the median is blind to a pixel lit at SOME biases. Run 261015-0015,
             # (342,147): the reference carried 0.39-1.00 of the light at 9 of 30 biases,
             # its median stayed clean, three of the nine were adjacent so REF_SUSPECT's
@@ -793,20 +824,20 @@ def enrich(df, dark_W=0.0):
                    if "PM400_POWER_REF_STD" in df.columns else True)
             df["REF_LIT_POINT"] = ((refx / lit.abs().replace(0, np.nan) > REF_POWER_SUSPECT)
                                    & sig & (per_px <= REF_POWER_SUSPECT))
-            reliable &= ~df["REF_LIT_POINT"].fillna(False)
+            gate("REF_LIT_POINT", df["REF_LIT_POINT"])
     if "NVLED_CURR_STD" in df.columns:
         relstd = df["NVLED_CURR_STD"].astype(float) / df["I_NVLED"].replace(0, np.nan)
-        reliable &= relstd.fillna(np.inf) <= NVLED_RELSTD_MAX
+        gate("CURRENT_NOISE", ~(relstd.fillna(np.inf) <= NVLED_RELSTD_MAX))
     # Optical-SNR gate: drop points where the PM noise rivals the signal (light at
     # the dark floor at very low J). Without this, those P≈dark points deflate the
     # rising side and bias peak-IQE low.
     if "PM400_POWER_STD" in df.columns:
         relP = df["PM400_POWER_STD"].astype(float) / df["P_W"].replace(0, np.nan)
-        reliable &= relP.fillna(np.inf) <= PM_RELSTD_MAX
+        gate("OPTICAL_NOISE", ~(relP.fillna(np.inf) <= PM_RELSTD_MAX))
     # Absolute optical SNR: the signal must be above the dark/background floor —
     # otherwise EQE≈0 even when the (averaged) value is precise.
     if dark_W and dark_W > 0:
-        reliable &= df["P_W"] >= PM_MIN_OVER_DARK * dark_W
+        gate("DARK_FLOOR", ~(df["P_W"] >= PM_MIN_OVER_DARK * dark_W))
     df["RELIABLE"] = reliable
     return df
 
@@ -1330,7 +1361,7 @@ def plot_iqe(df, pixel_fits, pooled_fit, out, plt, src="LED"):
                 "k-",
                 lw=2.5,
                 zorder=5,
-                label=f"pooled fit ({pooled_fit['peak_IQE'] * 100:.0f}%)",
+                label=f"joint fit ({pooled_fit['peak_IQE'] * 100:.0f}%)",
             )
             ax.legend()
         ax.set_ylabel("IQE (%)")
@@ -1353,12 +1384,12 @@ def plot_iqe(df, pixel_fits, pooled_fit, out, plt, src="LED"):
             ttl = (
                 f"Measured relative EQE(J) — {df.groupby(['X', 'Y']).ngroups} pixels\n"
                 f"per-pixel fits too noisy to draw individually ({len(good)} clean) — "
-                f"IQE was extracted from the POOL: peak {pooled_fit['peak_IQE'] * 100:.0f}%"
+                f"IQE comes from the joint fit only: peak {pooled_fit['peak_IQE'] * 100:.0f}%"
             )
             ax.text(
                 0.5,
                 0.06,
-                "Pooled peak IQE is the trustworthy number "
+                "Only the joint fit to the median curve is available "
                 "(see eqe_vs_J_LED / iqe_split_branch).",
                 ha="center",
                 va="bottom",
@@ -2014,6 +2045,150 @@ def plot_fastscan_spatial(fs, out_dir, plt):
 # =====================================================================
 
 
+GATES = [
+    ("CURRENT_FLOOR", "I_LED below the noise floor ({floor} A)"),
+    ("COMPLIANCE", "the point sat on its compliance limit"),
+    ("REF_SUSPECT", f"reference > {REF_SUSPECT_FACTOR:g}x the rolling median of its 5 neighbours"),
+    ("REF_SWALLOWED", f"reference carried > {REF_POWER_SUSPECT:g} of the light and net power "
+                      f"< {REF_SWALLOWED_FRAC:g}x the per-bias median"),
+    ("REF_CONTAMINATED", f"the pixel's median reference light (measured references) "
+                         f"> {REF_POWER_SUSPECT:g} of its lit light"),
+    ("REF_LIT_POINT", f"this point's reference light, above the per-bias median, "
+                      f"> {REF_POWER_SUSPECT:g} of the lit light and > 5 sigma"),
+    ("CURRENT_NOISE", f"current SEM / current > {NVLED_RELSTD_MAX:g}"),
+    ("OPTICAL_NOISE", f"power SEM / power > {PM_RELSTD_MAX:g}"),
+    ("DARK_FLOOR", f"power < {PM_MIN_OVER_DARK:g}x the dark level"),
+]
+
+
+def gate_table(df):
+    """Per gate, in enrich()'s order: points it fails, and points it REMOVES (fails while
+    every earlier gate passed), plus the limits in force and the reference retries."""
+    floor = NOISE_FLOOR_REF_A if "NVLED_CURR_REF" in df.columns else NOISE_FLOOR_A
+    left = pd.Series(True, index=df.index)
+    rows = []
+    for name, rule in GATES:
+        col = f"FAIL_{name}"
+        if col not in df.columns:
+            rows.append(dict(gate=name, rule=rule.format(floor=f"{floor:g}"), fails=None,
+                             removed=None))
+            continue
+        f = df[col].astype(bool)
+        rows.append(dict(gate=name, rule=rule.format(floor=f"{floor:g}"),
+                         fails=int(f.sum()), removed=int((f & left).sum())))
+        left &= ~f
+    limits = (df["NVLED_LIMIT_A"].value_counts().sort_index().to_dict()
+              if "NVLED_LIMIT_A" in df.columns else {})
+    tries = {}
+    if "LEAK_REF_TRIES" in df.columns:
+        t = df["LEAK_REF_TRIES"]
+        if "LEAK_REF_CACHED" in df.columns:
+            t = t[df["LEAK_REF_CACHED"].astype(float).fillna(0) == 0]
+        tries = t.dropna().astype(int).value_counts().sort_index().to_dict()
+    return dict(rows=rows, limits=limits, tries=tries, n=len(df))
+
+
+TRUNC_MAX_PIXELS = 100   # ponytail: per-pixel truncation on an even sample; ~0.2 s a fit
+TRUNC_N = 5              # cut 0..5 points from each end
+TRUNC_WARN_PTS = 2.0     # warn when one or two cuts move the peak IQE more than this
+TRUNC_MIN_POINTS = 8     # never fit fewer points than this
+
+
+def _trunc_peaks(J, E):
+    """Peak IQE (%) after cutting n = 0..TRUNC_N points from the low-J end, the high-J
+    end, or both; NaN where the fit is not clean or too few points remain."""
+    o = np.argsort(J)
+    J, E = np.asarray(J, float)[o], np.asarray(E, float)[o]
+    out = {}
+    for mode in ("low", "high", "both"):
+        for c in range(TRUNC_N + 1):
+            lo, hi = (c, len(J)) if mode == "low" else (0, len(J) - c) if mode == "high" \
+                else (c, len(J) - c)
+            if hi - lo < TRUNC_MIN_POINTS:
+                out[(mode, c)] = np.nan
+                continue
+            f = fit_abc(J[lo:hi], E[lo:hi])
+            ok, _ = classify_fit(f)
+            out[(mode, c)] = 100 * f["peak_IQE"] if ok else np.nan
+    return out
+
+
+def truncation_check(df, med, per_bias, out, plt, log):
+    """How far the peak IQE moves when the ends of the curve are cut.
+
+    The joint fit is refitted on its median curve with n points cut, and the per-pixel
+    fits on an even sample of up to TRUNC_MAX_PIXELS clean single pixels. A peak that
+    moves by more than TRUNC_WARN_PTS within the first two cuts rests on the end points
+    rather than on the curve, and the report says so. Writes truncation.csv and
+    truncation.png.
+    """
+    rel = df[df["RELIABLE"]]
+    rows = []
+    joint = _trunc_peaks(med["J"].values, med["EQE"].values) if len(med) else {}
+    for (mode, c), v in joint.items():
+        rows.append(dict(scope="joint", mode=mode, n_cut=c, peak_IQE=v))
+    groups = []
+    for (x, y), g in rel.groupby(["X", "Y"]):
+        if "POOL_K_EFF" in g and g["POOL_K_EFF"].iloc[0] > 1:
+            continue
+        groups.append(g)
+    full = max((len(g) for g in groups), default=0)
+    groups = [g for g in groups if len(g) == full]
+    if len(groups) > TRUNC_MAX_PIXELS:
+        groups = groups[:: int(np.ceil(len(groups) / TRUNC_MAX_PIXELS))]
+    shifts = {}
+    for g in groups:
+        tp = _trunc_peaks(g["J_LED"].values, g["EQE_LED"].values)
+        base = tp.get(("low", 0), np.nan)
+        if not np.isfinite(base):
+            continue
+        for k, v in tp.items():
+            shifts.setdefault(k, []).append(v - base)
+    for (mode, c), v in sorted(shifts.items()):
+        a = np.asarray(v, float)
+        a = a[np.isfinite(a)]
+        rows.append(dict(scope="pixels", mode=mode, n_cut=c,
+                         median_shift=float(np.median(a)) if a.size else np.nan,
+                         p10=float(np.percentile(a, 10)) if a.size else np.nan,
+                         p90=float(np.percentile(a, 90)) if a.size else np.nan,
+                         n_pixels=int(a.size)))
+    t = pd.DataFrame(rows)
+    t.to_csv(out / "truncation.csv", index=False)
+    fig, ax = plt.subplots(1, 3, figsize=(15, 4.4), sharey=True)
+    j0 = joint.get(("low", 0), np.nan)
+    warn = []
+    for a, mode in zip(ax, ("low", "high", "both")):
+        jj = t[(t.scope == "joint") & (t["mode"] == mode)]
+        a.plot(jj.n_cut, jj.peak_IQE - j0, "ko-", label="joint fit")
+        pp = t[(t.scope == "pixels") & (t["mode"] == mode)]
+        if len(pp):
+            a.plot(pp.n_cut, pp.median_shift, "o-", color="tab:green",
+                   label=f"per-pixel median shift ({int(pp.n_pixels.max())} px)")
+            a.fill_between(pp.n_cut, pp.p10, pp.p90, color="tab:green", alpha=0.2,
+                           label="per-pixel 10-90 %")
+        a.axhspan(-TRUNC_WARN_PTS, TRUNC_WARN_PTS, color="0.9", zorder=0)
+        a.axhline(0, color="0.5", lw=0.8)
+        a.set_title({"low": "cut from the low-J end", "high": "cut from the high-J end",
+                     "both": "cut from both ends"}[mode], fontsize=10)
+        a.set_xlabel("points cut")
+        for scope, col, sel in (("joint fit", "peak_IQE", jj), ("per-pixel median", "median_shift", pp)):
+            vals = (sel[sel.n_cut.between(1, 2)][col] - (j0 if col == "peak_IQE" else 0)).abs()
+            if len(vals) and vals.max() > TRUNC_WARN_PTS:
+                warn.append(f"{scope}, {mode}: {vals.max():.1f} points")
+    ax[0].set_ylabel("peak IQE change (points)")
+    ax[0].legend(fontsize=8)
+    fig.suptitle(f"Truncation check: does the peak IQE rest on the end points? "
+                 f"(grey band ±{TRUNC_WARN_PTS:g} points)", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out / "truncation.png", dpi=200)
+    plt.close(fig)
+    if warn:
+        log("    !! truncation: the peak IQE moves > "
+            f"{TRUNC_WARN_PTS:g} points within two cuts -- " + "; ".join(warn))
+    return dict(warn=warn, n_pixels=int(t[t.scope == "pixels"].n_pixels.max())
+                if (t.scope == "pixels").any() else 0)
+
+
 def analyse_sweep(sweep_dir, label, log):
     sweep_dir = Path(sweep_dir)
     df_raw = _load_aggregated(sweep_dir)
@@ -2068,8 +2243,10 @@ def analyse_sweep(sweep_dir, label, log):
     # NVLED_V) works for both fixed-voltage and adaptive per-pixel-voltage sweeps,
     # and a min-count per bin suppresses spurious points from the noisy tail.
     rel = df[df["RELIABLE"]]
+    per_bias = shared_bias_grid(rel)
     med = median_eqe_curve(
-        rel["J_LED"].values, rel["EQE_LED"].values, min_count=max(3, int(0.15 * n_px))
+        rel["J_LED"].values, rel["EQE_LED"].values, min_count=max(3, int(0.15 * n_px)),
+        V=rel["NVLED_V"].values if per_bias else None,
     )
     fit = fit_abc(med["J"].values, med["EQE"].values, d_cm)
     # An ABC fit is only meaningful if it describes the data (good R²) AND the
@@ -2132,7 +2309,8 @@ def analyse_sweep(sweep_dir, label, log):
         r = g[g["RELIABLE"]]
         f = fit_abc(r["J_LED"].values, r["EQE_LED"].values)
         pixel_fits[(x, y)] = f
-        row = dict(X=int(x), Y=int(y))
+        row = dict(X=int(x), Y=int(y),
+                   POOL_K=int(g["POOL_K_EFF"].iloc[0]) if "POOL_K_EFF" in g else 1)
         clean, flag = classify_fit(f)
         if f is not None:
             row.update(
@@ -2258,6 +2436,11 @@ def analyse_sweep(sweep_dir, label, log):
     df.to_csv(out / "enriched_points.csv", index=False)
 
     pp = df_fits["peak_IQE"] if "peak_IQE" in df_fits else pd.Series(dtype=float)
+    single_clean = (df_fits[(df_fits["clean_fit"] == True) & (df_fits["POOL_K"] <= 1)]
+                    if {"clean_fit", "POOL_K", "eta_LEE"} <= set(df_fits.columns)
+                    else df_fits.iloc[:0])
+    gates = gate_table(df)
+    trunc = _safe(truncation_check, df, med, per_bias, out, plt, log)
     if spatial is not None:
         Pmap, _jref, grad = spatial
         spatial_info = dict(
@@ -2290,6 +2473,12 @@ def analyse_sweep(sweep_dir, label, log):
         median_peak_IQE=float(pp.median()) if pp.notna().any() else np.nan,
         peak_IQE_lo=float(pp.min()) if pp.notna().any() else np.nan,
         peak_IQE_hi=float(pp.max()) if pp.notna().any() else np.nan,
+        peak_IQE_p10=float(pp.quantile(0.1)) if pp.notna().any() else np.nan,
+        peak_IQE_p90=float(pp.quantile(0.9)) if pp.notna().any() else np.nan,
+        eta_pixels=float(single_clean["eta_LEE"].median()) if len(single_clean) else np.nan,
+        curve="median per bias" if per_bias else "median in log-J bins",
+        gates=gates,
+        trunc=trunc,
         iqe_spatial=iqe_spatial_stats,
     )
     return summary
@@ -2484,14 +2673,28 @@ def write_report(
             f"EQE spread (90/10 pct): {_fmt(s['eqe_spread'], '{:.2f}')}×"
             + ("." if s["fit_ok"] else " → ~constant EQE, little curvature to fit.")
         )
+        # The per-pixel median leads: it is the number the investigation quotes, and it
+        # does not depend on how the median curve weights the biases.
+        if np.isfinite(s.get("median_peak_IQE", np.nan)):
+            ncf, ntf = s["n_peak_captured"], s["n_pixel_fits"]
+            A(
+                f"- **Peak IQE, per-pixel median: {_fmt(s['median_peak_IQE'] * 100, '{:.1f}')} %** "
+                f"(10–90 %: {_fmt(s['peak_IQE_p10'] * 100, '{:.0f}')}–"
+                f"{_fmt(s['peak_IQE_p90'] * 100, '{:.0f}')} %, full range "
+                f"{_fmt(s['peak_IQE_lo'] * 100, '{:.0f}')}–{_fmt(s['peak_IQE_hi'] * 100, '{:.0f}')} %), "
+                f"from **{ncf} clean fits of {ntf} targets**. A fit is *clean* only if the peak "
+                f"is captured in-data, R²≥{PER_PIXEL_R2_MIN} and β≤{BETA_MAX:g}. See "
+                f"abc_fit_per_pixel.csv, abc_fit_GUIDE.md and iqe_spatial_map."
+            )
+        elif not s["fit_ok"]:
+            A("- Per-pixel: no pixel produced a clean peak fit → peak IQE not extractable.")
         if s["fit_ok"] and f is not None:
             A(
-                f"- Median ABC fit (β,J₀,η parametrization): β={_fmt(f['beta'], '{:.2f}')}, "
-                f"J₀={_fmt(f['J0'], '{:.2g}')} A/cm², R²={_fmt(f['R_squared'], '{:.3f}')}"
-            )
-            A(
-                f"- **Peak IQE ≈ {_fmt(f['peak_IQE'] * 100, '{:.1f}')}%** (pooled, all pixels) at "
-                f"J={_fmt(f['J_at_peak_IQE'])} A/cm² — collection-uncalibrated "
+                f"- Joint fit — one ABC fit (β, J₀, η) to the {s.get('curve', 'median curve')} "
+                f"of all targets' reliable points: peak IQE "
+                f"**{_fmt(f['peak_IQE'] * 100, '{:.1f}')} %** at J={_fmt(f['J_at_peak_IQE'])} A/cm², "
+                f"β={_fmt(f['beta'], '{:.2f}')}, J₀={_fmt(f['J0'], '{:.2g}')} A/cm², "
+                f"R²={_fmt(f['R_squared'], '{:.3f}')}, collection-uncalibrated "
                 f"η={_fmt(f['eta_LEE'], '{:.2e}')}."
             )
             if np.isfinite(s.get("split_low", np.nan)) or np.isfinite(
@@ -2520,26 +2723,36 @@ def write_report(
         else:
             r2 = _fmt(f["R_squared"], "{:.2f}") if f is not None else "n/a"
             A(
-                f"- **Pooled fit not meaningful** (R²={r2}, no peak in window): the population "
-                f"median EQE(J) has no usable peak — see per-pixel line below."
+                f"- **Joint fit not meaningful** (R²={r2}, no peak in window): the median "
+                f"EQE(J) of all targets has no usable peak — see the per-pixel line above."
             )
-        # Per-pixel summary shown in BOTH cases: individual pixels can capture a
-        # peak even when the pooled median (contaminated by a few bad pixels) does not.
-        if np.isfinite(s.get("median_peak_IQE", np.nan)):
-            ncf, ntf = s["n_peak_captured"], s["n_pixel_fits"]
-            frac = (100 * ncf / ntf) if ntf else 0
-            A(
-                f"- **Per-pixel:** median {_fmt(s['median_peak_IQE'] * 100, '{:.0f}')}%, range "
-                f"{_fmt(s['peak_IQE_lo'] * 100, '{:.0f}')}–{_fmt(s['peak_IQE_hi'] * 100, '{:.0f}')}%, "
-                f"**{ncf}/{ntf} clean per-pixel fits ({frac:.0f}%)** — a fit is *clean* only if the "
-                f"peak is captured in-data, R²≥{PER_PIXEL_R2_MIN}, and β≤{BETA_MAX:g} (not a runaway "
-                f"extrapolation). See abc_fit_per_pixel.csv + abc_fit_GUIDE.md (explains β) and "
-                f"iqe_spatial_map."
-            )
-        elif not s["fit_ok"]:
-            A(
-                "- Per-pixel: no pixel produced a clean peak fit either → peak-IQE not extractable."
-            )
+        tr = s.get("trunc")
+        if tr:
+            A("- **Truncation check** (truncation.png, truncation.csv): "
+              + ("**the peak IQE moves more than "
+                 f"{TRUNC_WARN_PTS:g} points within two cuts** — " + "; ".join(tr["warn"])
+                 + ". It rests on the end points; quote it with that spread."
+                 if tr["warn"] else
+                 f"cutting one or two points from either end moves the peak IQE by less than "
+                 f"{TRUNC_WARN_PTS:g} points, joint fit and per-pixel median "
+                 f"({tr['n_pixels']} pixels) alike."))
+        gt = s.get("gates")
+        if gt:
+            A(f"\n**Reliability gates**, in the order `enrich()` applies them, over {gt['n']} "
+              f"points. *Removes* counts what the gate drops that every earlier gate kept:\n")
+            A("| gate | rule | fails | removes |")
+            A("|---|---|---|---|")
+            for r in gt["rows"]:
+                A(f"| `{r['gate']}` | {r['rule']} | "
+                  + (f"{r['fails']} | {r['removed']} |" if r["fails"] is not None
+                     else "— | not applied (input column absent) |"))
+            if gt["limits"]:
+                A("\nCompliance limits in force (`NVLED_LIMIT_A`): "
+                  + ", ".join(f"{float(k):g} A × {v}" for k, v in gt["limits"].items()) + ".")
+            if gt["tries"]:
+                A("Frame writes per measured leakage reference (`LEAK_REF_TRIES`): "
+                  + ", ".join(f"{k} × {v}" for k, v in gt["tries"].items()) + ".")
+            A("")
         sp = s.get("spatial")
         if sp is not None:
             g = sp["grad"]
@@ -2765,8 +2978,16 @@ FASTSCAN_PEAK_J_BAND = (5.0, 40.0)
 
 
 def fastscan_peak_iqe_pixels(fs, peak_iqe_ref):
-    """Per-pixel peak-IQE proxy from the fast scan (X, Y, iqe%%), calibrated to the sweep, or
-    (None, J) if the fast-scan bias is off the EQE plateau (so EQE≠peak and the proxy is invalid)."""
+    """Per-pixel peak-IQE proxy from the fast scan (X, Y, iqe%%), or (None, J) if the
+    fast-scan bias is off the EQE plateau (so EQE≠peak and the proxy is invalid).
+
+    ``peak_iqe_ref`` is either a number -- the old calibration, the map's median set to it
+    -- or a pandas Series of clean per-pixel peak IQE indexed by (X, Y), the swept single
+    pixels. Then the map is scaled by the median over those pixels of peak IQE / fast-scan
+    EQE, so it agrees with the per-pixel fits rather than with the joint fit (261016-2252:
+    the old scaling put the map's median at the joint 80.3 % against a 75.9 % per-pixel
+    median).
+    """
     P = fs["PM400_POWER_MEAN"].astype(float).abs().values
     I = fs["NVLED_CURR_MEAN"].astype(float).abs().values
     thr = DEAD_THRESHOLD_FRAC * float(np.nanpercentile(P, FASTSCAN_ALIVE_PCTL))
@@ -2782,14 +3003,24 @@ def fastscan_peak_iqe_pixels(fs, peak_iqe_ref):
         return None, J
     eqe = compute_eqe(P, I, WAVELENGTH_NM)
     eqe = np.where(P >= thr, eqe, np.nan)  # mask dead
-    med = float(np.nanmedian(eqe))
-    if not np.isfinite(med) or med <= 0 or not np.isfinite(peak_iqe_ref):
-        return None, J
+    if isinstance(peak_iqe_ref, pd.Series):
+        fe = pd.Series(eqe, index=pd.MultiIndex.from_arrays([fs["X"], fs["Y"]]))
+        fe = fe[~fe.index.duplicated()]
+        ratio = (peak_iqe_ref / fe.reindex(peak_iqe_ref.index)).replace(
+            [np.inf, -np.inf], np.nan).dropna()
+        if ratio.empty:
+            return None, J
+        scale = float(ratio.median())
+    else:
+        med = float(np.nanmedian(eqe))
+        if not np.isfinite(med) or med <= 0 or not np.isfinite(peak_iqe_ref):
+            return None, J
+        scale = peak_iqe_ref / med
     d = pd.DataFrame(
         {
             "X": fs["X"].values,
             "Y": fs["Y"].values,
-            "iqe": eqe / med * peak_iqe_ref * 100.0,
+            "iqe": eqe * scale * 100.0,
         }
     )
     return d[np.isfinite(d["iqe"])].reset_index(drop=True), J
@@ -3128,7 +3359,13 @@ def analyse_run(run_dir, log):
     # Power, current and IQE maps at EVERY fast-scan bias. eta and the sweep's EQE come
     # from the first sweep whose fit succeeded; without one the IQE panel is left out.
     fit_s = next((s for s in summaries if s.get("fit_ok") and s.get("median_fit")), None)
-    eta = fit_s["median_fit"].get("eta_LEE") if fit_s else None
+    # eta from the clean single-pixel fits, not the joint fit, so the IQE maps agree with
+    # the per-pixel numbers the report leads with. The joint eta is the fallback.
+    eta = None
+    if fit_s:
+        eta = fit_s.get("eta_pixels")
+        if eta is None or not np.isfinite(eta):
+            eta = fit_s["median_fit"].get("eta_LEE")
     enr = None
     if fit_s:
         ep = run_dir / fit_s["label"] / "IQE_EQE" / "enriched_points.csv"
@@ -3146,16 +3383,32 @@ def analyse_run(run_dir, log):
     # Only produced when the fast-scan bias is on the EQE plateau (J≈8–30, i.e. NVLED ≈ −1.35 V);
     # skipped for a droop-side fast scan (old −2.6 V), where EQE ≠ peak.
     fs_peak = None
-    peak_ref = next(
-        (
-            s["median_fit"]["peak_IQE"]
-            for s in summaries
-            if s.get("fit_ok")
-            and s.get("median_fit")
-            and np.isfinite(s["median_fit"].get("peak_IQE", np.nan))
-        ),
-        None,
-    )
+    # Calibrate against the swept single pixels' own clean fits, not the joint fit: the
+    # map then agrees with the per-pixel median the report leads with. The joint fit's
+    # peak IQE is only the fallback when no per-pixel fit is clean.
+    peak_ref = None
+    if fit_s:
+        fp = run_dir / fit_s["label"] / "IQE_EQE" / "abc_fit_per_pixel.csv"
+        if fp.exists():
+            pf = pd.read_csv(fp)
+            if {"clean_fit", "peak_IQE"} <= set(pf.columns):
+                pf = pf[(pf["clean_fit"] == True) & pf["peak_IQE"].notna()]
+                if "POOL_K" in pf.columns:
+                    pf = pf[pf["POOL_K"] <= 1]
+                if len(pf) >= 4:
+                    peak_ref = pd.Series(pf["peak_IQE"].values,
+                                         index=pd.MultiIndex.from_arrays([pf["X"], pf["Y"]]))
+    if peak_ref is None:
+        peak_ref = next(
+            (
+                s["median_fit"]["peak_IQE"]
+                for s in summaries
+                if s.get("fit_ok")
+                and s.get("median_fit")
+                and np.isfinite(s["median_fit"].get("peak_IQE", np.nan))
+            ),
+            None,
+        )
     if peak_ref is not None:
         try:
             fs_peak = plot_fastscan_peak_iqe(
@@ -3164,7 +3417,9 @@ def analyse_run(run_dir, log):
             if fs_peak:
                 log(
                     f"  full-coverage peak-IQE proxy: {fs_peak['n']} pixels @ J≈{fs_peak['J']:.0f}, "
-                    f"median {fs_peak['median']:.0f}% (fast scan calibrated to sweep {100 * peak_ref:.0f}%)"
+                    f"median {fs_peak['median']:.0f}% (calibrated to "
+                    + (f"{len(peak_ref)} swept pixels' own fits)" if isinstance(peak_ref, pd.Series)
+                       else f"the joint fit, {100 * peak_ref:.0f}%)")
                 )
                 # General anomaly report on the full-coverage proxy: any-shape blobs (detect-all +
                 # confidence), driver rows/columns per quadrant, and per-quadrant gradients.

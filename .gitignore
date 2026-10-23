@@ -250,3 +250,4 @@ caprun/
 # outputs; the scripts next to them are not. Ignoring all of analysis/ (21 Oct) hid
 # every NEW script there from git.
 analysis/26*/
+runs_index.csv

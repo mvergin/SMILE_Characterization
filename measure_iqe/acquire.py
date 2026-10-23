@@ -1934,6 +1934,14 @@ def flush_pm_after_range(pm, smu, n_smu: int, n_pm: int, cfg: IQEConfig) -> None
         pass            # a throwaway read must never be what ends a 30 h run
 
 
+# A lit reading that draws no more than this times its own leakage reference did not
+# light the pixel: the frame write was dropped, as the bitval-0 write sometimes is
+# (section 19). A working pixel is >= ~1.9x even at -0.80 V, where the reference is at
+# most 52 % of the raw reading (report 33.1). 261016-2252, (489,181): 300 nA, about its
+# reference, and no light at -1.418 and -1.189 V; nothing caught it at the bench.
+LIT_FAIL_RATIO = 1.10
+
+
 def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
                   cfg: IQEConfig, t0: float, log: Logger,
                   restore: bool = True) -> tuple[dict, dict | None]:
@@ -1958,15 +1966,16 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
         rng, changed = set_pm_range(pm, pm_range_for(x, y, v, cfg), log=log)
         if changed:
             flush_pm_after_range(pm, smu, n_smu, n_pm, cfg)
-    raw_s = None
-    if cfg.perpoint_range:
-        # range from the ACTUAL current (probe-then-measure), not the coarse map
-        p, ps, iv, ivs, inv, invs, _, _ = acquire_autoranged(pm, smu, n_smu, n_pm, cfg)
-    elif cfg.save_raw_samples:
-        (p, ps, iv, ivs, inv, invs, _, _), raw_s = acquire_point(
-            pm, smu, n_smu, n_pm, return_raw=True)
-    else:
-        p, ps, iv, ivs, inv, invs, _, _ = acquire_point(pm, smu, n_smu, n_pm)
+    def read_lit():
+        if cfg.perpoint_range:
+            # range from the ACTUAL current (probe-then-measure), not the coarse map
+            return acquire_autoranged(pm, smu, n_smu, n_pm, cfg)[:6], None
+        if cfg.save_raw_samples:
+            pt, raw = acquire_point(pm, smu, n_smu, n_pm, return_raw=True)
+            return pt[:6], raw
+        return acquire_point(pm, smu, n_smu, n_pm)[:6], None
+
+    (p, ps, iv, ivs, inv, invs), raw_s = read_lit()
 
     # Leakage reference: the SAME pixel at bitval 0. Measured back to back with the lit
     # point so both carry the same relaxation history and the subtraction cancels most of
@@ -2013,6 +2022,21 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
             # else: the caller blanks the frame next, so lighting this pixel again and
             # waiting for it to settle would be two seconds spent on a state nothing
             # reads. In bias_major that is half the per-point cost, on every point.
+
+    if ref is not None and abs(inv) <= LIT_FAIL_RATIO * abs(ref[4]):
+        # The lit frame did not land: the pixel drew only its leakage. Write it again,
+        # give it the pixel-switch settle, and read once more. One retry -- a pixel that
+        # is dark twice is dead or dropping out, and the analysis gates remove it.
+        log(f"      ({x},{y}) at {v:+.3f} V: lit read {abs(inv) * 1e9:.0f} nA against a "
+            f"{abs(ref[4]) * 1e9:.0f} nA reference -- the lit frame did not land. "
+            f"Re-writing it.")
+        light(smile, x, y, bitval)
+        time.sleep(cfg.pixel_switch_settle_s * cfg.settle_scale)
+        (p, ps, iv, ivs, inv, invs), raw_s = read_lit()
+        if abs(inv) <= LIT_FAIL_RATIO * abs(ref[4]):
+            log(f"      ({x},{y}): still {abs(inv) * 1e9:.0f} nA after the re-write -- the "
+                f"pixel is dark here, not the frame. Point kept; the analysis drops it.")
+        frac = abs(ref[0] / p) if p else float("nan")   # the gate, against the new read
 
     vr = round(float(v), 4)
     # A pooled row's X,Y is its FIRST member, so the row still has a unique key and the

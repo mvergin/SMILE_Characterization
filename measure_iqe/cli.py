@@ -134,10 +134,12 @@ def build_config(args: argparse.Namespace, log=None) -> IQEConfig:
 
 
 ANALYZER = Path(__file__).resolve().parent.parent / "analysis" / "analyze_array.py"
+CAL_PLOTTER = ANALYZER.with_name("plot_calibration.py")
 
 
-def analyze_run_dir(run_dir: Path, log) -> int:
-    """Run analysis/analyze_array.py on a finished run, in its own process.
+def analyze_run_dir(run_dir: Path, log, script: Path = ANALYZER) -> int:
+    """Run an analysis script on a finished run, in its own process: analyze_array.py
+    after a sweep or fast scan, plot_calibration.py after --calibrate.
 
     A subprocess, not an import: an exception or a hang in the analysis cannot touch the
     measurement that just finished, and its output goes to ANALYSIS_LOG.txt beside the
@@ -147,19 +149,22 @@ def analyze_run_dir(run_dir: Path, log) -> int:
     import importlib.util
     import subprocess
 
-    if not ANALYZER.exists():
-        log(f"analysis skipped: {ANALYZER} not found (measurement-only install)")
+    if not script.exists():
+        log(f"analysis skipped: {script} not found (measurement-only install)")
         return -1
-    if importlib.util.find_spec("scipy") is None:
+    if script == ANALYZER and importlib.util.find_spec("scipy") is None:
         log("analysis skipped: scipy is not installed. Run `uv sync --extra analysis` once, "
             f'then: python analysis/analyze_array.py "{run_dir}"')
         return -1
-    log(f"analysing {run_dir.name} -- a full array takes 10-20 min; output in ANALYSIS_LOG.txt")
+    product = "REPORT.md" if script == ANALYZER else "calibration_traces.png"
+    log(f"analysing {run_dir.name} with {script.name}"
+        + (" -- a full array takes 10-20 min" if script == ANALYZER else "")
+        + "; output in ANALYSIS_LOG.txt")
     with open(run_dir / "ANALYSIS_LOG.txt", "w", encoding="utf-8") as f:
-        rc = subprocess.run([sys.executable, str(ANALYZER), str(run_dir)],
+        rc = subprocess.run([sys.executable, str(script), str(run_dir)],
                             stdout=f, stderr=subprocess.STDOUT).returncode
     log(f"analysis {'done' if rc == 0 else f'FAILED (exit {rc})'}: "
-        + (f"{run_dir / 'REPORT.md'}" if rc == 0 else f"see {run_dir / 'ANALYSIS_LOG.txt'}"))
+        + (f"{run_dir / product}" if rc == 0 else f"see {run_dir / 'ANALYSIS_LOG.txt'}"))
     return rc
 
 
@@ -287,10 +292,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"a different array. Run --calibrate --array {args.array} to fix that.")
     if args.calibrate:
         try:
-            run_calibration(cfg, simulate=args.simulate, log=log)
+            record = run_calibration(cfg, simulate=args.simulate, log=log)
         except KeyboardInterrupt:
             log("interrupted - hardware parked")
             return 130
+        if cfg.analyze_after and record:
+            analyze_run_dir(Path(record).parent, log, CAL_PLOTTER)
         return 0
     try:
         result = run_iqe_measurement(cfg, simulate=args.simulate,

@@ -35,7 +35,15 @@ def load_traces(run_dir: Path) -> dict[str, np.ndarray]:
     if not npz.exists():
         sys.exit(f"{npz} not found. Re-run with --trace-points > 0 (default 4000).")
     with np.load(npz) as d:
-        return {k: d[k] for k in d.files}
+        # Current traces only: (t, I_A, I_B), shape (3, N). Since 16 October the same
+        # file also holds P(t) as pm_* and V(t) as v_*, both (2, N), and unpacking those
+        # as three rows crashed on every switch and cap-step run from then on.
+        keep = {k: d[k] for k in d.files
+                if d[k].ndim == 2 and d[k].shape[0] == 3 and not k.startswith(("pm_", "v_"))}
+        other = len(d.files) - len(keep)
+    if other:
+        print(f"  ({other} P(t)/V(t) trace(s) in {npz.name} not plotted here)")
+    return keep
 
 
 def si(x, unit="A"):

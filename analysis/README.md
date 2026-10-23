@@ -91,6 +91,26 @@ then run this. It matches the two runs pixel by pixel and writes, into
 It reads only what each run contains, so an old run with no leakage reference is
 handled: its `I_LED` is the total cathode current, which is the point being made.
 
+### `index_runs.py` — one CSV row per run
+
+```bash
+python analysis/index_runs.py                 # results/, demo/, charatests/, caprun/, results_georg/
+python analysis/index_runs.py results -o my_index.csv
+```
+
+What each run is (sweep, fast scan, calibration, bench), how it was taken (order, dwell,
+High-C, reference, pooling, code), the alive count at every fast-scan bias, and the IQE
+numbers `analyze_array.py` left in the folder. Reads files only; ~40 s for 190 runs.
+
+### `plot_calibration.py` — a `--calibrate` record at a glance
+
+```bash
+python analysis/plot_calibration.py "<run>_CALIBRATION"
+```
+
+Every capture against its own final value, current and light, with each pixel's t_target
+and the recommended dwell. `measure_iqe --calibrate` runs it on its own record.
+
 ### `plot_transients.py` — settling curves and their spectra
 
 ```bash
