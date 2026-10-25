@@ -25,7 +25,9 @@ it. If a change breaks one side, the other side's test fails too.
 ├── RUN_PROVENANCE.json                         what produced this run
 ├── <P>calibration_applied.yaml                 the calibration, copied (if any)
 ├── FastScan/
-│   ├── <P>aggregated_bitval=<b>_mean_std.csv   one row per ROI pixel
+│   ├── <P>aggregated_bitval=<b>_mean_std.csv   one row per ROI pixel (one bias)
+│   ├── <P>aggregated_bitval=<b>_v=<V>_mean_std.csv  one file per bias, when the
+│   │                                           fast scan ran at several (2026-10-25+)
 │   └── raw_data/
 │       ├── <P>FastScan.csv                     long-format per-channel rows
 │       └── <P>FastScan_config.json             settings used
@@ -86,6 +88,13 @@ run root instead of `NVLEDSweep/`, and are not part of this contract.
   `*_config.json` for the sample name and ROI.
 * There may be several `aggregated_bitval=*.csv` files, one per bitval.
   Concatenate them; `BITVAL` distinguishes the rows.
+* A fast scan at several biases writes one file per bias, named `_v=<V>` (for
+  example `aggregated_bitval=15_v=-1.350_mean_std.csv`). Before 2026-10-25 all
+  biases went into one file, told apart by `NVLED_V`. Concatenate, then split on
+  `NVLED_V`, and both layouts read the same.
+* The sweep file holds each pixel's rows as one block, pixels in run order, since
+  2026-10-25. `bias_major` writes bias by bias while it runs and reorders the file
+  once when the sweep ends, so a run that died mid-sweep is still in bias order.
 * `NVLEDSweep/` may hold more than one sweep group directory. Readers should
   glob its children rather than hardcoding `Sweep`.
 * Every file is written incrementally and flushed per pixel. **A run directory

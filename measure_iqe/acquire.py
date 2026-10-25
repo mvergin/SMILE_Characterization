@@ -784,6 +784,35 @@ class BackgroundWriter:
                     f.close()
             except Exception:
                 pass
+        for f in self._agg_f.values():
+            try:
+                order_rows_by_pixel(f.name)
+            except Exception as e:      # the bias-ordered file is still a valid file
+                self._log(f"  could not reorder {Path(f.name).name} by pixel: {e}")
+
+
+def order_rows_by_pixel(path: str | Path) -> None:
+    """Rewrite an aggregated CSV so each pixel's rows sit together, pixels in run order.
+
+    bias_major writes one bias at a time, so the file comes out ordered by bias. It is
+    written that way on purpose -- every finished bias is on disk if the run dies --
+    and reordered here, once, at the end. The sort is stable: inside a pixel the rows
+    keep the order they were measured in. A pixel's place is where it FIRST appears,
+    which is the run order. Text in, text out, so no float is re-formatted.
+    """
+    path = Path(path)
+    lines = path.read_text().splitlines(keepends=True)
+    if len(lines) < 3:
+        return
+    rows = lines[1:]
+    rank: dict[tuple[str, str], int] = {}
+    key = lambda ln: tuple(ln.split(",", 2)[:2])
+    for ln in rows:
+        rank.setdefault(key(ln), len(rank))
+    rows.sort(key=lambda ln: rank[key(ln)])
+    tmp = path.with_name(path.name + ".part")
+    tmp.write_text(lines[0] + "".join(rows))
+    tmp.replace(path)
 
 
 # =====================================================================
@@ -1535,9 +1564,15 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
     # Every file a run writes carries <sample>_<stamp>_, so a CSV that is copied out of
     # its directory can still be traced back to the run that made it.
     pfx = run_slug(cfg.sample_name, run_dir) + "_"
-    write_aggregated_one(
-        run_dir / "FastScan" / f"{pfx}aggregated_bitval={cfg.fastscan_bitval}_mean_std.csv",
-        fs_rows)
+    # One aggregated file per bias. A single-bias scan keeps the name it always had;
+    # with several, each file says its bias, so no reader gets two rows per pixel
+    # from one file. raw_data/FastScan.csv stays one long-format file with NVLED_V.
+    for v_fs in volts:
+        tag = "" if len(volts) == 1 else f"_v={v_fs:+.3f}"
+        write_aggregated_one(
+            run_dir / "FastScan"
+            / f"{pfx}aggregated_bitval={cfg.fastscan_bitval}{tag}_mean_std.csv",
+            [r for r in fs_rows if r["NVLED_V"] == v_fs])
     raw = IncrementalRaw(run_dir / "FastScan" / "raw_data" / f"{pfx}FastScan.csv")
     raw.append(fs_rows); raw.close()
     if screen_rows:

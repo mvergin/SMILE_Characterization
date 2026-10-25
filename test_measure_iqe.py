@@ -267,6 +267,29 @@ def test_every_acquisition_mode_runs():
             assert result.run_dir.is_dir()
 
 
+def test_the_sweep_file_is_ordered_by_pixel_in_run_order():
+    """bias_major measures one bias across every pixel, but the file must group by pixel.
+
+    Each pixel's rows are one contiguous block, in the order they were measured, and
+    the pixels follow the order they were first visited."""
+    with tempfile.TemporaryDirectory() as tmp:
+        result = _run(tmp, sweep_order="bias_major")
+        rows = _agg_rows(result.run_dir)
+        keys = [(r["X"], r["Y"]) for r in rows]
+        blocks = [k for i, k in enumerate(keys) if i == 0 or k != keys[i - 1]]
+        assert len(blocks) == len(set(keys)) > 1, f"a pixel's rows are split: {blocks}"
+        for k in set(keys):
+            v = [float(r["NVLED_V"]) for r in rows if (r["X"], r["Y"]) == k]
+            assert v == sorted(v) or v == sorted(v, reverse=True), (k, v)
+
+    # the reorder itself: stable inside a pixel, pixels by first appearance
+    with tempfile.TemporaryDirectory() as tmp:
+        f = Path(tmp) / "a.csv"
+        f.write_text("X,Y,V\n1,1,a\n2,2,a\n1,1,b\n2,2,b\n3,3,b\n")
+        acquire.order_rows_by_pixel(f)
+        assert f.read_text() == "X,Y,V\n1,1,a\n1,1,b\n2,2,a\n2,2,b\n3,3,b\n"
+
+
 def test_leakage_reference_is_measured_and_written():
     """The bitval-0 reference is the low-J correction, not an optional extra."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -880,6 +903,15 @@ def test_the_fast_scan_measures_every_bias_and_judges_on_the_first():
             res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
             fs = _agg_rows(res.run_dir, "FastScan")
             picked[name] = {(r[0], r[1]) for r in _sweep_grid(res.run_dir)[0]}
+            # one aggregated file per bias, each holding only its own bias
+            files = sorted((Path(res.run_dir) / "FastScan").glob("*aggregated_bitval=*.csv"))
+            assert len(files) == len(cfg.fastscan_v_list()), [f.name for f in files]
+            for f in files:
+                with f.open() as fh:
+                    vs = {round(float(r["NVLED_V"]), 4) for r in csv.DictReader(fh)}
+                assert len(vs) == 1, (f.name, vs)
+                if len(files) > 1:
+                    assert f"_v={next(iter(vs)):+.3f}_" in f.name, (f.name, vs)
         want = cfg.fastscan_v_list()
         got = {round(float(r["NVLED_V"]), 4) for r in fs}
         assert got == {round(v, 4) for v in want},             f"{name}: fast scan wrote biases {sorted(got)}, expected {sorted(want)}"
