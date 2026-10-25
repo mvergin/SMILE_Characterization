@@ -763,7 +763,7 @@ class BackgroundWriter:
             for x, y, b, v, t, raw in samples:
                 for typ, arr in [("PM400", raw["pm"]), ("VLED", raw["vled"]), ("NVLED", raw["nvled"])]:
                     for k, val in enumerate(arr):
-                        self._samp_f.write(f"{x},{y},{b},{v},{t},{typ},{k},{val!r}\n")
+                        self._samp_f.write(f"{x},{y},{b},{v},{t},{typ},{k},{float('nan' if val is None else val)!r}\n")
             self._samp_f.flush()
         for r in prows:
             r = _with_quadrant(r)

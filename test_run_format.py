@@ -99,6 +99,9 @@ def _check_layout(run_dir: Path, label: str):
     samples = run_file(run_dir, "NVLEDSweep/Sweep/raw_data/Sweep_samples.csv")
     assert samples.exists() and _header(samples) == SAMPLE_COLS, \
         f"{label}: Sweep_samples.csv columns changed"
+    with open(samples, newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            float(r["VALUE"])    # a plain float: the sim once wrote "np.float64(...)"
 
     cfgs = list((sweep / "raw_data").glob("*_config.json"))
     assert cfgs, f"{label}: no *_config.json"

@@ -166,21 +166,20 @@
     "smu_display_off": false
   },
   "provenance": {
-    "commit": "e288b80bf0c576539a3c4a675999153007abc274",
-    "commit_short": "e288b80",
+    "commit": "6b9a0014a616cd4c69c9750a34d231babd9ab22a",
+    "commit_short": "6b9a001",
     "branch": "main",
-    "committed": "2026-10-25T13:20:48+01:00",
-    "describe": "v0.2-178-ge288b80-dirty",
+    "committed": "2026-10-25T13:35:40+01:00",
+    "describe": "v0.2-179-g6b9a001-dirty",
     "dirty": true,
     "changed": [
-      "measure_iqe/acquire.py",
       "test_run_format.py"
     ],
     "untracked": [
       "CLAUDE.md"
     ],
-    "diff_sha256": "e3651dc70c7b40e1",
-    "started": "2026-10-25T13:26:59+01:00",
+    "diff_sha256": "0b2da68bb1745aec",
+    "started": "2026-10-25T13:39:58+01:00",
     "host": "IHT-RE316",
     "python": "3.13.5",
     "platform": "Windows-11-10.0.26100-SP0"
