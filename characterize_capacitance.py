@@ -257,7 +257,8 @@ def sample_interval_s(nplc: float, channels: int = 2) -> float:
 def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
                  chunk=2000, log=None, limit_a=None, capacitance=45.7e-6,
                  max_presettle_s=60.0, cfg=None, charge_limit=None,
-                 switch_settle_s=0.5, trigger=None, channels=2):
+                 switch_settle_s=0.5, trigger=None, channels=2,
+                 pre_s=None, sync=None, on_fire=None):
     """Step ch B from v_from to v_to, then burst-capture I(t) with timestamps.
 
     `trigger` replaces the voltage step with any other perturbation -- `exp_switch`
@@ -267,6 +268,24 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
 
     Returns (t, i_a, i_b), t in seconds from the first sample. Instrument
     timestamps are used, not host time, so the spacing is the SMU's own.
+
+    ``pre_s=None`` (the default, and every capture before 2026-10-25) perturbs FIRST
+    and starts the burst after it, so the record begins after the event and holds no
+    baseline. With ``pre_s`` set, the burst starts first, ``pre_s`` of baseline is
+    recorded, and only then does the perturbation run, while the SMU is integrating.
+    ``sync`` (a dict) then receives the host-clock bracket of each event, relative to
+    the estimated first sample:
+
+        first_unc_s           half-width of the first-sample bracket: the burst was
+                              sent at -first_unc_s and its START print arrived at
+                              +first_unc_s, so the first sample lies in between
+        trigger_lo_s/_hi_s    the perturbation was sent at lo and acknowledged at hi
+                              (the FPGA ACKs every frame, so hi is the switch's ack)
+        host_t0               perf_counter() of the first-sample estimate, to put
+                              another host-clock record (the PM400) on this axis
+
+    ``on_fire`` runs just before the burst is sent, to start a host-clock record that
+    should include the baseline.
 
     The burst is issued in chunks. One ``measure_burst(20000)`` blocks the VISA
     read for the whole burst — about 8 s at NPLC 0.01 — which overruns the
@@ -312,6 +331,9 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
         log(f"      pre-settle {pre:.1f}s (charge-limited at {limit_a:g} A)")
     time.sleep(pre)                            # start from a known, settled state
     smu.clear_buffers_only()
+    if pre_s is not None:
+        return _capture_with_baseline(smu, v_to, n_samples, nplc, chunk, log, trigger,
+                                      channels, pre_s, sync, on_fire)
     if trigger is not None:
         trigger()                              # e.g. blank the frame and light a pixel
     else:
@@ -368,6 +390,94 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
             np.asarray(ia[:n], float), np.asarray(ib[:n], float))
 
 
+def _capture_with_baseline(smu, v_to, n_samples, nplc, chunk, log, trigger, channels,
+                           pre_s, sync, on_fire):
+    """capture_step's ``pre_s`` path: burst first, then the perturbation inside it.
+
+    Only for a perturbation OUTSIDE the SMU. TSP runs one script at a time, so a
+    source-level write sent while the burst loop runs waits for the loop to end -- a
+    voltage step cannot be put inside a running burst from the host. A frame change
+    goes to the FPGA, which is not blocked.
+    """
+    if trigger is None:
+        raise ValueError("pre_s needs an external trigger: the SMU cannot step its own "
+                         "source while a burst script runs")
+    sync = {} if sync is None else sync
+    n_samples = int(n_samples)
+    per_sample_s = sample_interval_s(nplc, channels)
+    # The first chunk must outlast the baseline and the trigger, or the event falls in
+    # the gap before the next chunk. One second of margin covers the frame write.
+    k1 = min(n_samples, max(int(chunk), int(math.ceil((pre_s + 1.0) / per_sample_s))))
+    real = hasattr(smu, "inst")
+    if on_fire is not None:
+        on_fire()
+    t_sent = time.perf_counter()
+    if real:
+        old_timeout = smu.inst.timeout
+        smu.inst.timeout = max(10_000, int(max(k1, int(chunk)) * per_sample_s * 4_000))
+        t_ack = smu.measure_burst_fire_marked(k1, channels)
+    else:                                       # sim rig: the burst fills at once
+        smu.measure_burst_fire(n_samples)
+        t_ack = time.perf_counter()
+    time.sleep(max(0.0, pre_s))
+    t_trig = time.perf_counter()
+    trigger()
+    t_trig_done = time.perf_counter()
+    host_t0 = 0.5 * (t_sent + t_ack)
+    sync.update(first_unc_s=0.5 * (t_ack - t_sent), host_t0=host_t0,
+                trigger_lo_s=t_trig - host_t0, trigger_hi_s=t_trig_done - host_t0,
+                start_ack_late=False)
+    if real and t_ack - t_sent > 0.5 * k1 * per_sample_s:
+        # START came back with the end of the chunk, not its beginning: the host could
+        # not tell when the burst began, so the event times are not known on this axis.
+        sync["start_ack_late"] = True
+        if log:
+            log(f"      !! START took {t_ack - t_sent:.2f}s against a "
+                f"{k1 * per_sample_s:.2f}s chunk: the instrument buffered it, so the "
+                f"switch cannot be placed on the trace. Event times are recorded but "
+                f"not trustworthy.")
+    if not real:
+        smu.measure_burst_join()
+        ia, ib = smu.read_buffers(n_samples)
+        n = min(len(ia), len(ib))
+        t = np.linspace(0.0, max(time.perf_counter() - host_t0, pre_s), n)
+        return t, np.asarray(ia[:n], float), np.asarray(ib[:n], float)
+    done = 0
+    try:
+        smu.measure_burst_join()
+        done = k1
+        while done < n_samples:
+            k = min(int(chunk), n_samples - done)
+            if channels == 1:
+                smu.measure_burst_i_b(k)
+            else:
+                smu.measure_burst(k)
+            done += k
+    except Exception as exc:
+        try:
+            smu.inst.clear()
+        except Exception:
+            pass
+        if log:
+            log(f"      burst stopped after {done}/{n_samples} samples: "
+                f"{type(exc).__name__} — keeping what was captured")
+    finally:
+        smu.inst.timeout = max(old_timeout, 30_000)
+        try:
+            if channels == 1:
+                ta, ib = smu.read_buffer_b()
+                ia = [float("nan")] * len(ib)
+            else:
+                ia, ib, ta, _tb = smu.read_buffer_with_timestamps()
+        finally:
+            smu.inst.timeout = old_timeout
+    if not ib:
+        return np.array([]), np.array([]), np.array([])
+    n = min(len(ia), len(ib), len(ta))
+    return (np.asarray(ta[:n], float) - ta[0],
+            np.asarray(ia[:n], float), np.asarray(ib[:n], float))
+
+
 class PowerTrace:
     """``P(t)`` on a background thread, started at the perturbation instant.
 
@@ -391,6 +501,7 @@ class PowerTrace:
         self._prev_avg = None
         self._stop = threading.Event()
         self._th = None
+        self.t0 = None
 
     def start(self):
         # Drop the meter's internal averaging for the trace. pm_averaging=3 is three
@@ -404,7 +515,8 @@ class PowerTrace:
                 self.pm.set_averaging(int(self.averaging))
             except Exception:
                 self._prev_avg = None
-        t0 = time.perf_counter()
+        # kept, so a caller can move the record onto another host-clock axis
+        self.t0 = t0 = time.perf_counter()
 
         def run():
             while not self._stop.is_set():
@@ -1394,8 +1506,14 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
     Procedure, per bias:
 
       1. light the `--switch-from` pixel and hold the bias until the node is settled
-      2. blank the frame and light the target pixel -- the burst starts here
-      3. compare the first second against the spread of every later second
+      2. start the burst, record `--switch-pre-s` of baseline, then blank the frame
+         and light the target pixel while the SMU integrates. Host times bracket the
+         burst start and the frame write, so switch.csv places the switch on the
+         trace (sync_switch_sent_s .. sync_switch_ack_s). Before 2026-10-25 the
+         switch came FIRST and the burst started after it, so no record before then
+         contains the switch itself.
+      3. compare the first second after the switch's ack against the spread of every
+         later second
 
     Run it WITH --highc. Without it the per-sample noise is ~20 nA against a 480 nA
     reading, which cannot resolve the faint end below about 1 %; with it the noise is
@@ -1474,18 +1592,21 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
 
         # The optical channel, if asked for. §19's Q4 could not answer "does the light
         # follow the current through a frame change" because only the dwell had P(t).
-        # Starting the poller from inside the trigger puts both records' t = 0 on the
-        # same event.
+        # With a baseline it starts just before the burst and is moved onto the SMU's
+        # axis afterwards. Without one (legacy) it starts inside the trigger, so both
+        # records' t = 0 is the frame change.
         ptrace = PowerTrace(pm, args.switch_n_pm) if args.switch_n_pm else None
+        pre_s = args.switch_pre_s if args.switch_pre_s >= 0 else None
 
         def _switch(_x=x, _y=y, _b=to_bv):
             smile.blank_frame()
             smile.set_pixel(_x, _y, _b)
-            if ptrace is not None:
+            if ptrace is not None and pre_s is None:
                 ptrace.start()
 
         # v_from == v_to: the bias never moves, so the pre-settle is the only wait and
         # the trigger is the frame change.
+        sync = {}
         t, ia, ib = capture_step(smu, v, v, args.samples, args.nplc,
                                  settle_first_s=args.switch_hold_s,
                                  chunk=args.chunk, log=log,
@@ -1495,18 +1616,29 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
                                                      args.switch_hold_s),
                                  cfg=cfg, charge_limit=args.charge_limit,
                                  switch_settle_s=args.switch_settle_s,
-                                 trigger=_switch)
-        met = settling_metrics(t, np.abs(ib))
+                                 trigger=_switch, pre_s=pre_s, sync=sync,
+                                 on_fire=(ptrace.start if ptrace is not None
+                                          and pre_s is not None else None))
+        # Every metric below asks what happens AFTER the switch, so it reads the record
+        # from the switch's ack on, with t = 0 there. The baseline before it is kept in
+        # the trace for the plot.
+        t_sw = sync.get("trigger_hi_s", 0.0) if not sync.get("start_ack_late") else 0.0
+        post = t >= t_sw
+        t_post, ib_post = t[post] - t_sw, ib[post]
+        met = settling_metrics(t_post, np.abs(ib_post))
         tag = (f"switch_hc{int(cfg.highc_b)}_v{v:+.3f}"
                f"_{fx}-{fy}to{x}-{y}_b{to_bv}")
         spec = keep_trace(tag, t, ia, ib, args.trace_points)
         p_t = p_p = np.array([])
         if ptrace is not None:
             p_t, p_p = ptrace.stop()
+            if pre_s is not None and ptrace.t0 is not None and "host_t0" in sync:
+                p_t = p_t + (ptrace.t0 - sync["host_t0"])     # onto the SMU's axis
             keep_power_trace(tag, p_t, p_p)
             if p_t.size > 2 and log:
-                log(f"      P(t): {p_t.size} samples over {p_t[-1]:.1f}s "
-                    f"({p_t.size / max(p_t[-1], 1e-9):.1f} Hz vs the SMU's "
+                span = p_t[-1] - p_t[0]
+                log(f"      P(t): {p_t.size} samples over {span:.1f}s "
+                    f"({p_t.size / max(span, 1e-9):.1f} Hz vs the SMU's "
                     f"{t.size / max(t[-1], 1e-9) if t.size else 0:.1f} Hz)")
         nan = float("nan")
         p_lit, p_std = read_power(pm, args.step_n_pm) if args.step_n_pm else (nan, nan)
@@ -1519,7 +1651,7 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
         # the FIRST second against the spread of every later second. That spread
         # already contains the correlated low-frequency noise an N**-0.5 estimate
         # throws away, so it is the error bar this question has to clear.
-        first, later, res = switch_deviation(t, ib)
+        first, later, res = switch_deviation(t_post, ib_post)
         dev = 100.0 * (first / later - 1.0) if later else nan
         res_pct = 100.0 * res / later if later else nan
         sigma = (first - later) / res if res else nan
@@ -1530,6 +1662,16 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
                          power_std=p_std, first_s_a=first, later_s_a=later,
                          switch_dev_pct=dev, resolution_pct=res_pct,
                          switch_sigma=sigma,
+                         from_quadrant=_quadrant_of(fx, fy), to_quadrant=_quadrant_of(x, y),
+                         # Where the switch sits on the stored trace, in its own
+                         # seconds-from-first-sample. NaN for a legacy capture
+                         # (--switch-pre-s < 0), which starts after the switch.
+                         trace_tag=tag, pre_s=nan if pre_s is None else pre_s,
+                         sync_first_unc_s=sync.get("first_unc_s", nan),
+                         sync_switch_sent_s=sync.get("trigger_lo_s", nan),
+                         sync_switch_ack_s=sync.get("trigger_hi_s", nan),
+                         sync_start_ack_late=sync.get("start_ack_late", nan),
+                         pm_on_trace_axis=int(ptrace is not None and pre_s is not None),
                          **{f"spec_{k}": val for k, val in spec.items()}))
 
         if not np.isfinite(sigma):
@@ -2203,6 +2345,13 @@ def build_parser():
                          "1%% at -0.80 V: hold less and the capture times the BIAS "
                          "settling, which is the thing being controlled for. At 300 s "
                          "the residual bias drift is ~0.1%% over a 20 s record.")
+    ap.add_argument("--switch-pre-s", type=float, default=0.5,
+                    help="switch: seconds of baseline recorded BEFORE the frame change. "
+                         "The burst starts first and the switch is sent while it runs, "
+                         "so the trace shows before and after, and switch.csv records "
+                         "when the switch was sent and acknowledged on the trace's own "
+                         "time axis. Negative restores the pre-2026-10-25 order, where "
+                         "the switch came first and the record started after it.")
     ap.add_argument("--switch-n-pm", type=int, default=0,
                     help="switch: PM reads per optical sample, ON A BACKGROUND THREAD, "
                          "starting at the frame change. 0 (default) records current "

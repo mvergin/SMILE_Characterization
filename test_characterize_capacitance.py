@@ -521,6 +521,84 @@ def test_a_worthless_row_says_so_instead_of_printing_plausible_numbers():
                                 t_1pct_tol=float("nan")), "fast", True, None) == []
 
 
+def test_the_switch_happens_inside_the_burst_and_is_placed_on_it():
+    """The burst must be RUNNING when the frame changes, with a baseline before it.
+
+    Until 2026-10-25 capture_step ran the trigger first and only then started the
+    burst, so no switch record contained the switch. This drives the real-hardware
+    path with a fake SMU that logs the order of calls and runs on a fake clock.
+    """
+    import time as _time
+    from characterize_capacitance import _capture_with_baseline
+
+    calls = []
+
+    class _Inst:
+        timeout = 10_000
+
+        def clear(self):
+            calls.append("clear")
+
+    class _SMU:
+        inst = _Inst()
+
+        def measure_burst_fire_marked(self, n, channels=2):
+            calls.append(("fire", n))
+            _time.sleep(0.002)                      # START comes back ~2 ms later
+            return _time.perf_counter()
+
+        def measure_burst_join(self):
+            calls.append("join")
+
+        def measure_burst(self, n):
+            calls.append(("burst", n))
+
+        def read_buffer_with_timestamps(self):
+            n = 3000
+            ts = [i * 1060e-6 for i in range(n)]
+            return [1e-4] * n, [5e-7] * n, ts, ts
+
+    sync = {}
+    t, ia, ib = _capture_with_baseline(
+        _SMU(), -0.8, 3000, 0.01, 2000, None, lambda: calls.append("switch"), 2,
+        0.05, sync, None)
+    order = [c if isinstance(c, str) else c[0] for c in calls]
+    assert order.index("fire") < order.index("switch") < order.index("join"), order
+    # the first chunk covers baseline + 1 s, so the switch cannot fall between chunks
+    assert calls[0][1] * 1060e-6 >= 0.05 + 1.0, calls[0]
+    assert sum(c[1] for c in calls if isinstance(c, tuple)) == 3000, "sample count"
+    # the switch sits after the baseline on the trace's own axis, sent before acked
+    assert 0.05 <= sync["trigger_lo_s"] <= sync["trigger_hi_s"] < 0.5, sync
+    assert 0 < sync["first_unc_s"] < 0.05 and not sync["start_ack_late"], sync
+    assert t[0] == 0.0 and len(t) == len(ib) == 3000
+
+    # an SMU-side step cannot be put inside a running TSP script: refuse, not fake it
+    try:
+        _capture_with_baseline(_SMU(), -0.8, 10, 0.01, 2000, None, None, 2, 0.1, {}, None)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("pre_s without an external trigger must be refused")
+
+
+def test_a_simulated_switch_run_records_where_the_switch_is():
+    """exp_switch end to end on the sim rig: the CSV row carries the sync columns."""
+    import measure_iqe as m
+    from characterize_capacitance import build_parser, exp_switch
+
+    cfg = m.IQEConfig()
+    pm, smu, sim = m.connect(cfg, lambda _s: None, simulate=True)
+    args = build_parser().parse_args(
+        ["--what", "switch", "--pixels", "300,40", "--switch-from", "10", "20",
+         "--voltages", "-1.2", "--switch-hold-s", "0", "--max-presettle-s", "0",
+         "--samples", "200", "--switch-pre-s", "0.05", "--switch-n-pm", "1"])
+    rows = exp_switch(pm, smu, _FakeSmile(sim), (300, 40), cfg, args, lambda _s: None)
+    r = rows[0]
+    assert (r["from_quadrant"], r["to_quadrant"]) == ("TL", "TR"), r
+    assert 0.05 <= r["sync_switch_sent_s"] <= r["sync_switch_ack_s"], r
+    assert r["pm_on_trace_axis"] == 1 and r["trace_tag"].startswith("switch_"), r
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

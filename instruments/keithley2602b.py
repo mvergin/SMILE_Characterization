@@ -254,6 +254,24 @@ class Keithley2602B:
             f"end print('DONE')"
         )
 
+    def measure_burst_fire_marked(self, n, channels=2):
+        """Start a burst without waiting for it, and return once it has STARTED.
+
+        The script prints START before its first reading, so the host time this
+        returns is an upper bound on the first sample, and the time before the call is
+        a lower bound. The caller may act while the burst runs, then reads DONE with
+        measure_burst_join(). Returns ``time.perf_counter()`` taken after START arrived.
+        """
+        body = ("smua.measure.i(smua.nvbuffer1) smub.measure.i(smub.nvbuffer1)"
+                if channels == 2 else "smub.measure.i(smub.nvbuffer1)")
+        self.inst.write(f"print('START') for i=1,{n} do {body} end print('DONE')")
+        resp = self.inst.read().strip()
+        t = time.perf_counter()
+        if resp != "START":
+            self.inst.clear()
+            raise RuntimeError(f"TSP burst start error: expected 'START', got '{resp[:40]}'")
+        return t
+
     def measure_burst_join(self):
         resp = self.inst.read().strip()
         if resp != "DONE":

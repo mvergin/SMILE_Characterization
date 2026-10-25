@@ -8,6 +8,9 @@ Reads `traces.npz` plus the summary CSVs that `characterize_capacitance.py` writ
     transients.png    I(t) after each voltage step, log time axis, with the settled
                       value and the 1% band marked
     spectra.png       amplitude spectrum of each trace, mains line marked
+    switch_sync/<tag>.png
+                      one per switch capture with a baseline: I(t) and P(t) across
+                      the frame change, the switch's sent-to-ack window shaded
 
 The spectra exist to answer one specific question: **is a sine riding on the
 transient?** At NPLC 0.01 the SMU integrates 1/100 of a mains cycle, so it has no
@@ -300,6 +303,80 @@ def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
         plt.close(f_)
 
 
+def plot_switch_sync(run_dir: Path) -> None:
+    """One figure per switch capture: I(t) and P(t) across the frame change.
+
+    Only for captures with a baseline (switch.csv has ``sync_switch_ack_s``, written
+    since 2026-10-25). The orange band runs from the host sending the frame to the
+    FPGA's ack: the switch happened somewhere inside it. The grey band at t = 0 is the
+    uncertainty of the first sample's host time, which every other time on the axis
+    inherits. P(t) is on the right axis when it was recorded on the same axis.
+    """
+    import csv
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path = run_dir / "switch.csv"
+    npz = run_dir / "traces.npz"
+    if not (path.exists() and npz.exists()):
+        return
+    rows = [r for r in csv.DictReader(path.open())
+            if np.isfinite(float(r.get("sync_switch_ack_s") or "nan"))]
+    if not rows:
+        return
+    out_dir = run_dir / "switch_sync"
+    out_dir.mkdir(exist_ok=True)
+    with np.load(npz) as d:
+        keys = list(d.files)
+        used: set[str] = set()
+        for r in rows:
+            tag = r["trace_tag"]
+            cur = next((k for k in keys if k not in used and not k.startswith(("pm_", "v_"))
+                        and f"_{tag}_" in k), None)
+            if cur is None:
+                continue
+            used.add(cur)
+            pmk = next((k for k in keys if k not in used and k.startswith("pm_")
+                        and k.endswith(f"_{tag}")), None)
+            if pmk is not None:
+                used.add(pmk)
+            t, _ia, ib = d[cur]
+            t, ib = clean(t, np.abs(ib))
+            lo, hi = float(r["sync_switch_sent_s"]), float(r["sync_switch_ack_s"])
+            unc = float(r["sync_first_unc_s"])
+            fig, ax = plt.subplots(figsize=(10.0, 4.8))
+            ax.plot(t, ib * 1e9, lw=0.8, color="tab:blue")
+            ax.set_ylabel("|I_B| (nA)", color="tab:blue")
+            ax.tick_params(axis="y", colors="tab:blue")
+            ax.axvspan(lo, hi, color="tab:orange", alpha=0.35,
+                       label=f"switch sent -> acked ({(hi - lo) * 1e3:.1f} ms)")
+            ax.axvspan(-unc, unc, color="0.5", alpha=0.25,
+                       label=f"first-sample time ±{unc * 1e3:.1f} ms")
+            if pmk is not None and r.get("pm_on_trace_axis") == "1":
+                tp, pp = d[pmk]
+                ax2 = ax.twinx()
+                ax2.plot(tp, pp * 1e9, lw=0.8, color="tab:red")
+                ax2.set_ylabel("P (nW)", color="tab:red")
+                ax2.tick_params(axis="y", colors="tab:red")
+            ax.set_xlabel("time from the first SMU sample (s)")
+            ax.grid(alpha=0.3)
+            ax.legend(fontsize=8, loc="best")
+            late = " -- START ack late, switch position NOT trustworthy" \
+                if r.get("sync_start_ack_late") == "True" else ""
+            ax.set_title(
+                f"switch ({r['from_x']},{r['from_y']}) {r.get('from_quadrant', '')} -> "
+                f"({r['to_x']},{r['to_y']}) {r.get('to_quadrant', '')}, bitval "
+                f"{r['to_bitval']}, {float(r['v']):+.3f} V, hold {float(r['hold_s']):g} s, "
+                f"baseline {float(r['pre_s']):g} s{late}\n{run_settings(run_dir)}",
+                fontsize=9)
+            fig.tight_layout()
+            out = out_dir / f"{tag}.png"
+            fig.savefig(out, dpi=200)
+            plt.close(fig)
+            print(f"wrote {out}")
+
+
 def plot_isrc(run_dir: Path) -> None:
     """V(t) and I(t) with channel B held as a CURRENT source, from isrc.csv.
 
@@ -409,6 +486,7 @@ def main():
     if not run_dir.is_dir():
         sys.exit(f"{run_dir} is not a directory")
     plot_isrc(run_dir)                       # no-op unless the run has an isrc.csv
+    plot_switch_sync(run_dir)                # no-op unless switch.csv has sync columns
     if (run_dir / "traces.npz").exists():
         traces = load_traces(run_dir)
         summarise(traces, args.mains_hz)
