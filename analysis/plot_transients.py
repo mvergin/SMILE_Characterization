@@ -11,6 +11,9 @@ Reads `traces.npz` plus the summary CSVs that `characterize_capacitance.py` writ
     switch_sync/<tag>.png
                       one per switch capture with a baseline: I(t) and P(t) across
                       the frame change, the switch's sent-to-ack window shaded
+    switchmatrix/<tag>.png
+                      one per switch-matrix capture (pixel pair x bias): I(t) and
+                      P(t), every frame write shaded and labelled
 
 The spectra exist to answer one specific question: **is a sine riding on the
 transient?** At NPLC 0.01 the SMU integrates 1/100 of a mains cycle, so it has no
@@ -42,7 +45,8 @@ def load_traces(run_dir: Path) -> dict[str, np.ndarray]:
         # file also holds P(t) as pm_* and V(t) as v_*, both (2, N), and unpacking those
         # as three rows crashed on every switch and cap-step run from then on.
         keep = {k: d[k] for k in d.files
-                if d[k].ndim == 2 and d[k].shape[0] == 3 and not k.startswith(("pm_", "v_"))}
+                if d[k].ndim == 2 and d[k].shape[0] == 3 and not k.startswith(("pm_", "v_"))
+                and "_swm_" not in k}
         other = len(d.files) - len(keep)
     if other:
         print(f"  ({other} P(t)/V(t) trace(s) in {npz.name} not plotted here)")
@@ -377,6 +381,92 @@ def plot_switch_sync(run_dir: Path) -> None:
             print(f"wrote {out}")
 
 
+SWM_COLORS = {"A->B": "tab:orange", "B->A": "tab:green", "B off": "0.45",
+              "B on": "tab:purple"}
+
+
+def _autoscale(y, unit):
+    """(scale, label) so the axis reads 12.3 uA rather than 1.23e-05 A."""
+    peak = float(np.nanmax(np.abs(y))) if y.size else 0.0
+    for scale, p in ((1, ""), (1e-3, "m"), (1e-6, "u"), (1e-9, "n"), (1e-12, "p")):
+        if peak >= scale:
+            return scale, f"{p}{unit}"
+    return 1e-12, f"p{unit}"
+
+
+def plot_switchmatrix(run_dir: Path) -> None:
+    """One figure per switch-matrix capture: I(t) left, P(t) right, every write shaded.
+
+    Reads switchmatrix.csv (one row per capture), switchmatrix_events.csv (one row per
+    frame write, sent and acknowledged on the capture's own time axis) and traces.npz.
+    Each band runs from the host sending a write to the FPGA acknowledging it, so the
+    switch happened somewhere inside it. Written to switchmatrix/<tag>.png.
+    """
+    import csv
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path, npz = run_dir / "switchmatrix.csv", run_dir / "traces.npz"
+    if not (path.exists() and npz.exists()):
+        return
+    rows = list(csv.DictReader(path.open()))
+    ev_path = run_dir / "switchmatrix_events.csv"
+    events = list(csv.DictReader(ev_path.open())) if ev_path.exists() else []
+    out_dir = run_dir / "switchmatrix"
+    out_dir.mkdir(exist_ok=True)
+    with np.load(npz) as d:
+        keys = list(d.files)
+        for r in rows:
+            tag = r["trace_tag"]
+            cur = next((k for k in keys if not k.startswith(("pm_", "v_"))
+                        and f"_{tag}_" in k), None)
+            if cur is None:
+                continue
+            t, _ia, ib = d[cur]
+            t, ib = clean(t, np.abs(ib))
+            fig, ax = plt.subplots(figsize=(11.0, 5.0))
+            si_, ui = _autoscale(ib, "A")
+            ax.plot(t, ib / si_, lw=0.7, color="tab:blue")
+            ax.set_ylabel(f"|I_B| ({ui})", color="tab:blue")
+            ax.tick_params(axis="y", colors="tab:blue")
+            pmk = next((k for k in keys if k.startswith("pm_") and k.endswith(f"_{tag}")),
+                       None)
+            if pmk is not None and r.get("pm_on_trace_axis") == "1":
+                tp, pp = d[pmk]
+                sp, up = _autoscale(pp, "W")
+                ax2 = ax.twinx()
+                ax2.plot(tp, pp / sp, lw=0.7, color="tab:red")
+                ax2.set_ylabel(f"P ({up})", color="tab:red")
+                ax2.tick_params(axis="y", colors="tab:red")
+            seen = set()
+            for e in (e for e in events if e["trace_tag"] == tag):
+                lo, hi = float(e["sent_s"]), float(e["ack_s"])
+                lab = e["label"]
+                ax.axvspan(lo, max(hi, lo + 1e-3), color=SWM_COLORS.get(lab, "0.6"),
+                           alpha=0.45, label=None if lab in seen else lab)
+                seen.add(lab)
+            ax.set_xlabel("time from the first SMU sample (s)")
+            ax.grid(alpha=0.3)
+            ax.legend(fontsize=8, loc="upper right", title="write sent -> acked")
+            late = ("   START ack late: write positions NOT trustworthy"
+                    if r.get("sync_start_ack_late") == "True" else "")
+            ax.set_title(
+                f"{r['kind']}-quadrant switch, {float(r['v']):+.3f} V:  A = "
+                f"{r['a_slot']} ({r['a_x']},{r['a_y']}) {r['a_quadrant']}   B = "
+                f"{r['b_slot']} ({r['b_x']},{r['b_y']}) {r['b_quadrant']}\n"
+                f"range {si(float(r['range_a']))}, High-C {'on' if r['highc'] == '1' else 'off'}, "
+                f"NPLC {float(r['nplc']):g}, {r['n']} readings @ "
+                f"{float(r['interval_us']):.0f} us, hold {float(r['hold_s']):g} s, "
+                f"gap {float(r['gap_s']) * 1e3:.0f} ms, PM averaging 1{late}",
+                fontsize=9)
+            fig.tight_layout()
+            out = out_dir / f"{tag}.png"
+            fig.savefig(out, dpi=200)
+            plt.close(fig)
+            print(f"wrote {out}")
+
+
 def plot_isrc(run_dir: Path) -> None:
     """V(t) and I(t) with channel B held as a CURRENT source, from isrc.csv.
 
@@ -487,10 +577,12 @@ def main():
         sys.exit(f"{run_dir} is not a directory")
     plot_isrc(run_dir)                       # no-op unless the run has an isrc.csv
     plot_switch_sync(run_dir)                # no-op unless switch.csv has sync columns
+    plot_switchmatrix(run_dir)               # no-op unless the run has switchmatrix.csv
     if (run_dir / "traces.npz").exists():
         traces = load_traces(run_dir)
-        summarise(traces, args.mains_hz)
-        plot(run_dir, traces, args.mains_hz)
+        if traces:                           # a switch-matrix run has only its own plots
+            summarise(traces, args.mains_hz)
+            plot(run_dir, traces, args.mains_hz)
     elif not (run_dir / "isrc.csv").exists():
         sys.exit(f"{run_dir} has neither traces.npz nor isrc.csv. For traces, re-run "
                  "the measurement with --trace-points > 0 (default 4000).")

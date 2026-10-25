@@ -1735,6 +1735,152 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
     return rows
 
 
+# Pixel slots for the switch matrix: two per quadrant, in QUADRANTS order.
+SWM_PAIRS_SAME = ((1, 2), (3, 4), (5, 6), (7, 8))     # inside TL, TR, BL, BR
+SWM_PAIRS_CROSS = ((1, 3), (1, 5), (1, 7))            # p1 (TL) against each other quadrant
+
+
+def swm_sequence(a, b, bitval, cycles):
+    """The frame writes of one switch-matrix capture, after the baseline.
+
+    A is lit through the hold. Then: switch to B, ``cycles`` x (A, B), then B off
+    (bitval 0, still addressed) and B on again. Each entry is (label, (x, y), bitval).
+    """
+    seq = [("A->B", b, bitval)]
+    for _ in range(cycles):
+        seq += [("B->A", a, bitval), ("A->B", b, bitval)]
+    seq += [("B off", b, 0), ("B on", b, bitval)]
+    return seq
+
+
+def exp_switchmatrix(pm, smu, smile, cfg, args, log):
+    """Pixel switches inside and across quadrants, with every switch on the trace.
+
+    Finds two alive pixels per quadrant in a ``--swm-window`` window at each quadrant
+    centre: p1, p2 in TL, p3, p4 in TR, p5, p6 in BL, p7, p8 in BR. Then, per bias in
+    ``--swm-voltages`` and per pair (p1-p2, p3-p4, p5-p6, p7-p8, then p1-p3, p1-p5,
+    p1-p7):
+
+      1. probe both pixels' current and pick the smallest range >= 1.5x the larger
+         (in High-C the limit is the range, so it is the limit too)
+      2. light A and hold ``--swm-hold-s``, re-writing A every --switch-refresh-s so
+         the FPGA link never sleeps
+      3. arm the trigger model (ch B, ``--swm-nplc``, ``--swm-samples``), start the
+         PM400 trace at averaging 1, start the record, wait ``--swm-pre-s``
+      4. run swm_sequence, waiting ``--swm-gap-s`` after every acknowledged write
+      5. wait for the buffer, save I(t), P(t) on the same axis, and every write's
+         sent/ack time on that axis (switchmatrix_events.csv)
+    """
+    sub = argparse.Namespace(**{**vars(args), "pixels": None, "per_quadrant": 2,
+                                "quadrant_window": args.swm_window,
+                                "quadrants": list(QUADRANTS)})
+    found = select_pixels(pm, smu, smile, cfg, sub, log)
+    slots = {}
+    for qi, quad in enumerate(QUADRANTS):
+        mine = [(p["X"], p["Y"]) for p in found if p["quadrant"] == quad][:2]
+        for j, xy in enumerate(mine):
+            slots[2 * qi + j + 1] = xy
+    log("  switch matrix pixels: " + ", ".join(
+        f"p{k}={slots[k]} {_quadrant_of(*slots[k])}" for k in sorted(slots)))
+    pairs = [pq for pq in (*SWM_PAIRS_SAME, *SWM_PAIRS_CROSS)
+             if pq[0] in slots and pq[1] in slots]
+    missing = [pq for pq in (*SWM_PAIRS_SAME, *SWM_PAIRS_CROSS) if pq not in pairs]
+    if missing:
+        log("  !! skipping pairs without two alive pixels: "
+            + ", ".join(f"p{a}-p{b}" for a, b in missing))
+    bv = cfg.bitvals[0]
+    rows, events = [], []
+    nan = float("nan")
+    for v in args.swm_voltages:
+        for ka, kb in pairs:
+            a, b = slots[ka], slots[kb]
+            kind = "same" if _quadrant_of(*a) == _quadrant_of(*b) else "cross"
+            # 1. probe both, at a limit wide enough not to clamp either
+            probe = dataclasses.replace(cfg, highc_b=False, nvled_compliance=1e-2,
+                                        nvled_range_i=None)
+            m.configure_voltage_source_b(smu, probe, log)
+            smu.set_voltage("b", float(v))
+            cur = {}
+            for k, xy in (("B", b), ("A", a)):
+                smile.set_pixel(*xy, bv)
+                time.sleep(0.3)
+                cur[k] = abs(m.acquire_point(pm, smu, 10, 1)[4])
+            need = 1.5 * max(cur.values())
+            rng = next((r for r in m.SMU_I_RANGES if r >= need), m.SMU_I_RANGES[-1])
+            scfg = dataclasses.replace(cfg, nvled_compliance=rng, nvled_range_i=None)
+            m.configure_voltage_source_b(smu, scfg, log)
+            tag = f"swm_v{v:+.3f}_p{ka}-{a[0]}-{a[1]}_p{kb}-{b[0]}-{b[1]}"
+            log(f"    {v:+.3f} V  p{ka}{a} {_quadrant_of(*a)} <-> p{kb}{b} "
+                f"{_quadrant_of(*b)}: I_A {cur['A'] * 1e6:.2f} uA, I_B "
+                f"{cur['B'] * 1e6:.2f} uA -> range {rng:g} A")
+            ptrace = (PowerTrace(pm, args.swm_n_pm, averaging=1)
+                      if args.swm_n_pm else None)
+            seq = swm_sequence(a, b, bv, args.swm_cycles)
+            sent = []
+            refresh = {}
+
+            def _relight(_a=a):
+                smile.set_pixel(*_a, bv)
+
+            def _relight_then_record(_relight=_relight, _ptrace=ptrace, _r=refresh):
+                t = time.perf_counter()
+                _relight()
+                _r["ms"] = 1e3 * (time.perf_counter() - t)
+                if _ptrace is not None:
+                    _ptrace.start()
+
+            def _sequence(_seq=seq, _sent=sent):
+                for label, xy, bit in _seq:
+                    t_s = time.perf_counter()
+                    smile.set_pixel(*xy, bit)
+                    _sent.append((label, xy, bit, t_s, time.perf_counter()))
+                    time.sleep(args.swm_gap_s)
+
+            smile.set_pixel(*a, bv)
+            sync = {}
+            t, ia, ib = capture_step(
+                smu, v, v, args.swm_samples, args.swm_nplc,
+                settle_first_s=args.swm_hold_s, chunk=args.chunk, log=log,
+                limit_a=rng, capacitance=args.capacitance,
+                max_presettle_s=max(args.max_presettle_s, args.swm_hold_s), cfg=scfg,
+                charge_limit=None, trigger=_sequence, channels=args.switch_channels,
+                pre_s=args.swm_pre_s, sync=sync, on_fire=_relight_then_record,
+                hold_tick=_relight, tick_s=args.switch_refresh_s)
+            keep_trace(tag, t, ia, ib, args.trace_points)
+            if ptrace is not None:
+                p_t, p_p = ptrace.stop(restore_averaging=cfg.pm_averaging)
+                if ptrace.t0 is not None and "host_t0" in sync:
+                    p_t = p_t + (ptrace.t0 - sync["host_t0"])
+                keep_power_trace(tag, p_t, p_p)
+            t0h = sync.get("host_t0", nan)
+            for i, (label, xy, bit, t_s, t_a) in enumerate(sent):
+                events.append(dict(trace_tag=tag, v=v, idx=i, label=label, x=xy[0],
+                                   y=xy[1], bitval=bit, sent_s=t_s - t0h,
+                                   ack_s=t_a - t0h))
+            n_over = int((np.abs(ib) >= 1e36).sum()) if ib.size else 0
+            rows.append(dict(
+                trace_tag=tag, v=v, kind=kind, a_slot=f"p{ka}", a_x=a[0], a_y=a[1],
+                a_quadrant=_quadrant_of(*a), b_slot=f"p{kb}", b_x=b[0], b_y=b[1],
+                b_quadrant=_quadrant_of(*b), bitval=bv, i_a_probe=cur["A"],
+                i_b_probe=cur["B"], range_a=rng, highc=int(cfg.highc_b),
+                nplc=args.swm_nplc, n=int(t.size), n_overflow=n_over,
+                interval_us=(1e6 * float(np.median(np.diff(t))) if t.size > 1 else nan),
+                hold_s=args.swm_hold_s, pre_s=args.swm_pre_s, gap_s=args.swm_gap_s,
+                n_events=len(sent), fpga_refresh_ms=refresh.get("ms", nan),
+                sync_first_unc_s=sync.get("first_unc_s", nan),
+                sync_start_ack_late=sync.get("start_ack_late", nan),
+                pm_on_trace_axis=int(ptrace is not None)))
+            slow = [e for e in sent if e[4] - e[3] > 0.05]
+            if slow:
+                log(f"      !! {len(slow)} frame write(s) took > 50 ms, the slowest "
+                    f"{1e3 * max(e[4] - e[3] for e in slow):.0f} ms")
+            if n_over:
+                log(f"      !! {n_over} samples over range {rng:g} A")
+    smile.blank_frame()
+    _EXTRA_ROWS.setdefault("switchmatrix_events", []).extend(events)
+    return rows
+
+
 def exp_decay(pm, smu, smile, pixel, cfg, args, log):
     """Charge-decay: let the capacitor discharge through the LED and watch V(t).
 
@@ -2201,7 +2347,8 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
 
 PER_PIXEL = {"step": exp_step, "cap": exp_cap, "leak": exp_leak, "isrc": exp_isrc,
              "stepdir": exp_stepdir, "switch": exp_switch, "decay": exp_decay}
-ARRAY_WIDE = {"optfloor": exp_optfloor, "cluster": exp_cluster}
+ARRAY_WIDE = {"optfloor": exp_optfloor, "cluster": exp_cluster,
+              "switchmatrix": exp_switchmatrix}
 ALL = [*PER_PIXEL, *ARRAY_WIDE]
 
 
@@ -2265,6 +2412,10 @@ def estimate_seconds(what, cfg, args, n_pixels):
         total += n_pixels * len(args.isrc_currents) * args.isrc_seconds
     if "decay" in what:
         total += n_pixels * 2 * (args.decay_charge_s + args.decay_seconds)
+    if "switchmatrix" in what:
+        rec = args.swm_samples * sample_interval_s(args.swm_nplc, args.switch_channels)
+        total += len(args.swm_voltages) * 7 * (args.swm_hold_s + 1.0 + max(rec, 1.5))
+        total += 4 * args.swm_window ** 2 * 0.05            # the four scan windows
     if "optfloor" in what:
         total += sum(n * 4e-3 * args.optfloor_reps for n in args.optfloor_n)
     if "cluster" in what:
@@ -2391,6 +2542,27 @@ def build_parser():
                          "when the switch was sent and acknowledged on the trace's own "
                          "time axis. Negative restores the pre-2026-10-25 order, where "
                          "the switch came first and the record started after it.")
+    ap.add_argument("--swm-voltages", nargs="+", type=float, default=[-3.0, -2.0, -1.2],
+                    help="switchmatrix: biases, each with every pixel pair")
+    ap.add_argument("--swm-window", type=int, default=10,
+                    help="switchmatrix: edge of the scan window at each quadrant centre, "
+                         "where the two pixels per quadrant are found")
+    ap.add_argument("--swm-hold-s", type=float, default=60.0,
+                    help="switchmatrix: settle with pixel A lit before each record")
+    ap.add_argument("--swm-samples", type=int, default=20000,
+                    help="switchmatrix: readings per record (trigger model, one buffer)")
+    ap.add_argument("--swm-nplc", type=float, default=0.002,
+                    help="switchmatrix: integration per reading. 0.002 at ch B only is "
+                         "~93 us a reading (trigger model, 261025), so 20000 last ~1.9 s")
+    ap.add_argument("--swm-pre-s", type=float, default=0.1,
+                    help="switchmatrix: baseline recorded before the first switch")
+    ap.add_argument("--swm-gap-s", type=float, default=0.1,
+                    help="switchmatrix: wait after each acknowledged frame write")
+    ap.add_argument("--swm-cycles", type=int, default=3,
+                    help="switchmatrix: A/B back-and-forth cycles after the first switch")
+    ap.add_argument("--swm-n-pm", type=int, default=1,
+                    help="switchmatrix: PM reads per optical sample on the background "
+                         "thread, at PM averaging 1. 0 records current only")
     ap.add_argument("--switch-refresh-s", type=float, default=5.0,
                     help="switch: re-write the hold pixel this often during the hold, "
                          "so the FPGA's USB link never sleeps. It sleeps after 10-30 s "

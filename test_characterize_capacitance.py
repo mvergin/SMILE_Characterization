@@ -609,6 +609,39 @@ def test_a_simulated_switch_run_records_where_the_switch_is():
     assert np.isfinite(r["fpga_refresh_ms"]), "the last pre-record re-write is timed"
 
 
+def test_the_switch_matrix_runs_every_pair_and_times_every_write():
+    """Two pixels per quadrant, four same-quadrant pairs and three cross pairs, and
+    every frame write of every capture placed on that capture's own time axis."""
+    import measure_iqe as m
+    import characterize_capacitance as cc
+    from characterize_capacitance import build_parser, exp_switchmatrix
+
+    cfg = m.IQEConfig()
+    pm, smu, sim = m.connect(cfg, lambda _s: None, simulate=True)
+    args = build_parser().parse_args(
+        ["--what", "switchmatrix", "--swm-voltages", "-1.2", "--swm-window", "4",
+         "--swm-hold-s", "0.2", "--switch-refresh-s", "0.05", "--max-presettle-s", "0.2",
+         "--swm-samples", "100", "--swm-gap-s", "0.01", "--swm-pre-s", "0.02"])
+    cc._EXTRA_ROWS.clear()
+    smile = _FakeSmile(sim)
+    rows = exp_switchmatrix(pm, smu, smile, cfg, args, lambda _s: None)
+    pairs = [(r["a_slot"], r["b_slot"]) for r in rows]
+    assert pairs == [("p1", "p2"), ("p3", "p4"), ("p5", "p6"), ("p7", "p8"),
+                     ("p1", "p3"), ("p1", "p5"), ("p1", "p7")], pairs
+    assert [r["kind"] for r in rows] == ["same"] * 4 + ["cross"] * 3
+    assert all(r["a_quadrant"] == q for r, q in zip(rows[:4], ("TL", "TR", "BL", "BR")))
+    ev = cc._EXTRA_ROWS["switchmatrix_events"]
+    for r in rows:
+        mine = [e for e in ev if e["trace_tag"] == r["trace_tag"]]
+        assert [e["label"] for e in mine] == (["A->B"] + ["B->A", "A->B"] * 3
+                                              + ["B off", "B on"]), mine
+        assert mine[-2]["bitval"] == 0 and mine[-1]["bitval"] == 15
+        t = [x for e in mine for x in (e["sent_s"], e["ack_s"])]
+        assert t == sorted(t) and t[0] >= 0.02, "writes in order, after the baseline"
+        assert r["n_events"] == 9 and np.isfinite(r["fpga_refresh_ms"]), r
+    cc._EXTRA_ROWS.clear()
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
