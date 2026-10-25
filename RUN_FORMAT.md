@@ -98,43 +98,62 @@ run root instead of `NVLEDSweep/`, and are not part of this contract.
 
 The primary table. One row per measured point.
 
-### Always present, in this order
+### Always present
+
+The fast scan writes exactly these, in this order. The sweep writes them too, but
+grouped by channel (below), so **find columns by name, never by position**.
 
 | column | unit | meaning |
 |---|---|---|
 | `X`, `Y` | px | pixel coordinates, 0..511 |
 | `BITVAL` | — | CMOS drive level, 0..15 |
 | `NVLED_V` | V | cathode (channel B) bias, **negative**, rounded to 4 dp. In current-source mode this is the *measured* diode voltage instead of a setpoint. |
-| `TIME_START`, `TIME_END` | s | seconds since the phase started, for drift analysis |
+| `TIME_START`, `TIME_END` | s | seconds since the phase started, at the start and end of the burst the row reports. Before 2026-10-24 both were taken when the row was built, microseconds apart. |
 | `NVLED_CURR_MEAN` | A | channel B current — **this is the LED current** |
-| `NVLED_CURR_STD` | A | **standard error of the mean** (σ/√N), not per-sample scatter |
+| `NVLED_CURR_SEM` | A | **standard error of the mean** (σ/√N), not per-sample scatter |
 | `VLED_CURR_MEAN` | A | channel A (anode) current — leakage cross-check only |
-| `VLED_CURR_STD` | A | standard error of the mean |
+| `VLED_CURR_SEM` | A | standard error of the mean |
 | `PM400_POWER_MEAN` | W | optical power |
-| `PM400_POWER_STD` | W | standard error of the mean |
+| `PM400_POWER_SEM` | W | standard error of the mean |
 
-### Present only when `save_raw_samples` is on
+**`*_SEM` was called `*_STD` before 2026-10-24.** It held the same quantity, so a
+reader renames `*_STD` to `*_SEM` when `*_SEM` is absent (`analyze_array.legacy_sem`).
+No file written since carries `*_STD`, so a stale reader fails instead of reading an
+SEM as a standard deviation.
 
-| column | unit | meaning |
-|---|---|---|
-| `NVLED_CURR_MEDIAN`, `VLED_CURR_MEDIAN`, `PM400_POWER_MEDIAN` | A, A, W | median of the burst |
-| `NVLED_CURR_SAMPSTD`, `VLED_CURR_SAMPSTD`, `PM400_POWER_SAMPSTD` | A, A, W | population std of the burst |
-| `NVLED_CURR_N` | — | samples in the current burst |
+### The sweep: one stats block per channel
 
-A reader must treat these as optional and fall back to the `*_MEAN` columns.
+For each channel `NVLED_CURR`, `VLED_CURR`, `PM400_POWER`, in that order, the sweep
+writes six columns computed from the raw burst samples:
+
+| suffix | meaning |
+|---|---|
+| `_MEAN` | arithmetic mean |
+| `_MEDIAN` | median — **the centre the analysis uses** |
+| `_SAMPSTD` | sample standard deviation (ddof = 1, Excel `STDEV.S`) |
+| `_MADSTD` | 1.4826 × median absolute deviation: the robust σ, blind to an odd autorange spike |
+| `_SEM` | `_SAMPSTD / √_N`, the uncertainty of the mean |
+| `_N` | samples in the burst |
+
+These are computed whether or not `save_raw_samples` is on; that setting decides
+only whether `Sweep_samples.csv` is also written. Sweeps before 2026-10-24 had
+`_MEDIAN`, `_SAMPSTD` (wrongly documented as the population std) and only
+`NVLED_CURR_N`, and only with `save_raw_samples` on. A reader must treat the
+non-required columns as optional and fall back to `*_MEAN`.
 
 ### Present only when `leak_reference` is on (default since 261013)
 
 The same pixel re-measured at `LEAK_REF_BITVAL` (0: addressed, but not driven),
-back to back with the lit point at the same bias.
+back to back with the lit point at the same bias. Each channel's block is followed
+by its reference: `{ch}_REF`, then `{ch}_REF_MEAN` … `{ch}_REF_N` with the suffixes
+above, from the reference's own burst.
 
 | column | unit | meaning |
 |---|---|---|
-| `NVLED_CURR_REF` | A | ch B current with the pixel addressed and off |
-| `NVLED_CURR_REF_STD` | A | SEM of that |
-| `VLED_CURR_REF` | A | ch A current in the same state |
-| `PM400_POWER_REF` | W | optical power in the same state: the true local dark |
-| `PM400_POWER_REF_STD` | W | SEM of that |
+| `NVLED_CURR_REF` | A | ch B current with the pixel addressed and off — the value the analysis subtracts (the burst median, so it equals `NVLED_CURR_REF_MEDIAN`) |
+| `VLED_CURR_REF` | A | ch A current in the same state (the burst median) |
+| `PM400_POWER_REF` | W | optical power in the same state: the true local dark (the burst mean, so it equals `PM400_POWER_REF_MEAN`) |
+| `*_REF_SEM` | A, W | SEM of the reference. Before 2026-10-24: `*_REF_STD`, from a MAD-based σ, and only for NVLED and PM400 |
 | `LEAK_REF_BITVAL` | - | the drive level used as the reference |
 | `LEAK_REF_TRIES` | - | frame writes it took to get the pixel off (1 = first one landed) |
 | `LEAK_REF_FRAC` | - | `PM400_POWER_REF / PM400_POWER_MEAN`, the ratio the retry gated on |
@@ -197,7 +216,8 @@ offset difference, so the VALUES are comparable -- only their uncertainty differ
 ### `NVLEDSweep/Sweep/<prefix>pm_range_check.csv`, with the same setting
 
 Two rows per checked target, the same pooled group read on each range, with the columns `X, Y, POOL_K, NVLED_V, PM_RANGE_W, PM400_POWER_MEAN,
-PM400_POWER_STD, NVLED_CURR_MEAN, PM400_POWER_REF, NVLED_CURR_REF`. The ratio of the
+PM400_POWER_SEM, NVLED_CURR_MEAN, PM400_POWER_REF, NVLED_CURR_REF` (`PM400_POWER_STD`
+before 2026-10-24). The ratio of the
 two `PM400_POWER_MEAN` values is the gain step across the boundary, and the run logs
 its median. It is a per-run verification of the +0.150 % measured once in 261019-1829
 and -1833.
@@ -269,14 +289,15 @@ plateau in the I-V and would corrupt any fit through them.
 
 ### Conventions that are easy to get wrong
 
-* **`*_STD` is the SEM**, kept under that name for backwards compatibility.
-  `*_SAMPSTD` is the per-sample spread. Use `*_STD` for reliability gating,
-  because heavier averaging genuinely lowers it.
-* **`*_MEAN` is not always the arithmetic mean.** In older runs, and whenever
-  `save_raw_samples` is off, it holds a *robust median* (chosen to reject SMU
-  autorange glitches). When the `*_MEDIAN` columns exist, `*_MEAN` is the true
-  mean and `*_MEDIAN` is the robust value. **Prefer `*_MEDIAN` when present,
-  else `*_MEAN`.**
+* **`*_SEM` is the uncertainty of the mean, not a standard deviation.** It is
+  `*_SAMPSTD / √N`. `*_SAMPSTD` and `*_MADSTD` are the per-sample spread. Use
+  `*_SEM` for reliability gating, because heavier averaging genuinely lowers it.
+  Older runs call it `*_STD`.
+* **`*_MEAN` is not always the arithmetic mean.** In the fast scan, in every run
+  before 2026-10-24 that had `save_raw_samples` off, and in every run older than
+  that switch, the current `*_MEAN` holds a *robust median* (chosen to reject SMU
+  autorange glitches). Every sweep since 2026-10-24 has a true `*_MEAN` and a
+  separate `*_MEDIAN`. **Prefer `*_MEDIAN` when present, else `*_MEAN`.**
 * **Channel B current is negative** (the SMU sinks it). Take `abs()`.
 * **Use `NVLED_*` as the LED current, not `VLED_*`.** Channel A can carry other
   current paths. A large `VLED/NVLED` ratio means leakage, not signal. Measured

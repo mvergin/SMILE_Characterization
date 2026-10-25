@@ -50,6 +50,8 @@ def rows(path: Path) -> list[dict]:
 
 
 def num(r: dict, key: str) -> float:
+    if key.endswith("_SEM") and key not in r:
+        key = key[:-4] + "_STD"     # runs before 2026-10-24 stored the SEM under *_STD
     v = r.get(key)
     try:
         x = float(v)
@@ -594,8 +596,8 @@ def fig_error_budget():
         J.append(i2 / AREA_CM2)
         di.append(abs(100 * (i2 - i1) / i1))
         dp.append(abs(100 * (p2 - p1) / p1))
-        si = np.hypot(num(r, "NVLED_CURR_STD"), num(r, "NVLED_CURR_REF_STD"))
-        sp = np.hypot(num(r, "PM400_POWER_STD"), num(r, "PM400_POWER_REF_STD"))
+        si = np.hypot(num(r, "NVLED_CURR_SEM"), num(r, "NVLED_CURR_REF_SEM"))
+        sp = np.hypot(num(r, "PM400_POWER_SEM"), num(r, "PM400_POWER_REF_SEM"))
         ei.append(100 * si / i2)
         ep.append(100 * sp / p2)
 

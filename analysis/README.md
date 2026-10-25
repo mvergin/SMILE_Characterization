@@ -229,8 +229,9 @@ bottom of RUN_FORMAT.md in the measurement repo and copy `tests/fixture/` over.
 
 These bite everyone once. RUN_FORMAT.md has the full list.
 
-* **`*_STD` is the standard error of the mean** (σ/√N), not the per-sample
-  spread. `*_SAMPSTD` is the spread.
+* **`*_SEM` is the standard error of the mean** (σ/√N), not the per-sample
+  spread. `*_SAMPSTD` and `*_MADSTD` are the spread. Runs before 2026-10-24 call
+  it `*_STD`; `enrich()` renames it (`legacy_sem`).
 * **Prefer `*_MEDIAN` over `*_MEAN` when present.** In older runs `*_MEAN`
   already held a robust median; when the `*_MEDIAN` columns exist, `*_MEAN` is
   the true arithmetic mean.

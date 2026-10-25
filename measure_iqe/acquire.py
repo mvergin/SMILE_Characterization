@@ -23,7 +23,7 @@ Design (informed by auditing the results_georg data and the 10mA/1mA bench runs)
   * **Settle-then-average, adaptive effort.** Apply the setpoint, wait a few ms,
     average. Per point the effort follows the bottleneck: high current -> fast
     (low NPLC, few PM reads); low current -> many PM reads (optical-limited). The
-    stored ``*_STD`` columns are the standard error of the mean, so heavier
+    stored ``*_SEM`` columns are the standard error of the mean, so heavier
     averaging genuinely lowers the gated uncertainty.
 
 Output (specified in RUN_FORMAT.md, consumed by ``analysis/``)::
@@ -325,10 +325,12 @@ def select_sweep_pixels(alive: list[Row], cfg: IQEConfig, log: Logger) -> list[R
 def _stats(vals: Iterable[float | None], robust: bool = False) -> tuple[float, float]:
     """Return (centre, standard-error-of-the-mean) of the samples.
 
-    The stored *_STD columns hold the SEM (σ/√N), i.e. the uncertainty of the
-    MEAN — not the raw per-sample scatter. That is the right quantity for the
-    analysis reliability gates: averaging more samples (e.g. many SMU reads at low
-    J) genuinely lowers it, so the well-averaged low-J points stop being rejected.
+    The fast scan stores this pair as *_MEAN / *_SEM. The SEM (σ/√N) is the
+    uncertainty of the centre — not the raw per-sample scatter. That is the right
+    quantity for the analysis reliability gates: averaging more samples (e.g. many SMU
+    reads at low J) genuinely lowers it, so the well-averaged low-J points stop being
+    rejected. The sweep does not use this pair: it writes burst_stats() of the raw
+    samples instead, so its *_MEAN is a true mean (see measure_point).
 
     robust=True uses a median + MAD-based σ instead of mean/std. Used for the SMU
     CURRENT, which autorange can spike with the occasional range-hunting outlier
@@ -386,13 +388,31 @@ def acquire_point(pm, smu, n_smu: int, n_pm: int, measure_vb: bool = False,
 
 
 def burst_stats(vals: Iterable[float | None]) -> dict[str, float]:
-    """(mean, median, std, sem, n) of a burst — for the aggregated file's honest columns."""
+    """(mean, median, std, madstd, sem, n) of a burst — for the aggregated file's columns.
+
+    std is the SAMPLE std (ddof=1). madstd is 1.4826·MAD, the σ a Gaussian burst would
+    have, and it ignores the odd autorange spike. sem = std/√n, the uncertainty of the
+    mean, which is what the analysis gates and error bars need.
+    """
     a = np.asarray([v for v in vals if v is not None and np.isfinite(v)], float)
     if a.size == 0:
-        return dict(mean=float("nan"), median=float("nan"), std=float("nan"), sem=float("nan"), n=0)
+        nan = float("nan")
+        return dict(mean=nan, median=nan, std=nan, madstd=nan, sem=nan, n=0)
     std = float(a.std(ddof=1)) if a.size > 1 else 0.0
-    return dict(mean=float(a.mean()), median=float(np.median(a)), std=std,
-                sem=std / math.sqrt(a.size) if a.size > 1 else 0.0, n=int(a.size))
+    med = float(np.median(a))
+    return dict(mean=float(a.mean()), median=med, std=std,
+                madstd=1.4826 * float(np.median(np.abs(a - med))),
+                sem=std / math.sqrt(a.size), n=int(a.size))
+
+
+# burst_stats() key -> column suffix. One block of these per channel in the sweep file.
+_STAT_SUFFIX = dict(mean="MEAN", median="MEDIAN", std="SAMPSTD", madstd="MADSTD",
+                    sem="SEM", n="N")
+
+
+def stat_columns(base: str, vals: Iterable[float | None]) -> dict[str, float]:
+    """``{base}_MEAN … {base}_N`` for one channel's burst."""
+    return {f"{base}_{_STAT_SUFFIX[k]}": v for k, v in burst_stats(vals).items()}
 
 
 # =====================================================================
@@ -515,22 +535,37 @@ def build_fine_voltages(pm, smu, cfg: IQEConfig, log: Logger,
 #  CSV writers — aggregated (per bitval) + incremental raw
 # =====================================================================
 
-# Back-compat columns: *_MEAN and *_STD are what analyze_array reads (historically MEAN = the robust
-# median, STD = the SEM σ/√N). When SAVE_RAW_SAMPLES, we additionally write honest *_MEDIAN and
-# *_SAMPSTD (population std) columns; analyze_array prefers MEDIAN/SEM when present (see its loader).
-_AGG_COLS = ["X", "Y", "BITVAL", "NVLED_V", "TIME_START", "TIME_END",
-             "NVLED_CURR_MEAN", "NVLED_CURR_STD", "VLED_CURR_MEAN", "VLED_CURR_STD",
-             "PM400_POWER_MEAN", "PM400_POWER_STD"]
-_AGG_COLS_FULL = _AGG_COLS + [
-    "NVLED_CURR_MEDIAN", "NVLED_CURR_SAMPSTD", "NVLED_CURR_N",
-    "VLED_CURR_MEDIAN", "VLED_CURR_SAMPSTD",
-    "PM400_POWER_MEDIAN", "PM400_POWER_SAMPSTD"]
+# Fast-scan / screen columns. *_SEM is the standard error of the centre (σ/√N), not the
+# per-sample spread. Before 2026-10-24 it was written as *_STD; analyze_array renames
+# that on load. Here *_MEAN is _stats()'s centre: the MEDIAN for the two currents.
+_AGG_KEYS = ["X", "Y", "BITVAL", "NVLED_V", "TIME_START", "TIME_END"]
+_AGG_COLS = _AGG_KEYS + ["NVLED_CURR_MEAN", "NVLED_CURR_SEM", "VLED_CURR_MEAN",
+                         "VLED_CURR_SEM", "PM400_POWER_MEAN", "PM400_POWER_SEM"]
+_CHANNELS = ["NVLED_CURR", "VLED_CURR", "PM400_POWER"]
+_STATS = list(_STAT_SUFFIX.values())
+
+
+def _sweep_stat_cols(ref: bool) -> list[str]:
+    """The sweep's per-channel blocks, grouped: each channel, then its reference.
+
+    Every block is burst_stats() of the raw samples, so *_MEAN is a true mean here.
+    ``{ch}_REF`` is the value the analysis subtracts -- _stats()'s centre, so the median
+    for the currents and the mean for the power. It duplicates one of the stats on
+    purpose: every reader of the leakage subtraction keys on it.
+    """
+    cols = []
+    for ch in _CHANNELS:
+        cols += [f"{ch}_{s}" for s in _STATS]
+        if ref:
+            cols += [f"{ch}_REF"] + [f"{ch}_REF_{s}" for s in _STATS]
+    return cols
+
+
 # The leakage reference: the same pixel at LEAK_REF_BITVAL, measured back to back with the
-# lit point. I_LED = NVLED_CURR_MEAN - NVLED_CURR_REF, and that subtraction is what makes
+# lit point. I_LED = NVLED_CURR_MEDIAN - NVLED_CURR_REF, and that subtraction is what makes
 # the rising side meaningful at all -- at -0.80 V the reference is 58% of the reading.
-# Appended, never inserted, so a reader that does not know these columns still works.
-_AGG_COLS_REF = ["NVLED_CURR_REF", "NVLED_CURR_REF_STD", "VLED_CURR_REF",
-                 "PM400_POWER_REF", "PM400_POWER_REF_STD", "LEAK_REF_BITVAL",
+# Its value and stats sit next to each channel (_sweep_stat_cols); these are the rest.
+_AGG_COLS_REF = ["LEAK_REF_BITVAL",
                  # how many frame writes it took, and the optical ratio that was
                  # accepted. TRIES > 1 means a write failed and was re-sent; FRAC
                  # above leak_ref_max_frac means it never landed.
@@ -551,8 +586,12 @@ _AGG_COLS_PMRANGE = ["PM_RANGE_W"]
 
 
 def agg_cols(cfg: IQEConfig) -> list[str]:
-    """The aggregated-CSV columns this configuration writes."""
-    cols = list(_AGG_COLS_FULL if cfg.save_raw_samples else _AGG_COLS)
+    """The sweep's aggregated-CSV columns for this configuration.
+
+    Grouped by channel and found by NAME: a reader that indexes columns by position
+    breaks on this file.
+    """
+    cols = _AGG_KEYS + _sweep_stat_cols(cfg.leak_reference)
     if cfg.leak_reference:
         cols += _AGG_COLS_REF
     if cfg.fine_sweep_mode == "voltage":
@@ -610,9 +649,9 @@ def raw_lines(rows: list[Row], dark: Row | None = None) -> Iterator[str]:
     writers would silently produce two different raw files.
     """
     for r in rows:
-        for typ, mean, std in [("PM400", r["PM400_POWER_MEAN"], r["PM400_POWER_STD"]),
-                               ("VLED", r["VLED_CURR_MEAN"], r["VLED_CURR_STD"]),
-                               ("NVLED", r["NVLED_CURR_MEAN"], r["NVLED_CURR_STD"])]:
+        for typ, mean, std in [("PM400", r["PM400_POWER_MEAN"], r["PM400_POWER_SEM"]),
+                               ("VLED", r["VLED_CURR_MEAN"], r["VLED_CURR_SEM"]),
+                               ("NVLED", r["NVLED_CURR_MEAN"], r["NVLED_CURR_SEM"])]:
             yield (f"{r['X']},{r['Y']},{r['BITVAL']},{r['NVLED_V']},"
                    f"{r['TIME_START']},{typ},{mean!r},{std!r}\n")
     if dark is not None:
@@ -686,6 +725,15 @@ class BackgroundWriter:
             path = self._agg_folder / \
                 f"{self._prefix}aggregated_bitval={bitval}_mean_std.csv"
             existing = self._append and path.exists() and path.stat().st_size > 0
+            if existing:
+                # Appending rows under another header shifts every column silently.
+                # A run started by older code must finish on that code.
+                with open(path) as old:
+                    head = old.readline().strip().split(",")
+                if head != self._cols:
+                    raise RuntimeError(
+                        f"cannot resume {path.name}: its columns differ from what this "
+                        f"version writes. Resume it with the version that started it.")
             f = open(path, "a" if existing else "w")
             if not existing:
                 f.write(",".join(self._cols) + "\n")
@@ -916,7 +964,8 @@ def set_measure_range_b(smu, rng: float) -> None:
         smu.inst.write(f"smub.measure.rangei = {rng}")
 
 
-def acquire_autoranged(pm, smu, n_smu: int, n_pm: int, cfg: IQEConfig):
+def acquire_autoranged(pm, smu, n_smu: int, n_pm: int, cfg: IQEConfig,
+                       return_raw: bool = False):
     """Software auto-ranging by stepping DOWN one decade at a time from the safe wide range.
 
     A single probe read on the wide range is fooled by range zero-offsets: the 1 mA range
@@ -941,7 +990,7 @@ def acquire_autoranged(pm, smu, n_smu: int, n_pm: int, cfg: IQEConfig):
             time.sleep(cfg.range_settle_ms / 1000.0)
             break
         rng, i = finer, i2
-    return acquire_point(pm, smu, n_smu, n_pm)
+    return acquire_point(pm, smu, n_smu, n_pm, return_raw=return_raw)
 
 
 def configure_current_source_b(smu, cfg: IQEConfig, level_i: float = 0.0) -> None:
@@ -1223,13 +1272,13 @@ def screen_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
         smile.set_pixels(members, cfg.fastscan_bitval)
         if cfg.fastscan_settle_ms:
             time.sleep(cfg.fastscan_settle_ms / 1000.0)
+        ts = time.perf_counter() - t0
         p, ps, iv, ivs, inv, invs, _, _ = acquire_point(pm, smu, cfg.fastscan_n_smu, 3)
         rows.append(dict(X=members[0][0], Y=members[0][1], BITVAL=cfg.fastscan_bitval,
-                         NVLED_V=v, TIME_START=time.perf_counter() - t0,
-                         TIME_END=time.perf_counter() - t0,
-                         NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
-                         VLED_CURR_MEAN=iv, VLED_CURR_STD=ivs,
-                         PM400_POWER_MEAN=p, PM400_POWER_STD=ps,
+                         NVLED_V=v, TIME_START=ts, TIME_END=time.perf_counter() - t0,
+                         NVLED_CURR_MEAN=inv, NVLED_CURR_SEM=invs,
+                         VLED_CURR_MEAN=iv, VLED_CURR_SEM=ivs,
+                         PM400_POWER_MEAN=p, PM400_POWER_SEM=ps,
                          POOL_K=len(members),
                          POOL_MEMBERS=" ".join(f"{mx}:{my}" for mx, my in members)))
     # Detrend inside each quadrant's own tile grid, then flag on one global quantile so
@@ -1289,8 +1338,8 @@ def screen_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
     return order, rows
 
 
-_DEAD_IV_COLS = ["X", "Y", "STATE", "NVLED_V", "NVLED_CURR_MEAN", "NVLED_CURR_STD",
-                 "PM400_POWER_MEAN", "PM400_POWER_STD", "SCAN_POWER_W",
+_DEAD_IV_COLS = ["X", "Y", "STATE", "NVLED_V", "NVLED_CURR_MEAN", "NVLED_CURR_SEM",
+                 "PM400_POWER_MEAN", "PM400_POWER_SEM", "SCAN_POWER_W",
                  "R_OHM", "R_FIT_R2", "I_OFFSET_A", "AT_COMPLIANCE"]
 
 
@@ -1349,7 +1398,7 @@ def measure_dead_iv(pm, smu, smile, dead: list[Row], alive: list[Row],
     same run rather than assumed.
     """
     n = cfg.dead_iv_pixels
-    sigma = float(np.nanmedian([abs(r.get("PM400_POWER_STD") or np.nan)
+    sigma = float(np.nanmedian([abs(r.get("PM400_POWER_SEM") or np.nan)
                                 for r in dead] or [np.nan]))
     cut = cfg.dead_iv_dark_sigma * sigma
     cands = [r for r in dead if abs(r["PM400_POWER_MEAN"]) <= cut] if np.isfinite(cut) \
@@ -1397,8 +1446,8 @@ def measure_dead_iv(pm, smu, smile, dead: list[Row], alive: list[Row],
                     vs.append(v)
                     is_.append(inv)
                     here.append(dict(X=x, Y=y, STATE=state, NVLED_V=v,
-                                     NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
-                                     PM400_POWER_MEAN=p, PM400_POWER_STD=ps,
+                                     NVLED_CURR_MEAN=inv, NVLED_CURR_SEM=invs,
+                                     PM400_POWER_MEAN=p, PM400_POWER_SEM=ps,
                                      SCAN_POWER_W=r["PM400_POWER_MEAN"]))
                 res, r2, off = fit_resistance(vs, is_)
                 at_lim = any(abs(i) >= 0.95 * cfg.dead_iv_limit_a
@@ -1476,13 +1525,13 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
             smile.set_pixel(x, y, cfg.fastscan_bitval)
             if cfg.fastscan_settle_ms:
                 time.sleep(cfg.fastscan_settle_ms / 1000.0)
+            ts = time.perf_counter() - t0
             p, ps, iv, ivs, inv, invs, _, _ = acquire_point(pm, smu, cfg.fastscan_n_smu, 3)
             fs_rows.append(dict(X=x, Y=y, BITVAL=cfg.fastscan_bitval, NVLED_V=v_fs,
-                                TIME_START=time.perf_counter() - t0,
-                                TIME_END=time.perf_counter() - t0,
-                                NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
-                                VLED_CURR_MEAN=iv, VLED_CURR_STD=ivs,
-                                PM400_POWER_MEAN=p, PM400_POWER_STD=ps))
+                                TIME_START=ts, TIME_END=time.perf_counter() - t0,
+                                NVLED_CURR_MEAN=inv, NVLED_CURR_SEM=invs,
+                                VLED_CURR_MEAN=iv, VLED_CURR_SEM=ivs,
+                                PM400_POWER_MEAN=p, PM400_POWER_SEM=ps))
     # Every file a run writes carries <sample>_<stamp>_, so a CSV that is copied out of
     # its directory can still be traced back to the run that made it.
     pfx = run_slug(cfg.sample_name, run_dir) + "_"
@@ -1718,13 +1767,14 @@ def run_sweep_current(pm, smu, smile, selected: list[Row], run_dir: Path,
             for iset in setpoints:
                 set_current_b(smu, iset)
                 time.sleep(cfg.settle_ms / 1000.0)
+                ts = time.perf_counter() - t0
                 p, ps, iv, ivs, inv, invs, vb, vbs = acquire_point(
                     pm, smu, cfg.n_smu_samples, cfg.n_pm_samples, measure_vb=True)
                 row = dict(X=x, Y=y, BITVAL=cfg.current_sweep_bitval, NVLED_V=round(vb, 4),
-                           TIME_START=time.perf_counter() - t0, TIME_END=time.perf_counter() - t0,
-                           NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
-                           VLED_CURR_MEAN=iv, VLED_CURR_STD=ivs,
-                           PM400_POWER_MEAN=p, PM400_POWER_STD=ps)
+                           TIME_START=ts, TIME_END=time.perf_counter() - t0,
+                           NVLED_CURR_MEAN=inv, NVLED_CURR_SEM=invs,
+                           VLED_CURR_MEAN=iv, VLED_CURR_SEM=ivs,
+                           PM400_POWER_MEAN=p, PM400_POWER_SEM=ps)
                 prows.append(row); sw_rows.append(row)
             # dark: lowest current, pixel blanked
             set_current_b(smu, setpoints[0])
@@ -1805,8 +1855,10 @@ def read_reference(pm, smu, smile, x, y, n_pm, n_smu, cfg: IQEConfig,
                    p_lit: float | None, log: Logger, v: float | None = None):
     """One leakage reference for ``(x, y)``: the same pixel at ``leak_ref_bitval``.
 
-    Returns ``(acquire_point tuple, tries, frac)``. ``frac`` is the optical gate's
-    ratio against ``p_lit`` and is NaN when the caller has no lit reading to gate on.
+    Returns ``(ref, tries, frac)``. ``ref`` is the acquire_point tuple with the raw
+    burst samples appended as ``ref[8]``, so the row can carry the reference's own
+    burst_stats. ``frac`` is the optical gate's ratio against ``p_lit`` and is NaN when
+    the caller has no lit reading to gate on.
 
     The caller owns the frame: this leaves the pixel at ``leak_ref_bitval`` and does
     not restore it.
@@ -1834,7 +1886,8 @@ def read_reference(pm, smu, smile, x, y, n_pm, n_smu, cfg: IQEConfig,
         # dominant error. Run 261014-0035 with n_pm//4: the reference SEM was 30 pW
         # against the lit reading's 14 pW -- the term that mattered most was
         # averaged the least.
-        ref = acquire_point(pm, smu, n_smu, n_pm)
+        pt, raw = acquire_point(pm, smu, n_smu, n_pm, return_raw=True)
+        ref = pt + (raw,)
         frac = abs(ref[0] / p_lit) if p_lit else float("nan")
         if not (frac > cfg.leak_ref_max_frac):   # NaN must not trigger a retry
             break
@@ -1991,14 +2044,22 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
         rng, changed = set_pm_range(pm, pm_range_for(x, y, v, cfg), log=log)
         if changed:
             flush_pm_after_range(pm, smu, n_smu, n_pm, cfg)
+    # TIME_START/TIME_END bracket the lit burst that the row reports -- the re-read's,
+    # when the first lit frame did not land.
+    t_lit = [0.0, 0.0]
+
     def read_lit():
+        # The raw samples are taken whatever save_raw_samples says: the row's stats are
+        # computed from them, so the columns mean the same thing in every run. The
+        # setting decides only whether they also go to Sweep_samples.csv.
+        t_lit[0] = time.perf_counter() - t0
         if cfg.perpoint_range:
             # range from the ACTUAL current (probe-then-measure), not the coarse map
-            return acquire_autoranged(pm, smu, n_smu, n_pm, cfg)[:6], None
-        if cfg.save_raw_samples:
+            pt, raw = acquire_autoranged(pm, smu, n_smu, n_pm, cfg, return_raw=True)
+        else:
             pt, raw = acquire_point(pm, smu, n_smu, n_pm, return_raw=True)
-            return pt[:6], raw
-        return acquire_point(pm, smu, n_smu, n_pm)[:6], None
+        t_lit[1] = time.perf_counter() - t0
+        return pt[:6], raw
 
     (p, ps, iv, ivs, inv, invs), raw_s = read_lit()
 
@@ -2070,11 +2131,14 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
     # EQE comes out right and only per-pixel current density is wrong -- see
     # RUN_FORMAT.md, which says to treat an absent column as 1.
     members = pool_members(x, y)
+    # Every channel's stats come from its raw samples, so *_MEAN is a true mean and
+    # *_SEM is SAMPSTD/sqrt(N) in every sweep file. The centre the analysis uses is
+    # *_MEDIAN. acquire_point's own (median, MAD) pair is not written.
     row = dict(X=x, Y=y, BITVAL=bitval, NVLED_V=vr,
-               TIME_START=time.perf_counter() - t0, TIME_END=time.perf_counter() - t0,
-               NVLED_CURR_MEAN=inv, NVLED_CURR_STD=invs,
-               VLED_CURR_MEAN=iv, VLED_CURR_STD=ivs,
-               PM400_POWER_MEAN=p, PM400_POWER_STD=ps)
+               TIME_START=t_lit[0], TIME_END=t_lit[1],
+               **stat_columns("NVLED_CURR", raw_s["nvled"]),
+               **stat_columns("VLED_CURR", raw_s["vled"]),
+               **stat_columns("PM400_POWER", raw_s["pm"]))
     if len(members) > 1:
         # "x:y x:y", not "x,y": the aggregated writer joins fields with a comma and
         # does not quote, so a comma inside a value silently shifts every later column.
@@ -2083,10 +2147,13 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
     if cfg.pool_pm_range_below_v is not None:
         row["PM_RANGE_W"] = rng
     if ref is not None:
-        rp, rps, riv, _, rinv, rinvs, _, _ = ref
-        row.update(NVLED_CURR_REF=rinv, NVLED_CURR_REF_STD=rinvs,
-                   VLED_CURR_REF=riv, PM400_POWER_REF=rp,
-                   PM400_POWER_REF_STD=rps, LEAK_REF_BITVAL=cfg.leak_ref_bitval)
+        row.update(NVLED_CURR_REF=ref[4], VLED_CURR_REF=ref[2], PM400_POWER_REF=ref[0],
+                   LEAK_REF_BITVAL=cfg.leak_ref_bitval)
+        if len(ref) > 8:        # the raw reference samples (read_reference)
+            rraw = ref[8]
+            row.update(**stat_columns("NVLED_CURR_REF", rraw["nvled"]),
+                       **stat_columns("VLED_CURR_REF", rraw["vled"]),
+                       **stat_columns("PM400_POWER_REF", rraw["pm"]))
         row.update(LEAK_REF_TRIES=tries, LEAK_REF_FRAC=frac,
                    LEAK_REF_CACHED=int(cached))
         # Say it at the bench, not three days later in the analysis. Only once per
@@ -2104,17 +2171,6 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
             log(f"  !! ({x},{y}): {how} {100 * frac:.0f}% of the lit light at "
                 f"{v:+.2f} V. {why} These points are not usable. Intermittent in both "
                 f"directions -- see section 19. The analysis flags it REF_CONTAMINATED.")
-    if raw_s is not None:
-        # honest per-burst stats. _MEAN = true mean, _MEDIAN = median, _SAMPSTD =
-        # population std, _STD = SEM (sigma/sqrt(N)) -- kept as _STD because that is the
-        # column analyze_array reads for its reliability gate; analyze prefers _MEDIAN.
-        sn = burst_stats(raw_s["nvled"]); sv = burst_stats(raw_s["vled"]); sp = burst_stats(raw_s["pm"])
-        row.update(NVLED_CURR_MEAN=sn["mean"], NVLED_CURR_STD=sn["sem"],
-                   NVLED_CURR_MEDIAN=sn["median"], NVLED_CURR_SAMPSTD=sn["std"], NVLED_CURR_N=sn["n"],
-                   VLED_CURR_MEAN=sv["mean"], VLED_CURR_STD=sv["sem"],
-                   VLED_CURR_MEDIAN=sv["median"], VLED_CURR_SAMPSTD=sv["std"],
-                   PM400_POWER_MEAN=sp["mean"], PM400_POWER_STD=sp["sem"],
-                   PM400_POWER_MEDIAN=sp["median"], PM400_POWER_SAMPSTD=sp["std"])
     # A point sitting on the limit is not a measurement. Flag it in the file and in the
     # log rather than letting it reach the fit as a real current.
     inv_m = row["NVLED_CURR_MEAN"]
@@ -2124,7 +2180,7 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
     if at_limit:
         log(f"      AT COMPLIANCE at {v:+.3f} V: |I|={abs(inv_m):.6g} A is the "
             f"{limit:g} A limit, not the device. Point is flagged, not usable.")
-    return row, raw_s
+    return row, (raw_s if cfg.save_raw_samples else None)
 
 
 def completed_pixels(run_dir: str | Path) -> set[tuple[int, int]]:
@@ -2297,8 +2353,8 @@ def pm_range_dual_pass(pm, smu, smile, live, bitval, v, limit, n_pm, n_smu,
         if f is None or not f["PM400_POWER_MEAN"] or not r["PM400_POWER_MEAN"]:
             continue
         if (r["PM400_POWER_MEAN"] <= 0 or f["PM400_POWER_MEAN"] <= 0
-                or abs(r["PM400_POWER_STD"]) > 0.02 * abs(r["PM400_POWER_MEAN"])
-                or abs(f["PM400_POWER_STD"]) > 0.02 * abs(f["PM400_POWER_MEAN"])):
+                or abs(r["PM400_POWER_SEM"]) > 0.02 * abs(r["PM400_POWER_MEAN"])
+                or abs(f["PM400_POWER_SEM"]) > 0.02 * abs(f["PM400_POWER_MEAN"])):
             continue            # a bad read, not a range step -- see 26.20
         d.append(abs(f["PM400_POWER_MEAN"]) / abs(r["PM400_POWER_MEAN"]) - 1.0)
     if not d:
@@ -2572,7 +2628,7 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
 
 
 PM_CHECK_COLS = ["X", "Y", "POOL_K", "NVLED_V", "PM_RANGE_W",
-                 "PM400_POWER_MEAN", "PM400_POWER_STD", "NVLED_CURR_MEAN",
+                 "PM400_POWER_MEAN", "PM400_POWER_SEM", "NVLED_CURR_MEAN",
                  "PM400_POWER_REF", "NVLED_CURR_REF"]
 
 
@@ -2625,7 +2681,7 @@ def pm_range_boundary_check(pm, smu, smile, selected: list[Row], run_dir: Path,
     pairs, junk = [], []
     for f, c in zip(fine, coarse):
         ok = all(abs(r["PM400_POWER_MEAN"]) > 0 and r["PM400_POWER_MEAN"] > 0
-                 and abs(r["PM400_POWER_STD"]) < 0.02 * abs(r["PM400_POWER_MEAN"])
+                 and abs(r["PM400_POWER_SEM"]) < 0.02 * abs(r["PM400_POWER_MEAN"])
                  for r in (f, c))
         (pairs if ok else junk).append((f, c))
     if junk:

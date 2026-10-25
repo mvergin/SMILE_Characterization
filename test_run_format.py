@@ -33,22 +33,23 @@ FAST_CFG = dict(thermal_settle_ms=1.0, settle_ms=1.0, fastscan_settle_ms=0.0,
                 settle_scale=0.0,   # the sweep settles are SECONDS; a test must not wait
                 vramp_lowv_n_pm=3, vramp_highv_n_pm=3)
 
+# The fast scan writes exactly these, in this order. The sweep writes them too, but
+# grouped by channel, so a reader finds them by name.
 AGG_REQUIRED = ["X", "Y", "BITVAL", "NVLED_V", "TIME_START", "TIME_END",
-                "NVLED_CURR_MEAN", "NVLED_CURR_STD", "VLED_CURR_MEAN", "VLED_CURR_STD",
-                "PM400_POWER_MEAN", "PM400_POWER_STD"]
-# Appended since: the leakage reference (section 6) and the per-point compliance
-# limit. Both are optional by the rules below -- a reader that ignores them still
-# works -- but the fixture test pins the exact list so a column cannot appear or
-# vanish unnoticed.
-AGG_OPTIONAL = ["NVLED_CURR_MEDIAN", "NVLED_CURR_SAMPSTD", "NVLED_CURR_N",
-                "VLED_CURR_MEDIAN", "VLED_CURR_SAMPSTD",
-                "PM400_POWER_MEDIAN", "PM400_POWER_SAMPSTD",
-                "NVLED_CURR_REF", "NVLED_CURR_REF_STD", "VLED_CURR_REF",
-                "PM400_POWER_REF", "PM400_POWER_REF_STD", "LEAK_REF_BITVAL",
-                "LEAK_REF_TRIES", "LEAK_REF_FRAC", "LEAK_REF_CACHED",
-                "NVLED_LIMIT_A", "NVLED_AT_COMPLIANCE"]
+                "NVLED_CURR_MEAN", "NVLED_CURR_SEM", "VLED_CURR_MEAN", "VLED_CURR_SEM",
+                "PM400_POWER_MEAN", "PM400_POWER_SEM"]
+# The sweep: one block of burst stats per channel, each followed by its leakage
+# reference (section 6), then the reference bookkeeping and the per-point compliance
+# limit. Pinned exactly, so a column cannot appear or vanish unnoticed.
+_STATS = ["MEAN", "MEDIAN", "SAMPSTD", "MADSTD", "SEM", "N"]
+AGG_SWEEP = (AGG_REQUIRED[:6]
+             + [c for ch in ("NVLED_CURR", "VLED_CURR", "PM400_POWER")
+                for c in ([f"{ch}_{s}" for s in _STATS] + [f"{ch}_REF"]
+                          + [f"{ch}_REF_{s}" for s in _STATS])]
+             + ["LEAK_REF_BITVAL", "LEAK_REF_TRIES", "LEAK_REF_FRAC", "LEAK_REF_CACHED",
+                "NVLED_LIMIT_A", "NVLED_AT_COMPLIANCE"])
 # Written ONLY when pool_groups is non-empty, which is not the default. Listed apart
-# from AGG_OPTIONAL on purpose: an ordinary run must write the columns above and
+# from AGG_SWEEP on purpose: an ordinary run must write the columns above and
 # no others, or every existing reader has to learn a column to read a run with no
 # pooled rows in it. test_measure_iqe.py pins the "off by default" half.
 AGG_POOL = ["POOL_K", "POOL_MEMBERS"]
@@ -77,13 +78,13 @@ def _check_layout(run_dir: Path, label: str):
     for folder in (fast, sweep):
         agg = sorted(folder.glob("*aggregated_bitval=*_mean_std.csv"))
         assert agg, f"{label}: no aggregated CSV in {folder.name}"
-        cols = _header(agg[0])
-        assert cols[:len(AGG_REQUIRED)] == AGG_REQUIRED, \
-            f"{label}/{folder.name}: required columns changed -> {cols[:len(AGG_REQUIRED)]}"
+        missing = set(AGG_REQUIRED) - set(_header(agg[0]))
+        assert not missing, f"{label}/{folder.name}: required columns lost -> {missing}"
 
+    fast_agg = _header(sorted(fast.glob("*aggregated_bitval=*_mean_std.csv"))[0])
+    assert fast_agg == AGG_REQUIRED, f"{label}: fast-scan columns changed -> {fast_agg}"
     sweep_agg = _header(sorted(sweep.glob("*aggregated_bitval=*_mean_std.csv"))[0])
-    assert sweep_agg in (AGG_REQUIRED + AGG_OPTIONAL,
-                         AGG_REQUIRED + AGG_OPTIONAL + AGG_POOL), \
+    assert sweep_agg in (AGG_SWEEP, AGG_SWEEP + AGG_POOL), \
         f"{label}: sweep columns changed -> {sweep_agg}"
 
     raw = run_file(run_dir, "NVLEDSweep/Sweep/raw_data/Sweep.csv")

@@ -202,10 +202,11 @@ reproducible from its own output. `--warmup-diag` writes `warmup_diag.csv`
 instead of the sweep.
 
 Aggregated columns: `X, Y, BITVAL, NVLED_V, TIME_START, TIME_END,
-NVLED_CURR_MEAN, NVLED_CURR_STD, VLED_CURR_MEAN, VLED_CURR_STD,
-PM400_POWER_MEAN, PM400_POWER_STD` — plus `*_MEDIAN`, `*_SAMPSTD` and
-`NVLED_CURR_N` when `save_raw_samples` is on. `*_STD` is the **standard error of
-the mean** (σ/√N), not the per-sample scatter.
+NVLED_CURR_MEAN, NVLED_CURR_SEM, VLED_CURR_MEAN, VLED_CURR_SEM,
+PM400_POWER_MEAN, PM400_POWER_SEM`. The sweep groups them by channel and adds
+`_MEDIAN`, `_SAMPSTD`, `_MADSTD` and `_N` per channel and per leakage reference.
+`*_SEM` is the **standard error of the mean** (σ/√N), not the per-sample scatter.
+Runs before 2026-10-24 called it `*_STD`.
 
 Writes are incremental and flushed per pixel, on a background thread for the
 voltage sweep, so an interrupted run leaves directly analysable files.

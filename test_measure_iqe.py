@@ -44,8 +44,17 @@ FAST = dict(sample_name=TEST_ARRAY,
             vramp_lowv_n_pm=2, vramp_highv_n_pm=2, lowj_n_pm=2, highj_n_pm=2, n_pm_samples=2)
 
 AGG_COLS = ["X", "Y", "BITVAL", "NVLED_V", "TIME_START", "TIME_END",
-            "NVLED_CURR_MEAN", "NVLED_CURR_STD", "VLED_CURR_MEAN", "VLED_CURR_STD",
-            "PM400_POWER_MEAN", "PM400_POWER_STD"]
+            "NVLED_CURR_MEAN", "NVLED_CURR_SEM", "VLED_CURR_MEAN", "VLED_CURR_SEM",
+            "PM400_POWER_MEAN", "PM400_POWER_SEM"]
+
+
+def _as_point(pt, k):
+    """A stubbed acquire_point's return, honouring return_raw like the real one does.
+
+    One sample per channel, so every burst stat of it equals the stubbed value."""
+    if k.get("return_raw"):
+        return pt, dict(pm=[pt[0]], vled=[pt[2]], nvled=[pt[4]])
+    return pt
 
 
 def test_config_defaults_are_valid():
@@ -225,7 +234,8 @@ def test_voltage_sweep_writes_the_expected_files():
                        "NVLEDSweep/Sweep/aggregated_bitval=15_mean_std.csv")
         rows = list(csv.DictReader(agg.open()))
         assert len(rows) == result.n_points
-        assert AGG_COLS == list(rows[0])[:len(AGG_COLS)], "SMILE_IQE_Analysis column contract"
+        # found by name: the sweep file groups its columns by channel
+        assert set(AGG_COLS) <= set(rows[0]), "analysis column contract"
         assert "NVLED_CURR_MEDIAN" in rows[0], "raw-sample stats must be written"
         assert float(rows[0]["PM400_POWER_MEAN"]) > 0
 
@@ -264,8 +274,9 @@ def test_leakage_reference_is_measured_and_written():
         agg = next((result.run_dir / "NVLEDSweep" / "Sweep").glob("*aggregated_*.csv"))
         rows = list(csv.DictReader(agg.open()))
         assert rows, "no sweep rows"
-        for col in ("NVLED_CURR_REF", "NVLED_CURR_REF_STD", "VLED_CURR_REF",
-                    "PM400_POWER_REF", "PM400_POWER_REF_STD", "LEAK_REF_BITVAL"):
+        for col in ("NVLED_CURR_REF", "NVLED_CURR_REF_SEM", "VLED_CURR_REF",
+                    "PM400_POWER_REF", "PM400_POWER_REF_SEM", "LEAK_REF_BITVAL",
+                    "NVLED_CURR_REF_MADSTD", "PM400_POWER_REF_N"):
             assert col in rows[0], f"{col} missing from the aggregated CSV"
         for r in rows:
             assert int(float(r["LEAK_REF_BITVAL"])) == 0
@@ -312,7 +323,7 @@ def test_a_failed_bitval0_write_is_retried_and_then_reported():
             w = seq.pop(0) if len(seq) > 1 else seq[0]
             i = -1e-5 if first[0] else -2.5e-7
             first[0] = False
-            return (w, 0.0, 1e-5, 0.0, i, 0.0, 0.0, 0.0)
+            return _as_point((w, 0.0, 1e-5, 0.0, i, 0.0, 0.0, 0.0), k)
         return _f
 
     BAD, OK = 0.6e-9, 2e-13          # 60 % of the lit light, and 2e-4 of it
@@ -358,6 +369,46 @@ def test_a_failed_bitval0_write_is_retried_and_then_reported():
         acquire._ref_warned.clear()
 
 
+def test_burst_stats_match_a_spreadsheet_on_a_real_burst():
+    """Array38 261022-0037, (487,497) at -0.80 V: the 12 NVLED samples, checked in Excel.
+
+    The old *_STD column held SAMPSTD/sqrt(N) and read as a standard deviation that
+    matched nothing in the spreadsheet. Now it is *_SEM, and SAMPSTD is ddof=1."""
+    burst = [-8.16354e-07, -8.15926e-07, -8.15983e-07, -8.16472e-07, -8.17188e-07,
+             -8.17841e-07, -8.17665e-07, -8.17658e-07, -8.17445e-07, -8.17257e-07,
+             -8.16952e-07, -8.17257e-07]
+    s = acquire.burst_stats(burst)
+    assert s["n"] == 12
+    assert abs(s["mean"] / -8.169998333333333e-07 - 1) < 1e-12
+    assert abs(s["median"] / -8.172225e-07 - 1) < 1e-12
+    assert abs(s["std"] / 6.62921e-10 - 1) < 1e-5       # Excel STDEV.S
+    assert abs(s["madstd"] / 6.50861e-10 - 1) < 1e-5    # Excel 1.4826 * MAD
+    assert abs(s["sem"] / 1.9136878696972313e-10 - 1) < 1e-9   # what the old *_STD held
+    cols = acquire.stat_columns("NVLED_CURR", burst)
+    assert list(cols) == [f"NVLED_CURR_{k}" for k in
+                          ("MEAN", "MEDIAN", "SAMPSTD", "MADSTD", "SEM", "N")]
+
+
+def test_sweep_rows_carry_the_same_stats_with_or_without_raw_samples():
+    """save_raw_samples decides only whether Sweep_samples.csv is written.
+
+    Before, turning it off made *_MEAN a median and *_SEM a MAD-based figure, and the
+    reference never had stats of its own. TIME_START/TIME_END bracket the lit burst."""
+    with tempfile.TemporaryDirectory() as tmp:
+        for raw in (True, False):
+            rows = _agg_rows(_run(tmp, save_raw_samples=raw).run_dir)
+            assert rows, raw
+            for r in rows:
+                for ch in ("NVLED_CURR", "VLED_CURR", "PM400_POWER",
+                           "NVLED_CURR_REF", "VLED_CURR_REF", "PM400_POWER_REF"):
+                    n, sd, sem = (float(r[f"{ch}_N"]), float(r[f"{ch}_SAMPSTD"]),
+                                  float(r[f"{ch}_SEM"]))
+                    assert n >= 1 and abs(sem - sd / n ** 0.5) <= 1e-12 * max(sd, 1e-30), \
+                        (raw, ch, r)
+                assert "NVLED_CURR_STD" not in r, "the ambiguous *_STD name is retired"
+                assert float(r["TIME_END"]) >= float(r["TIME_START"]), r
+
+
 def test_a_lit_frame_that_did_not_land_is_rewritten_once():
     """A lit read that draws only its reference current did not light the pixel.
 
@@ -381,8 +432,9 @@ def test_a_lit_frame_that_did_not_land_is_rewritten_once():
         def _f(*a, **k):
             if seq:
                 i = seq.pop(0)
-                return (1e-9 if abs(i) > 1e-6 else 1e-13, 0.0, 1e-5, 0.0, -i, 0.0, 0.0, 0.0)
-            return (2e-13, 0.0, 1e-5, 0.0, -2.8e-7, 0.0, 0.0, 0.0)
+                return _as_point((1e-9 if abs(i) > 1e-6 else 1e-13, 0.0, 1e-5, 0.0, -i,
+                                  0.0, 0.0, 0.0), k)
+            return _as_point((2e-13, 0.0, 1e-5, 0.0, -2.8e-7, 0.0, 0.0, 0.0), k)
         return _f
 
     real = acquire.acquire_point
@@ -398,8 +450,8 @@ def test_a_lit_frame_that_did_not_land_is_rewritten_once():
                 calls["n"] += 1
                 # lit, reference, then the re-read of the lit frame if there is one
                 if calls["n"] == 2:
-                    return (2e-13, 0.0, 1e-5, 0.0, -2.8e-7, 0.0, 0.0, 0.0)
-                return stub()
+                    return _as_point((2e-13, 0.0, 1e-5, 0.0, -2.8e-7, 0.0, 0.0, 0.0), k)
+                return stub(**k)
             acquire.acquire_point = _f
             acquire._ref_warned.clear()
             cfg = IQEConfig(**dict(FAST, leak_reference=True, perpoint_range=False,

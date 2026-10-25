@@ -628,8 +628,19 @@ def _load_config(folder):
 # =====================================================================
 
 
+def legacy_sem(df):
+    """Rename the SEM columns of a run written before 2026-10-24 to their current names.
+
+    Those runs stored the standard error of the mean under ``*_STD``. Newer runs call
+    it ``*_SEM`` and write no ``*_STD`` at all, so the rename is safe in both directions.
+    ``*_SAMPSTD`` and ``*_MADSTD`` do not end in ``_STD`` and are left alone.
+    """
+    return df.rename(columns={c: c[:-4] + "_SEM" for c in df.columns
+                              if c.endswith("_STD") and c[:-4] + "_SEM" not in df.columns})
+
+
 def enrich(df, dark_W=0.0):
-    df = df.copy()
+    df = legacy_sem(df)
     # How many pixels each row is the SUM of. 1 for every ordinary row, and for every
     # run written before pooling existed -- RUN_FORMAT.md says an absent column means 1,
     # not unknown, so a pre-pooling run reads exactly as it always did.
@@ -697,17 +708,17 @@ def enrich(df, dark_W=0.0):
     # is used for DISPLAY (and the gates) but NOT as a fit weight (a stable-but-wrong offset has
     # a tiny SEM and would be over-trusted). See plot error bars; fit stays unweighted.
     relP = (
-        (df["PM400_POWER_STD"].astype(float) / P.replace(0, np.nan))
-        if "PM400_POWER_STD" in df
+        (df["PM400_POWER_SEM"].astype(float) / P.replace(0, np.nan))
+        if "PM400_POWER_SEM" in df
         else 0.0
     )
     # The subtraction propagates: sigma(I_LED) = sqrt(sigma_lit^2 + sigma_ref^2), and the
     # relative error is against the (smaller) corrected current, so it grows exactly where
     # the leakage dominates. That growth is the real low-J limit now, not the raw scatter.
-    if "NVLED_CURR_STD" in df:
-        sigI = df["NVLED_CURR_STD"].astype(float)
-        if "NVLED_CURR_REF_STD" in df.columns:
-            sigI = np.sqrt(sigI ** 2 + df["NVLED_CURR_REF_STD"].astype(float) ** 2)
+    if "NVLED_CURR_SEM" in df:
+        sigI = df["NVLED_CURR_SEM"].astype(float)
+        if "NVLED_CURR_REF_SEM" in df.columns:
+            sigI = np.sqrt(sigI ** 2 + df["NVLED_CURR_REF_SEM"].astype(float) ** 2)
         relI = sigI / df["I_LED"].replace(0, np.nan)
     else:
         relI = 0.0
@@ -820,19 +831,19 @@ def enrich(df, dark_W=0.0):
             # trip it too (14-23 % of their light): the same failure, one member wide.
             keys = [c for c in ("BITVAL", "NVLED_V") if c in df.columns]
             refx = refp - refp.groupby([df[c].round(4) for c in keys]).transform("median")
-            sig = (refx > 5 * df["PM400_POWER_REF_STD"].astype(float).abs()
-                   if "PM400_POWER_REF_STD" in df.columns else True)
+            sig = (refx > 5 * df["PM400_POWER_REF_SEM"].astype(float).abs()
+                   if "PM400_POWER_REF_SEM" in df.columns else True)
             df["REF_LIT_POINT"] = ((refx / lit.abs().replace(0, np.nan) > REF_POWER_SUSPECT)
                                    & sig & (per_px <= REF_POWER_SUSPECT))
             gate("REF_LIT_POINT", df["REF_LIT_POINT"])
-    if "NVLED_CURR_STD" in df.columns:
-        relstd = df["NVLED_CURR_STD"].astype(float) / df["I_NVLED"].replace(0, np.nan)
+    if "NVLED_CURR_SEM" in df.columns:
+        relstd = df["NVLED_CURR_SEM"].astype(float) / df["I_NVLED"].replace(0, np.nan)
         gate("CURRENT_NOISE", ~(relstd.fillna(np.inf) <= NVLED_RELSTD_MAX))
     # Optical-SNR gate: drop points where the PM noise rivals the signal (light at
     # the dark floor at very low J). Without this, those P≈dark points deflate the
     # rising side and bias peak-IQE low.
-    if "PM400_POWER_STD" in df.columns:
-        relP = df["PM400_POWER_STD"].astype(float) / df["P_W"].replace(0, np.nan)
+    if "PM400_POWER_SEM" in df.columns:
+        relP = df["PM400_POWER_SEM"].astype(float) / df["P_W"].replace(0, np.nan)
         gate("OPTICAL_NOISE", ~(relP.fillna(np.inf) <= PM_RELSTD_MAX))
     # Absolute optical SNR: the signal must be above the dark/background floor —
     # otherwise EQE≈0 even when the (averaged) value is precise.

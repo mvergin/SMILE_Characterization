@@ -22,8 +22,8 @@ SWEEP = FIXTURE / "NVLEDSweep" / "Sweep"
 
 # The columns RUN_FORMAT.md promises are always there.
 REQUIRED = ["X", "Y", "BITVAL", "NVLED_V", "TIME_START", "TIME_END",
-            "NVLED_CURR_MEAN", "NVLED_CURR_STD", "VLED_CURR_MEAN", "VLED_CURR_STD",
-            "PM400_POWER_MEAN", "PM400_POWER_STD"]
+            "NVLED_CURR_MEAN", "NVLED_CURR_SEM", "VLED_CURR_MEAN", "VLED_CURR_SEM",
+            "PM400_POWER_MEAN", "PM400_POWER_SEM"]
 
 
 def test_fixture_is_present():
@@ -84,10 +84,22 @@ def test_missing_optional_columns_still_load():
     assert "EQE_LED" in enriched.columns and len(enriched) == len(trimmed)
 
 
+def test_a_run_from_before_the_sem_rename_reads_the_same():
+    """Runs before 2026-10-24 stored the SEM as *_STD. enrich() must read them unchanged."""
+    df = aa._load_aggregated(SWEEP)
+    old = df.rename(columns={c: c[:-4] + "_STD" for c in df.columns if c.endswith("_SEM")})
+    assert "NVLED_CURR_STD" in old.columns and "NVLED_CURR_SEM" not in old.columns
+    new_e, old_e = aa.enrich(df, dark_W=0.0), aa.enrich(old, dark_W=0.0)
+    for col in ("EQE_LED_ERR", "RELIABLE"):
+        assert new_e[col].equals(old_e[col]), f"{col} differs between the two names"
+    # and *_SAMPSTD / *_MADSTD are not mistaken for an old SEM
+    assert {"NVLED_CURR_SAMPSTD", "NVLED_CURR_MADSTD"} <= set(aa.legacy_sem(df).columns)
+
+
 def test_leakage_reference_is_subtracted():
     """I_LED must be the corrected current, or the rising side stays wrong."""
     df = aa._load_aggregated(SWEEP)
-    for col in ("NVLED_CURR_REF", "NVLED_CURR_REF_STD", "PM400_POWER_REF"):
+    for col in ("NVLED_CURR_REF", "NVLED_CURR_REF_SEM", "PM400_POWER_REF"):
         assert col in df.columns, f"{col} missing: the fixture predates the leakage fix"
     enriched = aa.enrich(df.copy(), dark_W=0.0)
 
@@ -101,7 +113,7 @@ def test_leakage_reference_is_subtracted():
     assert (enriched["EQE_LED"] >= enriched["EQE_NVLED"] - 1e-18).all()
 
     # an old run without the columns keeps the old meaning rather than failing
-    old = df.drop(columns=[c for c in df.columns if c.endswith(("_REF", "_REF_STD"))])
+    old = df.drop(columns=[c for c in df.columns if "_REF" in c])
     old = aa.enrich(old, dark_W=0.0)
     assert (old["I_LED"] == old["I_NVLED"]).all()
     assert old["LEAK_FRAC"].isna().all()

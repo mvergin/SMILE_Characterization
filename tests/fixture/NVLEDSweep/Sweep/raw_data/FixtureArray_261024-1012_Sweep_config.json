@@ -80,7 +80,7 @@
     "vled_compliance": 1.0,
     "vled_range_i": 0.01,
     "nvled_compliance": 1e-05,
-    "nvled_range_i": 0.01,
+    "nvled_range_i": null,
     "perpoint_range": false,
     "probe_range_i": 0.001,
     "probe_n_smu": 4,
@@ -121,7 +121,7 @@
     "calibration_source": "",
     "resume": false,
     "settle_scale": 0.0,
-    "sweep_order": "pixel_major",
+    "sweep_order": "bias_major",
     "pixel_switch_settle_s": 2.0,
     "vramp_perseg_effort": true,
     "vramp_lowv_nplc": 2.0,
@@ -163,22 +163,25 @@
     "smu_display_off": false
   },
   "provenance": {
-    "commit": "2022833de0660798f78ccd0e35a204f0e650a5cd",
-    "commit_short": "2022833",
+    "commit": "659770fcf95c7bd5eeef2e9fd0d18a9356017c3a",
+    "commit_short": "659770f",
     "branch": "main",
-    "committed": "2026-10-20T08:10:59+02:00",
-    "describe": "v0.2-136-g2022833-dirty",
+    "committed": "2026-10-23T18:12:09+02:00",
+    "describe": "v0.2-167-g659770f-dirty",
     "dirty": true,
     "changed": [
-      "RUN_FORMAT.md",
-      "configs/standard.yaml",
+      "analysis/make_capacitance_figures.py",
       "measure_iqe/acquire.py",
-      "measure_iqe/config.py"
+      "test_measure_iqe.py",
+      "test_run_format.py"
     ],
-    "diff_sha256": "db274dd2ab15165a",
-    "started": "2026-10-20T08:28:02+02:00",
+    "untracked": [
+      "CLAUDE.md"
+    ],
+    "diff_sha256": "6b2b2fc010746c5e",
+    "started": "2026-10-24T10:12:10+02:00",
     "host": "IHT-RE316",
-    "python": "3.10.5",
-    "platform": "Windows-10-10.0.26100-SP0"
+    "python": "3.13.5",
+    "platform": "Windows-11-10.0.26100-SP0"
   }
 }
