@@ -104,6 +104,24 @@ def test_decimation_keeps_both_ends_and_every_kth_bias():
     assert not aa.RUN_TRUNCATION and not aa.RUN_DECIMATION, "both stay off by default"
 
 
+def test_nearest_maps_and_after_the_fact_pooling():
+    """Block maps take the nearest measured pixel; a pooled target's fast-scan values are
+    the SUM over its members, as the sweep measured it."""
+    import numpy as np
+    G = aa.nearest_grid([0, 9], [0, 0], [1.0, 2.0], (0, 0, 9, 1))
+    assert G.shape == (2, 10)
+    assert (G[:, :5] == 1).all() and (G[:, 5:] == 2).all(), G
+    fs = pd.DataFrame(dict(X=[1, 2, 3], Y=[1, 1, 1], PM400_POWER_MEAN=[1e-9, 2e-9, 4e-9],
+                           NVLED_CURR_MEAN=[-1e-5, -1e-5, -2e-5]))
+    tg = pd.DataFrame(dict(X=[1, 3], Y=[1, 1], POOL_MEMBERS=["1:1 2:1", ""], val=[1.0, 1.0]))
+    v = aa.fs_target_values(fs, tg)
+    assert abs(v["FS_P_W"].iloc[0] - 3e-9) < 1e-18 and abs(v["FS_I_A"].iloc[0] - 2e-5) < 1e-15
+    assert v["cx"].iloc[0] == 1.5 and v["K"].iloc[0] == 2 and v["K"].iloc[1] == 1
+    scale, n = aa.nearest_scale(fs, tg, "val")
+    assert n == 2 and len(scale) == 3
+    assert scale[0] == scale[1] != scale[2], "pixels 1 and 2 take the pool's ratio"
+
+
 def test_leakage_reference_is_subtracted():
     """I_LED must be the corrected current, or the rising side stays wrong."""
     df = aa._load_aggregated(SWEEP)

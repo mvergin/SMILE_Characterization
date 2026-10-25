@@ -1010,6 +1010,266 @@ def _bias_tag(v):
     return f"{v:+.2f}V".replace("+", "p").replace("-", "m").replace(".", "p")
 
 
+def roi_of(cfg, X, Y):
+    """(x1, y1, x2, y2) to draw a sparse map on: the run's ROI when the config gives it
+    as four numbers, else the box around the points."""
+    r = (cfg or {}).get("roi")
+    if isinstance(r, (list, tuple)) and len(r) == 4:
+        return tuple(int(v) for v in r)
+    return int(np.min(X)), int(np.min(Y)), int(np.max(X)), int(np.max(Y))
+
+
+def nearest_grid(X, Y, V, roi):
+    """A full raster over ``roi`` where every cell takes the value of the NEAREST measured
+    point. Sparse measurements (swept pixels) become a block map: each block is the area
+    closest to one measured pixel, so the whole ROI is coloured and nothing is white."""
+    from scipy.spatial import cKDTree
+    X, Y, V = (np.asarray(a, float) for a in (X, Y, V))
+    ok = np.isfinite(X) & np.isfinite(Y) & np.isfinite(V)
+    x1, y1, x2, y2 = roi
+    if not ok.any():
+        return np.full((y2 - y1 + 1, x2 - x1 + 1), np.nan)
+    gy, gx = np.mgrid[y1:y2 + 1, x1:x2 + 1]
+    _, idx = cKDTree(np.c_[X[ok], Y[ok]]).query(np.c_[gx.ravel(), gy.ravel()])
+    return V[ok][idx].reshape(gx.shape)
+
+
+def draw_nearest(ax, fig, X, Y, V, roi, label, cmap="viridis", log=False, vlo=None,
+                 vhi=None, centred=False):
+    """nearest_grid on ``ax`` with the measured pixels as dots, and its colour bar."""
+    from matplotlib.colors import LogNorm, TwoSlopeNorm
+    G = nearest_grid(X, Y, V, roi)
+    fin = np.asarray(V, float)
+    fin = fin[np.isfinite(fin) & ((fin > 0) if log else True)]
+    if fin.size == 0:
+        ax.set_axis_off()
+        return
+    if vlo is None:
+        vlo, vhi = np.percentile(fin, [2, 98])
+    if centred:
+        m = max(abs(vlo), abs(vhi), 1e-12)
+        norm = TwoSlopeNorm(0.0, -m, m)
+    else:
+        norm = LogNorm(max(vlo, vhi * 1e-4), vhi) if log else None
+    x1, y1, x2, y2 = roi
+    im = ax.imshow(G, origin="upper", cmap=cmap, interpolation="nearest",
+                   extent=(x1 - .5, x2 + .5, y2 + .5, y1 - .5), norm=norm,
+                   **({} if (log or centred) else dict(vmin=vlo, vmax=vhi)))
+    ax.plot(X, Y, ".", ms=1.5, color="k", alpha=0.6)
+    fig.colorbar(im, ax=ax, fraction=0.046, label=label)
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+
+
+def nearest_raster(X, Y, V, out, plt, vlabel, title, cmap="viridis", vlo=None, vhi=None,
+                   roi=None):
+    """raster_grid for sparse data: the nearest-pixel block map, measured pixels dotted."""
+    X, Y, V = (np.asarray(a, float) for a in (X, Y, V))
+    if np.isfinite(V).sum() < 4:
+        return
+    roi = roi or (int(X.min()), int(Y.min()), int(X.max()), int(Y.max()))
+    fig, ax = plt.subplots(figsize=(7.5, 6.2))
+    draw_nearest(ax, fig, X, Y, V, roi, vlabel, cmap, vlo=vlo, vhi=vhi)
+    ax.set_title(f"{title}\n({np.isfinite(V).sum()} measured pixels, dotted; every cell "
+                 f"shows the nearest one)", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out, dpi=200)
+    plt.close(fig)
+
+
+def pool_members(row):
+    """The pixels a target lit: POOL_MEMBERS "x:y x:y" for a pooled target, else (X, Y)."""
+    s = row.get("POOL_MEMBERS")
+    if isinstance(s, str) and s.strip():
+        return [tuple(int(v) for v in m.split(":")) for m in s.split()]
+    return [(int(row["X"]), int(row["Y"]))]
+
+
+def fs_target_values(fs, targets):
+    """For each swept target: its centre and its fast-scan P, I and EQE. A pooled target's
+    fast-scan values are pooled after the fact: P and I summed over its members, EQE =
+    sum P / sum I, the same as the sweep measured. DataFrame indexed like ``targets``."""
+    fsi = (fs.groupby(["X", "Y"])[["PM400_POWER_MEAN", "NVLED_CURR_MEAN"]].mean().abs())
+    rows = []
+    for i, r in targets.iterrows():
+        mem = pool_members(r)
+        sub = fsi.reindex(mem)
+        ok = sub.notna().all(axis=1).all()
+        P = float(sub["PM400_POWER_MEAN"].sum()) if ok else np.nan
+        I = float(sub["NVLED_CURR_MEAN"].sum()) if ok else np.nan
+        rows.append(dict(cx=float(np.mean([m[0] for m in mem])),
+                         cy=float(np.mean([m[1] for m in mem])),
+                         FS_P_W=P, FS_I_A=I,
+                         FS_EQE=float(compute_eqe(np.array([P]), np.array([I]), WAVELENGTH_NM)[0])
+                         if ok and I > 0
+                         else np.nan, K=len(mem)))
+    return pd.DataFrame(rows, index=targets.index)
+
+
+def nearest_scale(fs, targets, value_col):
+    """Per fast-scan pixel: value / fast-scan EQE of the NEAREST swept target, single or
+    pooled. Returns (scale per fs row, number of targets used), or (None, 0).
+
+    Replaces one array-wide median factor: a pixel is calibrated by the swept target
+    beside it, so a region whose fast scan reads differently from the sweep is
+    corrected locally rather than by the array's typical offset."""
+    from scipy.spatial import cKDTree
+    t = targets.join(fs_target_values(fs, targets))
+    r = (t[value_col] / t["FS_EQE"]).replace([np.inf, -np.inf], np.nan)
+    ok = r.notna() & (r > 0)
+    if not ok.any():
+        return None, 0
+    _, idx = cKDTree(np.c_[t.loc[ok, "cx"], t.loc[ok, "cy"]]).query(
+        np.c_[fs["X"].to_numpy(float), fs["Y"].to_numpy(float)])
+    return r[ok].to_numpy(float)[idx], int(ok.sum())
+
+
+def sweep_targets(sw_raw):
+    """One row per (target, bias) of a sweep, RAW: |I| and P as measured (burst median
+    where the file has it), no leakage or dark subtracted, EQE = P/I of those."""
+    d = sw_raw.copy()
+    val = lambda b: d[f"{b}_MEDIAN"] if f"{b}_MEDIAN" in d.columns else d[f"{b}_MEAN"]
+    d["SW_I_A"] = val("NVLED_CURR").astype(float).abs()
+    d["SW_P_W"] = val("PM400_POWER").astype(float).abs()
+    d["SW_EQE"] = compute_eqe(d["SW_P_W"], d["SW_I_A"], WAVELENGTH_NM)
+    d["SW_NVLED_V"] = d["NVLED_V"].astype(float)
+    for c, src in (("SW_I_REF_A", "NVLED_CURR_REF"), ("SW_P_REF_W", "PM400_POWER_REF")):
+        d[c] = d[src].astype(float).abs() if src in d.columns else np.nan
+    d["POOL_K"] = (d["POOL_K"].astype(float).fillna(1.0) if "POOL_K" in d.columns else 1.0)
+    if "POOL_MEMBERS" not in d.columns:
+        d["POOL_MEMBERS"] = ""
+    d["POOL_MEMBERS"] = d["POOL_MEMBERS"].fillna("").astype(str)
+    return d
+
+
+def fastscan_vs_sweep_compare(by_bias, sw_raw, eta, roi, out_dir, plt, log):
+    """Fast scan against sweep, target by target, at the sweep bias nearest each fast-scan
+    bias. RAW on both sides: no leakage, dark or calibration applied, so the difference
+    is what the 10 ms fast-scan point and the settled sweep point really differ by.
+
+    Writes fastscan_vs_sweep_<single|pooled>.csv (fast-scan columns first, then the
+    sweep's), a scatter figure per kind, and per kind and bias a 3x4 block map:
+    rows fast scan / sweep / difference, columns P, I, EQE, IQE = EQE / eta.
+    """
+    sw = sweep_targets(sw_raw)
+    tkey = sw.groupby(["X", "Y"], as_index=False).first()[["X", "Y", "POOL_K", "POOL_MEMBERS"]]
+    tables = []
+    for v, fs in by_bias.items():
+        fv = fs_target_values(fs, tkey)
+        t = tkey.join(fv)
+        biases = np.sort(sw["SW_NVLED_V"].unique())
+        vs = biases[np.argmin(np.abs(biases - v))]
+        s = sw[sw["SW_NVLED_V"] == vs][["X", "Y", "SW_NVLED_V", "SW_P_W", "SW_I_A",
+                                        "SW_EQE", "SW_I_REF_A", "SW_P_REF_W"]]
+        t = t.merge(s, on=["X", "Y"], how="left")
+        t.insert(5, "FS_NVLED_V", v)
+        t["DV_V"] = t["SW_NVLED_V"] - v
+        tables.append(t)
+    if not tables:
+        return None
+    T = pd.concat(tables, ignore_index=True)
+    T.insert(2, "QUADRANT", np.where(T["X"] >= 256, np.where(T["Y"] >= 256, "BR", "TR"),
+                                     np.where(T["Y"] >= 256, "BL", "TL")))
+    cols = ["X", "Y", "QUADRANT", "POOL_K", "POOL_MEMBERS", "FS_NVLED_V", "FS_P_W", "FS_I_A",
+            "FS_EQE", "SW_NVLED_V", "DV_V", "SW_P_W", "SW_I_A", "SW_EQE", "SW_I_REF_A",
+            "SW_P_REF_W"]
+    res = []
+    for kind, sel in (("single", T["POOL_K"] <= 1), ("pooled", T["POOL_K"] > 1)):
+        K = T[sel]
+        if K.empty:
+            continue
+        K[cols].to_csv(out_dir / f"fastscan_vs_sweep_{kind}.csv", index=False)
+        bl = sorted(K["FS_NVLED_V"].unique())
+        # scatter: sweep against fast scan, P, I, EQE, one row per fast-scan bias
+        fig, ax = plt.subplots(len(bl), 3, figsize=(15, 4.3 * len(bl)), squeeze=False)
+        for row, v in zip(ax, bl):
+            k = K[K["FS_NVLED_V"] == v]
+            dv = float(k["DV_V"].median())
+            for a, (fc, sc, lab, sca) in zip(row, (("FS_P_W", "SW_P_W", "P (nW)", 1e9),
+                                                   ("FS_I_A", "SW_I_A", "|I| (uA)", 1e6),
+                                                   ("FS_EQE", "SW_EQE", "EQE (x1e-4)", 1e4))):
+                x, y = k[fc] * sca, k[sc] * sca
+                a.scatter(x, y, s=8, alpha=0.5)
+                lim = [np.nanmin([x.min(), y.min()]), np.nanmax([x.max(), y.max()])]
+                a.plot(lim, lim, "k--", lw=0.8, label="1:1")
+                rr = float(np.nanmedian(y / x))
+                a.set_xlabel(f"fast scan {lab}")
+                a.set_ylabel(f"sweep {lab}")
+                a.set_title(f"FS {v:+.3f} V vs sweep {v + dv:+.3f} V (dV {dv * 1e3:+.0f} mV): "
+                            f"median sweep/FS = {rr:.3f}", fontsize=8)
+                a.grid(alpha=0.3)
+        fig.suptitle(f"Fast scan vs sweep, {kind} targets, RAW (no reference, dark or "
+                     f"calibration)", fontsize=10)
+        fig.tight_layout()
+        fig.savefig(out_dir / f"fastscan_vs_sweep_{kind}.png", dpi=200)
+        plt.close(fig)
+        # block maps: rows fast scan / sweep / difference, cols P, I, EQE, IQE
+        for v in bl:
+            k = K[K["FS_NVLED_V"] == v]
+            dv = k["DV_V"]
+            X, Y = k["cx"].to_numpy(), k["cy"].to_numpy()
+            e = eta if eta and np.isfinite(eta) and eta > 0 else np.nan
+            quant = (("P (nW)", "FS_P_W", "SW_P_W", 1e9, True, "magma"),
+                     ("|I| (uA)", "FS_I_A", "SW_I_A", 1e6, True, "cividis"),
+                     ("EQE (x1e-4)", "FS_EQE", "SW_EQE", 1e4, False, "viridis"),
+                     ("IQE = EQE/eta (%)", "FS_EQE", "SW_EQE", 100 / e, False, "viridis"))
+            fig, ax = plt.subplots(3, 4, figsize=(21, 15))
+            for c, (lab, fc, sc, sca, lg, cm) in enumerate(quant):
+                f, s = k[fc].to_numpy(float) * sca, k[sc].to_numpy(float) * sca
+                both = np.r_[f, s][np.isfinite(np.r_[f, s])]
+                lo, hi = (np.percentile(both, [2, 98]) if both.size else (None, None))
+                for r_, vals, name in ((0, f, "fast scan"), (1, s, "sweep")):
+                    draw_nearest(ax[r_, c], fig, X, Y, vals, roi, lab, cm, log=lg,
+                                 vlo=lo, vhi=hi)
+                    ax[r_, c].set_title(f"{name}: {lab}", fontsize=9)
+                d = 100 * (s / f - 1)
+                q = np.nanpercentile(np.abs(d[np.isfinite(d)]), 95) if np.isfinite(d).any() else 1
+                draw_nearest(ax[2, c], fig, X, Y, d, roi, "sweep / fast scan - 1 (%)",
+                             "RdBu_r", vlo=-q, vhi=q, centred=True)
+                ax[2, c].set_title(f"difference: {lab}, median {np.nanmedian(d):+.1f} %",
+                                   fontsize=9)
+            fig.suptitle(
+                f"{kind} targets: fast scan at {v:+.3f} V against the nearest sweep bias "
+                f"{v + float(dv.median()):+.3f} V (dV {float(dv.min()) * 1e3:+.0f} to "
+                f"{float(dv.max()) * 1e3:+.0f} mV, NOT corrected). RAW values; each block is "
+                f"the area nearest one swept target (dotted).", fontsize=11)
+            fig.tight_layout()
+            fig.savefig(out_dir / f"fastscan_vs_sweep_maps_{kind}_{_bias_tag(v)}.png", dpi=150)
+            plt.close(fig)
+            res.append(dict(kind=kind, v=v, n=len(k), dv=float(dv.median())))
+    return res
+
+
+def leakage_map(df, roi, out, plt):
+    """The leakage reference of every swept single pixel as a nearest-pixel block map, at
+    the faintest, a middle and the brightest bias that measured its own reference."""
+    if "NVLED_CURR_REF" not in df.columns:
+        return None
+    d = df.copy()
+    if "POOL_K_EFF" in d.columns:
+        d = d[d["POOL_K_EFF"] <= 1]
+    if "LEAK_REF_CACHED" in d.columns:
+        d = d[d["LEAK_REF_CACHED"].astype(float) != 1]       # its own read, not the cache
+    vs = sorted(d["NVLED_V"].astype(float).round(4).unique(), reverse=True)
+    if not vs:
+        return None
+    pick = sorted({vs[0], vs[len(vs) // 2], vs[-1]}, reverse=True)
+    fig, ax = plt.subplots(1, len(pick), figsize=(6.4 * len(pick), 5.4), squeeze=False)
+    for a, v in zip(ax[0], pick):
+        g = d[d["NVLED_V"].astype(float).round(4) == v]
+        vals = g["NVLED_CURR_REF"].astype(float).abs().to_numpy() * 1e9
+        draw_nearest(a, fig, g["X"].to_numpy(), g["Y"].to_numpy(), vals, roi,
+                     "|I_ref| (nA)", "plasma")
+        a.set_title(f"{v:+.3f} V: {len(g)} pixels, median {np.nanmedian(vals):.0f} nA",
+                    fontsize=9)
+    fig.suptitle("Leakage reference (pixel addressed at bitval 0) of each swept pixel; each "
+                 "block is the area nearest one pixel (dotted)", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out, dpi=200)
+    plt.close(fig)
+    return pick
+
+
 def _sweep_eqe_at(sw, v):
     """Each swept pixel's EQE_LED interpolated (linear in log EQE) to bias v, or NaN where
     the pixel's sweep does not span v."""
@@ -1038,28 +1298,35 @@ def fastscan_bias_maps(by_bias, eta, enr, out_dir, plt):
     draws current is a short, one that draws none is open, and only the current map can
     tell them apart. IQE is drawn for the alive pixels only.
     """
-    sw = None
+    sw, members_of = None, {}
     if enr is not None and {"EQE_LED", "RELIABLE", "NVLED_V"} <= set(enr.columns):
         keep = enr["RELIABLE"].astype(bool)
-        if "POOL_K_EFF" in enr.columns:
-            keep &= enr["POOL_K_EFF"].astype(float) <= 1.0     # a group is K pixels' light
         sw = enr[keep][["X", "Y", "NVLED_V", "EQE_LED"]]
+        if "POOL_MEMBERS" in enr.columns:       # pooled targets scale their members' area
+            members_of = enr.groupby(["X", "Y"])["POOL_MEMBERS"].first().to_dict()
     from matplotlib.colors import LogNorm
-    stats = []
+    stats, rows_for_grid = [], []
     for v, df in by_bias.items():
         df = df.groupby(["X", "Y"], as_index=False).mean(numeric_only=True)
         P = df["PM400_POWER_MEAN"].abs().to_numpy(float)
         I = df["NVLED_CURR_MEAN"].abs().to_numpy(float)
         alive = P >= DEAD_THRESHOLD_FRAC * np.nanpercentile(P, FASTSCAN_ALIVE_PCTL)
         eqe = np.where(alive, compute_eqe(P, I, WAVELENGTH_NM), np.nan)
-        k, n_k = np.nan, 0
+        # k per pixel: the sweep's EQE at v over the fast scan's EQE, of the NEAREST
+        # swept target (single or pooled). One array-wide median used to stand in for
+        # every pixel; a region that reads differently is now corrected locally.
+        k, n_k, scale = np.nan, 0, None
         if sw is not None:
             ref = _sweep_eqe_at(sw, v)
-            fe = pd.Series(eqe, index=pd.MultiIndex.from_arrays([df["X"], df["Y"]]))
-            r = (ref / fe.reindex(ref.index)).replace([np.inf, -np.inf], np.nan).dropna()
-            if len(r):
-                k, n_k = float(r.median()), int(len(r))
-        iqe = (eqe * (k if np.isfinite(k) else 1.0) / eta * 100.0
+            if len(ref):
+                tg = pd.DataFrame({"X": [i[0] for i in ref.index],
+                                   "Y": [i[1] for i in ref.index], "val": ref.values})
+                tg["POOL_MEMBERS"] = [members_of.get((x, y), "")
+                                      for x, y in zip(tg["X"], tg["Y"])]
+                scale, n_k = nearest_scale(df, tg, "val")
+                if scale is not None:
+                    k = float(np.nanmedian(scale))
+        iqe = (eqe * (scale if scale is not None else 1.0) / eta * 100.0
                if eta and np.isfinite(eta) and eta > 0 else None)
         X = df["X"].to_numpy(int); Y = df["Y"].to_numpy(int)
         ext = (X.min() - .5, X.max() + .5, Y.max() + .5, Y.min() - .5)
@@ -1070,11 +1337,14 @@ def fastscan_bias_maps(by_bias, eta, enr, out_dir, plt):
             return g
 
         panels = [("optical power (nW)", grid(np.clip(P, 1e-13, None) * 1e9), "magma", True),
-                  ("current |I_NVLED| (µA)", grid(np.clip(I, 1e-12, None) * 1e6), "cividis", True)]
+                  ("current |I_NVLED| (µA)", grid(np.clip(I, 1e-12, None) * 1e6), "cividis", True),
+                  ("EQE = P/I (x1e-4, collected)", grid(eqe * 1e4), "viridis", False)]
         if iqe is not None:
-            panels.append((f"IQE at this bias (%), k = {k:.3f}" if np.isfinite(k)
+            panels.append((f"IQE at this bias (%), k from the nearest of {n_k} swept "
+                           f"targets (median {k:.3f})" if np.isfinite(k)
                            else "IQE at this bias (%), uncalibrated (k = 1)",
                            grid(iqe), "viridis", False))
+        rows_for_grid.append((v, panels, ext))
         fig, ax = plt.subplots(1, len(panels), figsize=(5.4 * len(panels), 4.9), squeeze=False)
         for a, (lab, g, cmap, log) in zip(ax[0], panels):
             fin = g[np.isfinite(g) & (g > 0)] if log else g[np.isfinite(g)]
@@ -1101,6 +1371,31 @@ def fastscan_bias_maps(by_bias, eta, enr, out_dir, plt):
                           iqe=float(np.median(iv)) if iv.size else np.nan,
                           iqe_lo=float(np.percentile(iv, 10)) if iv.size else np.nan,
                           iqe_hi=float(np.percentile(iv, 90)) if iv.size else np.nan))
+    # Every bias in one figure: a row per bias, columns P, I, EQE, IQE.
+    if rows_for_grid:
+        ncol = max(len(p) for _, p, _ in rows_for_grid)
+        fig, ax = plt.subplots(len(rows_for_grid), ncol,
+                               figsize=(5.2 * ncol, 4.6 * len(rows_for_grid)), squeeze=False)
+        for row, (v, panels, ext) in zip(ax, rows_for_grid):
+            for a, (lab, g, cmap, log) in zip(row, panels):
+                fin = g[np.isfinite(g) & (g > 0)] if log else g[np.isfinite(g)]
+                if fin.size == 0:
+                    a.set_axis_off(); continue
+                lo, hi = np.nanpercentile(fin, 1), np.nanpercentile(fin, 99.5)
+                norm = LogNorm(vmin=max(lo, hi * 1e-4), vmax=hi) if log else None
+                im = a.imshow(g, origin="upper", cmap=cmap, interpolation="nearest",
+                              extent=ext, norm=norm,
+                              **({} if log else dict(vmin=np.nanpercentile(fin, 2),
+                                                     vmax=np.nanpercentile(fin, 98))))
+                plt.colorbar(im, ax=a, fraction=0.046)
+                a.set_title(f"{v:+.3f} V: {lab}", fontsize=8)
+            for a in row[len(panels):]:
+                a.set_axis_off()
+        fig.suptitle("Fast scan at every bias: optical power, current, EQE and IQE "
+                     "(IQE scaled pixel by pixel by the nearest swept target)", fontsize=11)
+        fig.tight_layout()
+        fig.savefig(out_dir / "fastscan_grid.png", dpi=150)
+        plt.close(fig)
     return stats
 
 
@@ -2412,6 +2707,8 @@ def analyse_sweep(sweep_dir, label, log):
         plot_burst_scatter, sweep_dir, out / "burst_scatter.png", plt
     )  # raw burst overlay (if saved)
     _safe(plot_settling_traces, sweep_dir, out / "settling_traces.png", plt)
+    _safe(leakage_map, df, roi_of(_load_config(sweep_dir), df["X"], df["Y"]),
+          out / "leakage_map.png", plt)
 
     # Median EQE(J) over reliable points, binned in log(J). Binning by J (not by
     # NVLED_V) works for both fixed-voltage and adaptive per-pixel-voltage sweeps,
@@ -2565,7 +2862,7 @@ def analyse_sweep(sweep_dir, label, log):
     if mapX is not None and len(mapV) >= 4:
         # True ROI raster — one cell per pixel, coloured by peak IQE, white = unmeasured/dead.
         _safe(
-            raster_grid,
+            nearest_raster,
             mapX,
             mapY,
             mapV,
@@ -2573,6 +2870,7 @@ def analyse_sweep(sweep_dir, label, log):
             plt,
             "peak IQE (%)",
             f"Per-pixel peak IQE (near J≈{J_ref:.1f} A/cm²)",
+            roi=roi_of(_load_config(sweep_dir), mapX, mapY),
         )
         _safe(
             blocked_maps,
@@ -2603,7 +2901,7 @@ def analyse_sweep(sweep_dir, label, log):
     ff = df_fits.dropna(subset=["R2"]) if "R2" in df_fits.columns else df_fits.iloc[:0]
     if len(ff) >= 4:
         _safe(
-            raster_grid,
+            nearest_raster,
             ff["X"].values,
             ff["Y"].values,
             ff["R2"].values.astype(float),
@@ -2614,6 +2912,7 @@ def analyse_sweep(sweep_dir, label, log):
             "viridis",
             0.0,
             1.0,
+            roi=roi_of(_load_config(sweep_dir), ff["X"].values, ff["Y"].values),
         )
 
     # Save enriched per-point table
@@ -3419,13 +3718,14 @@ def fastscan_peak_iqe_pixels(fs, peak_iqe_ref):
     eqe = compute_eqe(P, I, WAVELENGTH_NM)
     eqe = np.where(P >= thr, eqe, np.nan)  # mask dead
     if isinstance(peak_iqe_ref, pd.Series):
-        fe = pd.Series(eqe, index=pd.MultiIndex.from_arrays([fs["X"], fs["Y"]]))
-        fe = fe[~fe.index.duplicated()]
-        ratio = (peak_iqe_ref / fe.reindex(peak_iqe_ref.index)).replace(
-            [np.inf, -np.inf], np.nan).dropna()
-        if ratio.empty:
+        # Scaled by the NEAREST swept pixel's peak IQE / fast-scan EQE, pixel by pixel,
+        # not by one array-wide median of that ratio.
+        tg = pd.DataFrame({"X": [i[0] for i in peak_iqe_ref.index],
+                           "Y": [i[1] for i in peak_iqe_ref.index],
+                           "val": peak_iqe_ref.values})
+        scale, n = nearest_scale(fs, tg, "val")
+        if scale is None:
             return None, J
-        scale = float(ratio.median())
     else:
         med = float(np.nanmedian(eqe))
         if not np.isfinite(med) or med <= 0 or not np.isfinite(peak_iqe_ref):
@@ -3771,6 +4071,7 @@ def analyse_run(run_dir, log):
     sweep_root = run_dir / "NVLEDSweep"
     summaries = []
     ratio = None
+    first_sweep = None
     if sweep_root.exists():
         for grp in sorted(p for p in sweep_root.iterdir() if p.is_dir()):
             sweep = _load_aggregated(grp)
@@ -3780,6 +4081,7 @@ def analyse_run(run_dir, log):
                 ratio = plot_fastscan_vs_sweep(
                     fs, sweep, out / "fastscan_vs_sweep.png", plt
                 )
+                first_sweep = sweep
             s = analyse_sweep(grp, f"NVLEDSweep/{grp.name}", log)
             if s:
                 s["label"] = f"NVLEDSweep/{grp.name}"
@@ -3807,6 +4109,17 @@ def analyse_run(run_dir, log):
                 f"J~{m['J']:.1f} A/cm2, IQE median {m['iqe']:.0f}% (k={m['k']:.3f})")
     except Exception as e:
         log(f"  (skipped the per-bias fast-scan maps: {e})")
+    if first_sweep is not None:
+        try:
+            v0 = float(fs["NVLED_V"].astype(float).round(4).iloc[0]) if "NVLED_V" in fs else 0.0
+            cmp_ = fastscan_vs_sweep_compare(
+                {v0: fs, **fs_extra}, first_sweep, eta,
+                roi_of(cfg, fs["X"], fs["Y"]), out, plt, log)
+            for c in cmp_ or []:
+                log(f"  fast scan vs sweep, {c['kind']} @ {c['v']:+.3f} V: {c['n']} targets, "
+                    f"nearest sweep bias {c['dv'] * 1e3:+.0f} mV away")
+        except Exception as e:
+            log(f"  (skipped the fast-scan vs sweep comparison: {e})")
     # Full-coverage peak-IQE proxy from the fast scan, calibrated to the sweep's pooled peak IQE.
     # Only produced when the fast-scan bias is on the EQE plateau (J≈8–30, i.e. NVLED ≈ −1.35 V);
     # skipped for a droop-side fast scan (old −2.6 V), where EQE ≠ peak.
