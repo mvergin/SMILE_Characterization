@@ -3346,7 +3346,10 @@ def run_warmup_diag(pm, smu, smile, pixels: list[tuple[int, int]], run_dir: Path
 #     PM400 reads run while the SMU integrates (acquire_point fires the burst first), so
 #     they only count if they take longer. That reproduces every bias_major run since
 #     14 October to the millisecond: 0.976 s rising (12 x 2 x 40.66 ms), 0.325 s droop.
-#     PM400 at pm_averaging 3: 32 reads fit inside 0.976 s, so <= 30 ms each; 25 ms used.
+#     PM400 at pm_averaging 3: 32 reads fit inside 0.976 s, so <= 30 ms each -- an upper
+#     bound only, since the SMU hid them. The fast scan pins it: 3 reads, the frame
+#     writes and a 4-sample burst in 20.7 ms, so <= ~6 ms a read. 6 ms used (was 25 ms,
+#     which made a short-burst sweep look 3x slower than it can be: 127 vs 42 ms/point).
 #   * one bias change = its dwell + ~4 s (77.8 s at a 73.14 s dwell, 112.2 s at 107.59).
 #   * one fast-scan pixel = fastscan_settle_ms + 20.7 ms (262 144 px in 2 h 14 min).
 #   * the reference pre-pass = leak_ref_tries x (leak_ref_settle_s + one rising read)
@@ -3357,7 +3360,7 @@ def run_warmup_diag(pm, smu, smile, pixels: list[tuple[int, int]], run_dir: Path
 #     the same days and code did not. The cause is in that loop and not yet found.
 # Re-measure these if the instruments or the acquisition code change.
 EST_SMU_SAMPLE_OVERHEAD_S = 0.00066
-EST_PM_READ_S = 0.025
+EST_PM_READ_S = 0.006
 EST_BIAS_OVERHEAD_S = 4.0
 EST_FASTSCAN_PX_S = 0.0207
 
