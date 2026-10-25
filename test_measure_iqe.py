@@ -2058,6 +2058,20 @@ def test_an_explicit_voltage_list_is_swept_exactly():
         raise AssertionError(f"accepted {bad}")
 
 
+def test_a_ch_b_only_sweep_without_references_where_the_led_is_off():
+    """sweep_read_vled=False reads ch B only (VLED columns NaN, NVLED full stats), and
+    leak_ref_skip_above_v leaves the reference out above that bias only."""
+    with tempfile.TemporaryDirectory() as tmp:
+        res = _run(tmp, sweep_read_vled=False, leak_ref_skip_above_v=-0.75,
+                   sweep_voltages=(-1.4, -1.0, -0.8, -0.6, -0.2))
+        rows = _agg_rows(res.run_dir)
+        assert rows
+        for r in rows:
+            assert r["VLED_CURR_MEDIAN"] in ("nan", "") and float(r["NVLED_CURR_N"]) > 0, r
+            has_ref = r["NVLED_CURR_REF"] not in ("nan", "")
+            assert has_ref == (float(r["NVLED_V"]) <= -0.75), (r["NVLED_V"], has_ref)
+
+
 def test_the_pm400_range_is_picked_like_the_smu_limit():
     """Smallest realised range >= 1.5x the predicted power; widest when nothing is
     predicted; a reading at 95 % of full scale is over range."""

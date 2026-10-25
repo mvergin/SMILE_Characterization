@@ -391,6 +391,15 @@ class IQEConfig:
                             # burst after every change is discarded (set_pm_range). False
                             # = one fixed range, every run before 2026-10-25.
     pm_range_headroom: float = 1.5  # predicted power x this must fit the range
+    sweep_read_vled: bool = True  # read ch A (VLED, the anode supply) in every sweep burst.
+                            # False reads ch B (the LED current) only: one integration per
+                            # sample instead of two, so NPLC 1 costs 20 ms a sample, not
+                            # 41. ch A is a supply-rail monitor (RUN_FORMAT.md); its
+                            # columns are then NaN.
+    leak_ref_skip_above_v: float | None = None  # V. No leakage reference at biases above
+                            # this (toward 0 V), where the LED is off: the lit reading is
+                            # then the leakage itself and an EQE means nothing. None = a
+                            # reference wherever leak_reference asks for one.
     pm_overrange_frac: float = 0.95  # a reading at this fraction of full scale is over
     fastscan_pm_probe_n: int = 256  # pixels read on the widest range before each
                             # fast-scan bias pass; the brightest x headroom sets the range

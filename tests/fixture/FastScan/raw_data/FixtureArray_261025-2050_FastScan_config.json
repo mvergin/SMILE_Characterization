@@ -78,6 +78,8 @@
     "pm_range": 1e-07,
     "pm_autorange": true,
     "pm_range_headroom": 1.5,
+    "sweep_read_vled": true,
+    "leak_ref_skip_above_v": null,
     "pm_overrange_frac": 0.95,
     "fastscan_pm_probe_n": 256,
     "pm_averaging": 3,
@@ -171,11 +173,11 @@
     "smu_display_off": false
   },
   "provenance": {
-    "commit": "6c5be489893e5f4c36c78f609711dfa36fedb9e7",
-    "commit_short": "6c5be48",
+    "commit": "834892975acf9aaffa46d6ff614f155dd65cf991",
+    "commit_short": "8348929",
     "branch": "main",
-    "committed": "2026-10-25T19:58:22+01:00",
-    "describe": "v0.2-187-g6c5be48-dirty",
+    "committed": "2026-10-25T20:42:54+01:00",
+    "describe": "v0.2-189-g8348929-dirty",
     "dirty": true,
     "changed": [
       "measure_iqe/acquire.py",
@@ -185,8 +187,8 @@
     "untracked": [
       "CLAUDE.md"
     ],
-    "diff_sha256": "06b192c4002bf385",
-    "started": "2026-10-25T20:10:26+01:00",
+    "diff_sha256": "c4f8f1422261b848",
+    "started": "2026-10-25T20:50:23+01:00",
     "host": "IHT-RE316",
     "python": "3.13.5",
     "platform": "Windows-11-10.0.26100-SP0"

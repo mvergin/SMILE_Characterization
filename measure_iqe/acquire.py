@@ -364,7 +364,7 @@ def read_voltage_b(smu, n: int = 3) -> tuple[float, float]:
 
 
 def acquire_point(pm, smu, n_smu: int, n_pm: int, measure_vb: bool = False,
-                  return_raw: bool = False):
+                  return_raw: bool = False, channels: int = 2):
     """Average n_smu SMU current samples + n_pm PM readings at the current state.
 
     The SMU current burst is *fired* (non-blocking) so it integrates on the
@@ -372,10 +372,16 @@ def acquire_point(pm, smu, n_smu: int, n_pm: int, measure_vb: bool = False,
     overlap. Returns (P,Pσ, Iv,Ivσ, Inv,Invσ, Vb,Vbσ); currents signed, σ ≥ 0.
     """
     smu.clear_buffers_only()
-    smu.measure_burst_fire(int(n_smu))         # SMU starts integrating in background
+    if channels == 1:                          # ch B only: half the integration
+        smu.measure_burst_i_b_fire(int(n_smu))
+    else:
+        smu.measure_burst_fire(int(n_smu))     # SMU starts integrating in background
     pvals = [pm.measure() for _ in range(int(n_pm))]   # PM reads concurrently
     smu.measure_burst_join()                   # wait for the SMU burst to finish
-    ia, ib = smu.read_buffers(int(n_smu))
+    if channels == 1:
+        ia, ib = [], list(smu.read_buffer_b(int(n_smu))[1])
+    else:
+        ia, ib = smu.read_buffers(int(n_smu))
     vb_m, vb_s = read_voltage_b(smu) if measure_vb else (float("nan"), float("nan"))
     iv_m, iv_s = _stats(ia, robust=True)     # currents: median (autorange-glitch proof)
     inv_m, inv_s = _stats(ib, robust=True)
@@ -1021,7 +1027,7 @@ def set_measure_range_b(smu, rng: float) -> None:
 
 
 def acquire_autoranged(pm, smu, n_smu: int, n_pm: int, cfg: IQEConfig,
-                       return_raw: bool = False):
+                       return_raw: bool = False, channels: int = 2):
     """Software auto-ranging by stepping DOWN one decade at a time from the safe wide range.
 
     A single probe read on the wide range is fooled by range zero-offsets: the 1 mA range
@@ -1046,7 +1052,7 @@ def acquire_autoranged(pm, smu, n_smu: int, n_pm: int, cfg: IQEConfig,
             time.sleep(cfg.range_settle_ms / 1000.0)
             break
         rng, i = finer, i2
-    return acquire_point(pm, smu, n_smu, n_pm, return_raw=return_raw)
+    return acquire_point(pm, smu, n_smu, n_pm, return_raw=return_raw, channels=channels)
 
 
 def configure_current_source_b(smu, cfg: IQEConfig, level_i: float = 0.0) -> None:
@@ -1120,6 +1126,10 @@ class _SimSMU:
     def check_error_queue(self): return []
     def close(self): pass
     def measure_burst_fire(self, n): self._n = int(n)
+    def measure_burst_i_b_fire(self, n): self._n = int(n)
+    def read_buffer_b(self, n=None):
+        ib = self.read_buffers(n if n is not None else self._n)[1]
+        return list(range(len(ib))), ib
     def measure_burst_join(self): pass
 
     def set_voltage(self, ch, v):
@@ -2002,7 +2012,8 @@ def read_reference(pm, smu, smile, x, y, n_pm, n_smu, cfg: IQEConfig,
         # dominant error. Run 261014-0035 with n_pm//4: the reference SEM was 30 pW
         # against the lit reading's 14 pW -- the term that mattered most was
         # averaged the least.
-        pt, raw = acquire_point(pm, smu, n_smu, n_pm, return_raw=True)
+        pt, raw = acquire_point(pm, smu, n_smu, n_pm, return_raw=True,
+                                channels=2 if cfg.sweep_read_vled else 1)
         ref = pt + (raw,)
         frac = abs(ref[0] / p_lit) if p_lit else float("nan")
         if not (frac > cfg.leak_ref_max_frac):   # NaN must not trigger a retry
@@ -2262,11 +2273,13 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
         # computed from them, so the columns mean the same thing in every run. The
         # setting decides only whether they also go to Sweep_samples.csv.
         t_lit[0] = time.perf_counter() - t0
+        ch = 2 if cfg.sweep_read_vled else 1
         if cfg.perpoint_range:
             # range from the ACTUAL current (probe-then-measure), not the coarse map
-            pt, raw = acquire_autoranged(pm, smu, n_smu, n_pm, cfg, return_raw=True)
+            pt, raw = acquire_autoranged(pm, smu, n_smu, n_pm, cfg, return_raw=True,
+                                         channels=ch)
         else:
-            pt, raw = acquire_point(pm, smu, n_smu, n_pm, return_raw=True)
+            pt, raw = acquire_point(pm, smu, n_smu, n_pm, return_raw=True, channels=ch)
         t_lit[1] = time.perf_counter() - t0
         return pt[:6], raw
 
@@ -2297,7 +2310,10 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
     tries = 0
     frac = float("nan")
     cached = False
-    if cfg.leak_reference:
+    # Above leak_ref_skip_above_v the LED is off: the lit reading IS the leakage, so a
+    # second read of the same thing at bitval 0 buys nothing an EQE could use.
+    if cfg.leak_reference and not (cfg.leak_ref_skip_above_v is not None
+                                   and v > cfg.leak_ref_skip_above_v):
         # Cached or measured? Cached at or below leak_ref_per_point_above_v, where the
         # reference is a few percent of the reading and a fixed per-pixel value costs
         # under 0.14%; measured per point above it, where it is 5-62% of the reading
@@ -3365,8 +3381,11 @@ EST_BIAS_OVERHEAD_S = 4.0
 EST_FASTSCAN_PX_S = 0.0207
 
 
-def _acq_s(nplc: float, n_smu: int, n_pm: int) -> float:
-    smu = n_smu * 2 * (nplc / 50.0 + EST_SMU_SAMPLE_OVERHEAD_S)
+def _acq_s(nplc: float, n_smu: int, n_pm: int, channels: int = 2) -> float:
+    # one channel: one integration and 91 us of overhead a sample (sample_interval_s in
+    # characterize_capacitance, measured on 261021-1051)
+    smu = (n_smu * 2 * (nplc / 50.0 + EST_SMU_SAMPLE_OVERHEAD_S) if channels == 2
+           else n_smu * (nplc / 50.0 + 91e-6))
     return max(smu, n_pm * EST_PM_READ_S)
 
 
@@ -3426,11 +3445,15 @@ def estimate_run(cfg: IQEConfig, n_targets: int | None = None) -> dict[str, floa
         return rising if (cfg.vramp_knee_v is None or v > cfg.vramp_knee_v) else droop
 
     def ref(v):
-        return cfg.leak_reference and (above is None or v > above)
+        skip = cfg.leak_ref_skip_above_v
+        return (cfg.leak_reference and (above is None or v > above)
+                and not (skip is not None and v > skip))
+
+    ch = 2 if cfg.sweep_read_vled else 1
 
     if cfg.leak_reference and above is not None:
         out["reference pre-pass"] = T * max(1, cfg.leak_ref_tries) * (
-            cfg.leak_ref_settle_s * k + _acq_s(*rising[:3]))
+            cfg.leak_ref_settle_s * k + _acq_s(*rising[:3], ch))
     n_groups = T * len(cfg.pool_groups) / max(1, cfg.pixels_per_block + len(cfg.pool_groups))
     if cfg.pool_groups and cfg.pool_pm_range_below_v is not None and cfg.pm_range_check_targets:
         out["PM-range check"] = min(cfg.pm_range_check_targets, n_groups) * (
@@ -3442,14 +3465,14 @@ def estimate_run(cfg: IQEConfig, n_targets: int | None = None) -> dict[str, floa
             out["precondition"] = T * cfg.warmup_ms / 1000.0
         for v in grid:
             nplc, n_smu, n_pm, settle = seg(v)
-            a = _acq_s(nplc, n_smu, n_pm)
+            a = _acq_s(nplc, n_smu, n_pm, ch)
             dwell += settle * k + EST_BIAS_OVERHEAD_S
             points += T * (cfg.pixel_switch_settle_s * k + a
                            + (cfg.leak_ref_settle_s * k + a if ref(v) else 0.0))
     else:
         for v in grid:
             nplc, n_smu, n_pm, settle = seg(v)
-            a = _acq_s(nplc, n_smu, n_pm)
+            a = _acq_s(nplc, n_smu, n_pm, ch)
             dwell += T * settle * k
             points += T * (a + (2 * cfg.leak_ref_settle_s * k + a if ref(v) else 0.0))
         points += T * cfg.warmup_ms / 1000.0
