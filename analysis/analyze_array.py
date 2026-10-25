@@ -3715,7 +3715,11 @@ PEAK_PROXY_MODES = {
     "nearest": (1, "the nearest swept pixel"),
     "nearest8": (8, "median of the 8 nearest swept pixels"),
 }
-PEAK_PROXY_DEFAULT = "nearest8"     # what the anomaly report reads
+PEAK_PROXY_DEFAULT = "nearest8"     # the headline map and its stats
+# The anomaly report reads the ONE-median map: there the factor is a constant, so every
+# region it flags is in the fast-scan data. On a locally scaled map it also flags the
+# calibration -- on 261016-2252 regions 1-4 % low in raw EQE read 6-17 points low.
+PEAK_PROXY_ANOMALY = "median"
 
 
 def fastscan_peak_iqe_pixels(fs, peak_iqe_ref, mode=PEAK_PROXY_DEFAULT):
@@ -4209,7 +4213,7 @@ def analyse_run(run_dir, log):
                 )
                 # General anomaly report on the full-coverage proxy: any-shape blobs (detect-all +
                 # confidence), driver rows/columns per quadrant, and per-quadrant gradients.
-                d, _ = fastscan_peak_iqe_pixels(fs, peak_ref)
+                d, _ = fastscan_peak_iqe_pixels(fs, peak_ref, PEAK_PROXY_ANOMALY)
                 if d is not None:
                     r = anomaly_report(
                         d["X"].values,
