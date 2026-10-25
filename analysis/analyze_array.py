@@ -1337,6 +1337,71 @@ def plot_eqe_all_and_median(df, fit, med, fit_ok, out, plt, src="LED"):
     plt.close(fig)
 
 
+def eqe_median_sd(rel, src="LED"):
+    """Per bias (or per log-J bin when the targets share no bias grid): median EQE over
+    targets, its sample SD (ddof=1) and count, at the median J. DataFrame[J, EQE, SD, n]."""
+    Jc, Ec = f"J_{src}", f"EQE_{src}"
+    r = rel[np.isfinite(rel[Jc]) & np.isfinite(rel[Ec]) & (rel[Jc] > 0) & (rel[Ec] > 0)]
+    if r.empty:
+        return pd.DataFrame(columns=["J", "EQE", "SD", "n"])
+    if shared_bias_grid(r):
+        key = r["NVLED_V"].astype(float).round(4)
+    else:                           # current-source sweeps: no common bias, bin in log J
+        edges = np.logspace(np.log10(r[Jc].min()), np.log10(r[Jc].max()), 31)
+        key = np.clip(np.digitize(r[Jc], edges) - 1, 0, 29)
+    g = r.groupby(key)
+    out = pd.DataFrame({"J": g[Jc].median(), "EQE": g[Ec].median(),
+                        "SD": g[Ec].std(ddof=1), "n": g[Ec].size()})
+    return out[out["n"] >= 3].sort_values("J").reset_index(drop=True)
+
+
+def plot_eqe_by_kind(df, out_dir, plt, src="LED"):
+    """EQE(J) for single pixels and for pooled targets, in separate figures.
+
+    Each figure: left, every target's reliable points as a line; right, the median
+    over targets at each bias with +-1 sample SD across targets. Writes
+    eqe_vs_J_LED_single.png and, when the run pooled, eqe_vs_J_LED_pooled.png.
+    """
+    Jc, Ec = f"J_{src}", f"EQE_{src}"
+    k = df["POOL_K_EFF"] if "POOL_K_EFF" in df.columns else pd.Series(1.0, index=df.index)
+    files = []
+    for kind, sel in (("single", k <= 1), ("pooled", k > 1)):
+        d = df[sel]
+        if d.empty:
+            continue
+        rel = d[d["RELIABLE"]]
+        stats = eqe_median_sd(rel, src)
+        n_t = d.groupby(["X", "Y"]).ngroups
+        fig, ax = plt.subplots(1, 2, figsize=(13, 5.4), sharey=True)
+        for _, g in rel.groupby(["X", "Y"]):
+            g = g.sort_values(Jc)
+            ax[0].plot(g[Jc], g[Ec], lw=0.6, alpha=0.3, color="tab:blue")
+        ax[1].errorbar(stats["J"], stats["EQE"], yerr=stats["SD"], fmt="o-", ms=4,
+                       capsize=2, color="tab:blue", label="median over targets, ±1 SD")
+        for a in ax:
+            a.set_xscale("log")
+            a.set_yscale("log")
+            a.set_xlabel("J (A/cm²)")
+            a.grid(True, which="both", alpha=0.3)
+        ax[0].set_ylabel("Collected EQE (fraction)")
+        ax[0].set_title(f"every {kind} target ({n_t}), reliable points", fontsize=10)
+        ax[1].set_title(f"median and SD over {kind} targets", fontsize=10)
+        ax[1].legend(fontsize=8, loc="lower left")
+        what = ("one pixel" if kind == "single" else
+                "K pixels lit together: EQE = sum P / sum I, J per member")
+        fig.text(0.5, 0.005,
+                 f"Each point: one target ({what}) at one bias. EQE from the burst MEDIAN "
+                 f"current and power, leakage reference and dark subtracted. Right: the "
+                 f"MEDIAN over targets per bias, bars ±1 sample SD (ddof=1) across targets.",
+                 ha="center", va="bottom", fontsize=7.5, color="0.3", wrap=True)
+        fig.suptitle(f"EQE vs J -- {kind} targets ({src} current)", fontsize=11)
+        fig.tight_layout(rect=(0, 0.04, 1, 1))
+        files.append(out_dir / f"eqe_vs_J_{src}_{kind}.png")
+        fig.savefig(files[-1], dpi=200)
+        plt.close(fig)
+    return files
+
+
 def plot_iqe(df, pixel_fits, pooled_fit, out, plt, src="LED"):
     """Combined per-pixel IQE curves, using precomputed per-pixel fits.
 
@@ -2456,6 +2521,16 @@ def analyse_sweep(sweep_dir, label, log):
         )
         or []
     )
+    # Single pixels and pooled targets apart: a pooled target is K pixels' summed light
+    # and current, so mixing the two puts different things in one median.
+    _safe(plot_eqe_by_kind, df, out, plt)
+    if "POOL_K_EFF" in df.columns and (df["POOL_K_EFF"] > 1).any():
+        kk = df.groupby(["X", "Y"])["POOL_K_EFF"].first()
+        for kind, keep in (("single", kk <= 1), ("pooled", kk > 1)):
+            sub = set(kk[keep].index)
+            _safe(plot_iqe, df[[xy in sub for xy in zip(df["X"], df["Y"])]],
+                  {xy: f for xy, f in pixel_fits.items() if xy in sub}, fit,
+                  out / f"iqe_all_pixels_LED_{kind}.png", plt, src="LED")
     # Per-pixel spatial maps from the REAL per-pixel ABC fits (the whole sweep is now fit — see
     # MAX_PIXEL_FITS), not a proxy or a strided subset. peak_IQE for the field, R² for how
     # LED-like each pixel is. The EQE-near-peak proxy is kept only as a fallback if too few
