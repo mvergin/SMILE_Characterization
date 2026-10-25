@@ -44,6 +44,7 @@
     "fine_sweep_mode": "voltage",
     "nvled_v_coarse_start": -0.8,
     "nvled_v_coarse_stop": -2.6,
+    "sweep_voltages": [],
     "n_coarse": 26,
     "coarse_settle_ms": 6.0,
     "coarse_n_smu": 4,
@@ -170,27 +171,22 @@
     "smu_display_off": false
   },
   "provenance": {
-    "commit": "273a44a54eb15b6ce38d93bce3e3157ab63117c8",
-    "commit_short": "273a44a",
+    "commit": "6c5be489893e5f4c36c78f609711dfa36fedb9e7",
+    "commit_short": "6c5be48",
     "branch": "main",
-    "committed": "2026-10-25T17:59:08+01:00",
-    "describe": "v0.2-186-g273a44a-dirty",
+    "committed": "2026-10-25T19:58:22+01:00",
+    "describe": "v0.2-187-g6c5be48-dirty",
     "dirty": true,
     "changed": [
-      "characterize_capacitance.py",
-      "configs/standard.yaml",
-      "instruments/pm400.py",
-      "instruments/sim.py",
       "measure_iqe/acquire.py",
       "measure_iqe/config.py",
-      "test_measure_iqe.py",
-      "test_run_format.py"
+      "test_measure_iqe.py"
     ],
     "untracked": [
       "CLAUDE.md"
     ],
-    "diff_sha256": "f3633221568107e6",
-    "started": "2026-10-25T19:43:42+01:00",
+    "diff_sha256": "06b192c4002bf385",
+    "started": "2026-10-25T20:10:26+01:00",
     "host": "IHT-RE316",
     "python": "3.13.5",
     "platform": "Windows-11-10.0.26100-SP0"

@@ -167,6 +167,7 @@ bitvals: [15]   # single bitval — densify low-J via spacing instead
 fine_sweep_mode: "voltage"   # Fine-sweep mode: "voltage" — plain UNIFORM voltage ramp NVLED_V_COARSE_START → STOP ...
 nvled_v_coarse_start: -0.8   # least-negative sweep voltage (just below turn-on)
 nvled_v_coarse_stop: -2.6   # most-negative sweep voltage (below saturation knee)
+sweep_voltages: []   # explicit sweep biases (V, <= 0); empty = the coarse_start/stop ramp with n_fine points
 n_coarse: 26   # coarse pre-sweep points
 coarse_settle_ms: 6.0
 coarse_n_smu: 4

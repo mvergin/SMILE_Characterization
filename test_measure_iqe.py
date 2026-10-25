@@ -2040,6 +2040,24 @@ def test_the_pm_range_switches_only_for_pooled_targets_past_the_boundary():
         acquire._pool_members.clear()
 
 
+def test_an_explicit_voltage_list_is_swept_exactly():
+    """sweep_voltages replaces the ramp: those biases, in sweep_direction order, from
+    -3.2 V to 0 V, and nothing outside 0..-nvled_v_limit is accepted."""
+    V = (-0.5, -3.2, 0.0, -1.0, -1.0)
+    for direction, want in (("high_to_low", [-3.2, -1.0, -0.5, 0.0]),
+                            ("low_to_high", [0.0, -0.5, -1.0, -3.2])):
+        cfg = IQEConfig(sweep_voltages=V, sweep_direction=direction,
+                        dead_abort=direction == "high_to_low").validate()
+        got = [v for v, _ in acquire.build_fine_voltages(None, None, cfg, QUIET)]
+        assert got == want, (direction, got)
+    for bad in ((0.1,), (-3.5,)):
+        try:
+            IQEConfig(sweep_voltages=bad).validate()
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad}")
+
+
 def test_the_pm400_range_is_picked_like_the_smu_limit():
     """Smallest realised range >= 1.5x the predicted power; widest when nothing is
     predicted; a reading at 95 % of full scale is over range."""

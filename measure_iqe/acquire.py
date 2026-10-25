@@ -444,6 +444,12 @@ def build_fine_voltages(pm, smu, cfg: IQEConfig, log: Logger,
     current (LOWJ_WEIGHT) so the SRH-rising side that pins peak IQE is sampled
     densely — replacing the old multi-bitval trick with smarter spacing.
     """
+    if cfg.fine_sweep_mode == "voltage" and cfg.sweep_voltages:
+        out = sorted(((float(v), None) for v in dict.fromkeys(cfg.sweep_voltages)),
+                     reverse=(cfg.sweep_direction == "low_to_high"))
+        log(f"    {tag}voltage list: {len(out)} biases "
+            f"{', '.join(f'{v:g}' for v, _ in out)} V, {cfg.sweep_direction}")
+        return out
     if cfg.fine_sweep_mode == "voltage":
         # Voltage ramp — no coarse map. Densify the rising-side/peak window (split at the
         # knee); targets None so the points are taken as-is.

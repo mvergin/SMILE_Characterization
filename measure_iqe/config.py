@@ -288,6 +288,10 @@ class IQEConfig:
     fine_sweep_mode: str = "voltage"
     nvled_v_coarse_start: float = -0.8  # least-negative sweep voltage (just below turn-on)
     nvled_v_coarse_stop: float = -2.6  # most-negative sweep voltage (below saturation knee)
+    sweep_voltages: tuple[float, ...] = ()  # EXPLICIT voltage-sweep biases (V, <= 0).
+                            # Empty = the ramp from nvled_v_coarse_start/stop and n_fine.
+                            # Set = exactly these, in sweep_direction order, and the start,
+                            # stop, n_fine and knee split are ignored for the grid.
     n_coarse: int = 26  # coarse pre-sweep points
     coarse_settle_ms: float = 6.0  # settle before each coarse pre-sweep point (ms)
     coarse_n_smu: int = 4  # SMU readings per coarse pre-sweep point
@@ -922,6 +926,14 @@ class IQEConfig:
                               ("sweep_autozero", {"AUTO", "ONCE", "OFF"})):
             if getattr(self, name) not in allowed:
                 raise ValueError(f"{name}={getattr(self, name)!r}; expected one of {sorted(allowed)}")
+        if self.sweep_voltages:
+            if self.fine_sweep_mode != "voltage":
+                raise ValueError("sweep_voltages needs fine_sweep_mode='voltage'")
+            bad = [v for v in self.sweep_voltages if not (-self.nvled_v_limit <= v <= 0)]
+            if bad:
+                raise ValueError(
+                    f"sweep_voltages {bad}: the cathode bias is negative, 0 at most and "
+                    f"no deeper than -nvled_v_limit ({-self.nvled_v_limit:g} V)")
         if not self.bitvals or not all(0 <= b <= 15 for b in self.bitvals):
             raise ValueError(f"bitvals={self.bitvals!r}; expected a non-empty tuple of 0..15")
         if any(v > 0 for v in self.fastscan_v_list()):
