@@ -392,30 +392,35 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
 
 def _capture_with_baseline(smu, v_to, n_samples, nplc, chunk, log, trigger, channels,
                            pre_s, sync, on_fire):
-    """capture_step's ``pre_s`` path: burst first, then the perturbation inside it.
+    """capture_step's ``pre_s`` path: the trigger model first, then the perturbation.
 
-    Only for a perturbation OUTSIDE the SMU. TSP runs one script at a time, so a
-    source-level write sent while the burst loop runs waits for the loop to end -- a
-    voltage step cannot be put inside a running burst from the host. A frame change
-    goes to the FPGA, which is not blocked.
+    The SMU's trigger model takes the readings, not a TSP ``for`` loop: the firmware
+    paces them, so the timestamps are steadier and the per-call TSP overhead is gone.
+    ``initiate()`` returns at once, so the host is free while the buffer fills and
+    sends the frame change into the running record. One record, no chunks -- the
+    buffer fills once (FILL_ONCE) and ``waitcomplete()`` returns when it is full.
+
+    Only for a perturbation OUTSIDE the SMU. Whether a source-level write is safe
+    while the trigger model runs is not verified on the bench, so a voltage step is
+    refused here rather than guessed at. ``chunk`` is unused on this path.
     """
     if trigger is None:
-        raise ValueError("pre_s needs an external trigger: the SMU cannot step its own "
-                         "source while a burst script runs")
+        raise ValueError("pre_s needs an external trigger: a source step during a "
+                         "running trigger model is not verified on the bench")
     sync = {} if sync is None else sync
     n_samples = int(n_samples)
+    # The TSP-loop interval. The trigger model is expected to be no slower, so this
+    # bounds the record from above: it sizes the timeout and the late-START check.
     per_sample_s = sample_interval_s(nplc, channels)
-    # The first chunk must outlast the baseline and the trigger, or the event falls in
-    # the gap before the next chunk. One second of margin covers the frame write.
-    k1 = min(n_samples, max(int(chunk), int(math.ceil((pre_s + 1.0) / per_sample_s))))
+    record_s = n_samples * per_sample_s
     real = hasattr(smu, "inst")
+    if real:
+        smu.arm_trigger_burst(n_samples, channels)
     if on_fire is not None:
         on_fire()
     t_sent = time.perf_counter()
     if real:
-        old_timeout = smu.inst.timeout
-        smu.inst.timeout = max(10_000, int(max(k1, int(chunk)) * per_sample_s * 4_000))
-        t_ack = smu.measure_burst_fire_marked(k1, channels)
+        t_ack = smu.start_trigger_burst_marked()
     else:                                       # sim rig: the burst fills at once
         smu.measure_burst_fire(n_samples)
         t_ack = time.perf_counter()
@@ -427,41 +432,34 @@ def _capture_with_baseline(smu, v_to, n_samples, nplc, chunk, log, trigger, chan
     sync.update(first_unc_s=0.5 * (t_ack - t_sent), host_t0=host_t0,
                 trigger_lo_s=t_trig - host_t0, trigger_hi_s=t_trig_done - host_t0,
                 start_ack_late=False)
-    if real and t_ack - t_sent > 0.5 * k1 * per_sample_s:
-        # START came back with the end of the chunk, not its beginning: the host could
-        # not tell when the burst began, so the event times are not known on this axis.
+    if real and t_ack - t_sent > 0.5 * record_s:
+        # START came back with the end of the record, not its beginning: the host
+        # could not tell when the readings began, so the events are not placed.
         sync["start_ack_late"] = True
         if log:
-            log(f"      !! START took {t_ack - t_sent:.2f}s against a "
-                f"{k1 * per_sample_s:.2f}s chunk: the instrument buffered it, so the "
-                f"switch cannot be placed on the trace. Event times are recorded but "
-                f"not trustworthy.")
+            log(f"      !! START took {t_ack - t_sent:.2f}s against a ~{record_s:.2f}s "
+                f"record: the switch cannot be placed on the trace. Event times are "
+                f"recorded but not trustworthy.")
     if not real:
         smu.measure_burst_join()
         ia, ib = smu.read_buffers(n_samples)
         n = min(len(ia), len(ib))
         t = np.linspace(0.0, max(time.perf_counter() - host_t0, pre_s), n)
         return t, np.asarray(ia[:n], float), np.asarray(ib[:n], float)
-    done = 0
+    old_timeout = smu.inst.timeout
     try:
-        smu.measure_burst_join()
-        done = k1
-        while done < n_samples:
-            k = min(int(chunk), n_samples - done)
-            if channels == 1:
-                smu.measure_burst_i_b(k)
-            else:
-                smu.measure_burst(k)
-            done += k
+        smu.inst.timeout = max(10_000, int((4 * record_s + 10) * 1000))
+        smu.wait_trigger_burst()
     except Exception as exc:
         try:
             smu.inst.clear()
         except Exception:
             pass
         if log:
-            log(f"      burst stopped after {done}/{n_samples} samples: "
-                f"{type(exc).__name__} — keeping what was captured")
+            log(f"      trigger record did not complete: {type(exc).__name__} — "
+                f"keeping what was captured")
     finally:
+        smu.abort_trigger()                     # measure action off, whatever happened
         smu.inst.timeout = max(old_timeout, 30_000)
         try:
             if channels == 1:
@@ -474,6 +472,10 @@ def _capture_with_baseline(smu, v_to, n_samples, nplc, chunk, log, trigger, chan
     if not ib:
         return np.array([]), np.array([]), np.array([])
     n = min(len(ia), len(ib), len(ta))
+    if log and n >= 2:
+        log(f"      trigger model: {n} readings, "
+            f"{1e6 * (ta[n - 1] - ta[0]) / (n - 1):.0f} us apart "
+            f"(TSP loop: {1e6 * per_sample_s:.0f} us)")
     return (np.asarray(ta[:n], float) - ta[0],
             np.asarray(ia[:n], float), np.asarray(ib[:n], float))
 
@@ -1617,6 +1619,7 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
                                  cfg=cfg, charge_limit=args.charge_limit,
                                  switch_settle_s=args.switch_settle_s,
                                  trigger=_switch, pre_s=pre_s, sync=sync,
+                                 channels=args.switch_channels,
                                  on_fire=(ptrace.start if ptrace is not None
                                           and pre_s is not None else None))
         # Every metric below asks what happens AFTER the switch, so it reads the record
@@ -2352,6 +2355,11 @@ def build_parser():
                          "when the switch was sent and acknowledged on the trace's own "
                          "time axis. Negative restores the pre-2026-10-25 order, where "
                          "the switch came first and the record started after it.")
+    ap.add_argument("--switch-channels", type=int, choices=(1, 2), default=1,
+                    help="switch: 1 (default) reads ch B only, 2 reads ch A as well. ch A "
+                         "costs one integration plus 569 us per reading (sample_interval_s) "
+                         "and yields only a supply-rail sanity number. Before 2026-10-25 "
+                         "the switch test always read both.")
     ap.add_argument("--switch-n-pm", type=int, default=0,
                     help="switch: PM reads per optical sample, ON A BACKGROUND THREAD, "
                          "starting at the frame change. 0 (default) records current "

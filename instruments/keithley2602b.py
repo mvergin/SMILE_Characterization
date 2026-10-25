@@ -254,23 +254,50 @@ class Keithley2602B:
             f"end print('DONE')"
         )
 
-    def measure_burst_fire_marked(self, n, channels=2):
-        """Start a burst without waiting for it, and return once it has STARTED.
+    def arm_trigger_burst(self, n, channels=1):
+        """Arm the trigger model for ``n`` current readings into nvbuffer1. Not started.
 
-        The script prints START before its first reading, so the host time this
-        returns is an upper bound on the first sample, and the time before the call is
-        a lower bound. The caller may act while the burst runs, then reads DONE with
-        measure_burst_join(). Returns ``time.perf_counter()`` taken after START arrived.
+        ch B only for ``channels=1``, both for 2. The buffer fills once and stops
+        (FILL_ONCE), with instrument timestamps. Unlike a TSP ``for`` loop the readings
+        are paced by the firmware, and the command interface stays free while they run.
         """
-        body = ("smua.measure.i(smua.nvbuffer1) smub.measure.i(smub.nvbuffer1)"
-                if channels == 2 else "smub.measure.i(smub.nvbuffer1)")
-        self.inst.write(f"print('START') for i=1,{n} do {body} end print('DONE')")
+        self._trig_chans = ("smub",) if channels == 1 else ("smua", "smub")
+        cmds = []
+        for c in self._trig_chans:
+            cmds += [f"{c}.trigger.measure.action = {c}.DISABLE",
+                     f"{c}.nvbuffer1.clear()",
+                     f"{c}.nvbuffer1.appendmode = 1",
+                     f"{c}.nvbuffer1.collecttimestamps = 1",
+                     f"{c}.nvbuffer1.fillmode = {c}.FILL_ONCE",
+                     f"{c}.nvbuffer1.fillcount = {int(n)}",
+                     f"{c}.trigger.measure.i({c}.nvbuffer1)",
+                     f"{c}.trigger.count = {int(n)}",
+                     f"{c}.trigger.measure.action = {c}.ENABLE"]
+        self.run_tsp_and_wait(" ".join(cmds))
+
+    def start_trigger_burst_marked(self):
+        """Initiate the armed trigger model and return once it has STARTED.
+
+        ``initiate()`` returns at once and the readings run in the background, so the
+        START printed after it bounds the first reading from above. The time taken
+        before this call bounds it from below. Returns ``time.perf_counter()`` taken
+        after START arrived.
+        """
+        go = " ".join(f"{c}.trigger.initiate()" for c in self._trig_chans)
+        self.inst.write(f"{go} print('START')")
         resp = self.inst.read().strip()
         t = time.perf_counter()
         if resp != "START":
             self.inst.clear()
-            raise RuntimeError(f"TSP burst start error: expected 'START', got '{resp[:40]}'")
+            raise RuntimeError(f"trigger start error: expected 'START', got '{resp[:40]}'")
         return t
+
+    def wait_trigger_burst(self):
+        """Block until the trigger model has filled the buffer. Set the VISA timeout first."""
+        resp = self.inst.query("waitcomplete() print('DONE')").strip()
+        if resp != "DONE":
+            self.inst.clear()
+            raise RuntimeError(f"trigger wait error: expected 'DONE', got '{resp[:40]}'")
 
     def measure_burst_join(self):
         resp = self.inst.read().strip()
