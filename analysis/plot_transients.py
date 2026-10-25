@@ -458,7 +458,9 @@ def plot_switchmatrix(run_dir: Path) -> None:
                 f"range {si(float(r['range_a']))}, High-C {'on' if r['highc'] == '1' else 'off'}, "
                 f"NPLC {float(r['nplc']):g}, {r['n']} readings @ "
                 f"{float(r['interval_us']):.0f} us, hold {float(r['hold_s']):g} s, "
-                f"gap {float(r['gap_s']) * 1e3:.0f} ms, PM averaging 1{late}",
+                f"gap {float(r['gap_s']) * 1e3:.0f} ms, PM averaging 1"
+                + (f", PM400 range {si(float(r['pm_range_w']), 'W')}"
+                   if r.get("pm_range_w") else "") + late,
                 fontsize=9)
             fig.tight_layout()
             out = out_dir / f"{tag}.png"

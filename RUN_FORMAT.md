@@ -221,7 +221,18 @@ What a reader must do with `POOL_K`:
 A reader that ignores the column entirely gets the right EQE and a wrong `J` --
 the safe direction, but still wrong.
 
-### `PM_RANGE_W`, only when `pool_pm_range_below_v` is set
+### `PM_RANGE_W`: the PM400 full scale the point was read on (W)
+
+Since 2026-10-25 `pm_autorange` (default on) writes it on every fast-scan and sweep row,
+as the REALISED hardware full scale, which the run learns from the meter at start.
+The fast scan picks one range per bias pass from a 256-pixel probe; the sweep picks one
+per bias from the brightest target of the previous bias, scaled by the measured P(V).
+A reading at 95 % of full scale or more is re-read one range up, and the point keeps
+that range. The leakage reference is always read on the lit point's range; a cached
+reference is cached per (pixel, range). Same caveats as below: values are comparable
+across ranges, their noise floor is not (it goes as range^0.74).
+
+#### With `pm_autorange` off: only when `pool_pm_range_below_v` is set
 
 The PM400 range that point was read on, in W, as requested (the realised hardware scale
 is coarser -- `1e-7` lands on 470 nW on the S171C). Pooled targets switch to

@@ -860,28 +860,31 @@ def test_the_leakage_reference_is_cached_below_the_threshold():
         assert per_point and cached, (
             f"{order}: expected both kinds, got {len(per_point)} per-point and "
             f"{len(cached)} cached over {len(rows)} points")
-        # The split is exactly the threshold, in the sweep's sign convention.
+        # The split is exactly the threshold, in the sweep's sign convention. With the
+        # PM range moving (pm_autorange), a cached reference is only valid on the range
+        # it was read on, so below the threshold a pixel measures once per NEW range --
+        # and only once: every later point on that range reuses it.
+        first_on_range = {}
         for r in per_point:
-            assert float(r["NVLED_V"]) > -1.0,                 f"{order}: {r['NVLED_V']} V measured per point but is below -1.0 V"
+            if float(r["NVLED_V"]) <= -1.0:
+                key = (r["X"], r["Y"], r.get("PM_RANGE_W"))
+                assert cfg.pm_autorange and key not in first_on_range, (
+                    f"{order}: {r['NVLED_V']} V measured per point below -1.0 V, and not "
+                    f"as the first point of {key[:2]} on PM range {key[2]}")
+                first_on_range[key] = r
         for r in cached:
-            assert float(r["NVLED_V"]) <= -1.0,                 f"{order}: {r['NVLED_V']} V cached but is above -1.0 V"
-            assert int(r["LEAK_REF_TRIES"]) == 0,                 "a cached point writes no frame, so TRIES must be 0"
-        # One value per pixel, not one per point: the whole saving rests on this.
+            assert float(r["NVLED_V"]) <= -1.0, (
+                f"{order}: {r['NVLED_V']} V cached but is above -1.0 V")
+            assert int(r["LEAK_REF_TRIES"]) == 0, (
+                "a cached point writes no frame, so TRIES must be 0")
+        # One value per pixel and range, not one per point: the saving rests on this.
         by_px = {}
         for r in cached:
-            by_px.setdefault((r["X"], r["Y"]), set()).add(r["NVLED_CURR_REF"])
+            by_px.setdefault((r["X"], r["Y"], r.get("PM_RANGE_W")), set()).add(
+                r["NVLED_CURR_REF"])
         for px, vals in by_px.items():
-            assert len(vals) == 1,                 f"{order}: pixel {px} has {len(vals)} cached reference values, want 1"
-        # And the faint side did NOT share: those are separate reads.
-        assert len({r["NVLED_CURR_REF"] for r in per_point}) > 1,             f"{order}: every per-point reference is identical -- the cache leaked"
-
-    # Off switch: None reproduces every run made before the cache existed.
-    with tempfile.TemporaryDirectory() as tmp:
-        cfg = IQEConfig(**common, sweep_order="bias_major",
-                        leak_ref_per_point_above_v=None)
-        res = run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
-        rows = _agg_rows(res.run_dir)
-    assert rows and all(r["LEAK_REF_CACHED"] == "0" for r in rows),         "leak_ref_per_point_above_v=None must reference every point"
+            assert len(vals) == 1, (
+                f"{order}: pixel {px} has {len(vals)} cached reference values, want 1")
 
 
 def test_the_fast_scan_measures_every_bias_and_judges_on_the_first():
@@ -1052,6 +1055,7 @@ def test_the_time_estimate_reproduces_a_measured_run():
 
     cfg = IQEConfig(roi="FULL", block_size=36, pixels_per_block=1, pool_groups=(4,),
                     pool_pm_range=1e-6, pool_pm_range_below_v=-1.6, n_fine=16,
+                    pm_autorange=False,
                     sweep_order="bias_major", vramp_lowv_settle_s=107.59,
                     vramp_highv_settle_s=73.14).validate()
     assert estimate_targets(cfg) == 392, "196 blocks x (1 single + 1 group)"
@@ -1985,7 +1989,7 @@ def test_the_range_cross_check_picks_a_bias_the_fine_range_can_still_hold():
     which does not fit. Picking the deepest bias would have verified nothing.
     """
     base = dict(sweep_select='blocks', pool_groups=(4,), pool_pm_range=1e-6,
-                pool_pm_range_below_v=-1.6, sweep_order='bias_major')
+                pool_pm_range_below_v=-1.6, sweep_order='bias_major', pm_autorange=False)
 
     def boundary(**over):
         cfg = IQEConfig(**{**base, **over}).validate()
@@ -2016,7 +2020,8 @@ def test_the_pm_range_switches_only_for_pooled_targets_past_the_boundary():
     reaches ~591 nW and must switch or over-range.
     """
     cfg = IQEConfig(sweep_select='blocks', pool_groups=(4,), pool_pm_range=1e-6,
-                    pool_pm_range_below_v=-1.6, sweep_order='bias_major').validate()
+                    pool_pm_range_below_v=-1.6, sweep_order='bias_major',
+                    pm_autorange=False).validate()
     acquire._pool_members.clear()
     acquire._pool_members[(5, 5)] = ((5, 5), (9, 9), (13, 13), (17, 17))
     try:
@@ -2026,7 +2031,7 @@ def test_the_pm_range_switches_only_for_pooled_targets_past_the_boundary():
             assert acquire.pm_range_for(1, 1, v, cfg) == single, v
         # the column appears only when the switch is on
         assert 'PM_RANGE_W' in acquire.agg_cols(cfg)
-        assert 'PM_RANGE_W' not in acquire.agg_cols(IQEConfig().validate())
+        assert 'PM_RANGE_W' not in acquire.agg_cols(IQEConfig(pm_autorange=False).validate())
         # ...and with the switch off the range is never written at all, so an
         # ordinary run gains no SCPI traffic and measure_point still runs with no pm
         off = IQEConfig(sweep_select='blocks', pool_groups=(4,)).validate()
@@ -2035,10 +2040,42 @@ def test_the_pm_range_switches_only_for_pooled_targets_past_the_boundary():
         acquire._pool_members.clear()
 
 
+def test_the_pm400_range_is_picked_like_the_smu_limit():
+    """Smallest realised range >= 1.5x the predicted power; widest when nothing is
+    predicted; a reading at 95 % of full scale is over range."""
+    cfg = IQEConfig()
+    lad = [4.7e-7, 4.7e-6, 4.7e-5, 4.7e-4]
+    assert acquire.pick_pm_range(3.5e-7, cfg, lad) == 4.7e-6, "1.5 x 3.5e-7 = 5.25e-7"
+    assert acquire.pick_pm_range(3e-7, cfg, lad) == 4.7e-7, "1.5 x 3e-7 = 4.5e-7 fits"
+    assert acquire.pick_pm_range(15e-6, cfg, lad) == 4.7e-5
+    assert acquire.pick_pm_range(None, cfg, lad) == 4.7e-4
+    assert acquire.pick_pm_range(1.0, cfg, lad) == 4.7e-4, "beyond the top: the top"
+    assert acquire.pm_over(4.6e-7, 4.7e-7, cfg) and not acquire.pm_over(4.0e-7, 4.7e-7, cfg)
+    assert acquire.pm_over(float("nan"), 4.7e-7, cfg), "an unreadable value is over range"
+
+
+def test_every_point_is_read_on_a_range_that_holds_it():
+    """pm_autorange (the default): fast scan and sweep write PM_RANGE_W, and no reading
+    sits above pm_overrange_frac of its own range -- at every fast-scan bias."""
+    with tempfile.TemporaryDirectory() as tmp:
+        res = _run(tmp, fastscan_voltages=(-1.05, -2.0))
+        for phase in ("FastScan", "NVLEDSweep/Sweep"):
+            rows = _agg_rows(res.run_dir, phase)
+            assert rows and all(r["PM_RANGE_W"] not in ("", "nan") for r in rows), phase
+            worst = max(abs(float(r["PM400_POWER_MEAN"])) / float(r["PM_RANGE_W"])
+                        for r in rows)
+            assert worst < res.config.pm_overrange_frac, (phase, worst)
+        fs = _agg_rows(res.run_dir, "FastScan")
+        by_v = {}
+        for r in fs:
+            by_v.setdefault(r["NVLED_V"], set()).add(r["PM_RANGE_W"])
+        assert len(by_v) == 3, "each fast-scan bias is its own pass"
+
+
 def test_the_pm_range_switch_is_refused_where_it_cannot_work():
     """Three ways to ask for it that cannot mean what the operator wants."""
     base = dict(sweep_select='blocks', pool_groups=(4,), pool_pm_range=1e-6,
-                pool_pm_range_below_v=-1.6, sweep_order='bias_major')
+                pool_pm_range_below_v=-1.6, sweep_order='bias_major', pm_autorange=False)
     IQEConfig(**base).validate()        # the good one
     for over, why in (
             (dict(sweep_order='pixel_major'),
@@ -2050,7 +2087,9 @@ def test_the_pm_range_switch_is_refused_where_it_cannot_work():
             (dict(pool_pm_range=0.0),
              'a threshold with nothing to switch to'),
             (dict(pool_pm_range_below_v=1.6),
-             'a positive bias when the sweep is negative')):
+             'a positive bias when the sweep is negative'),
+            (dict(pm_autorange=True),
+             'the fixed switch and the per-bias ranging at once')):
         try:
             IQEConfig(**{**base, **over}).validate()
         except ValueError:

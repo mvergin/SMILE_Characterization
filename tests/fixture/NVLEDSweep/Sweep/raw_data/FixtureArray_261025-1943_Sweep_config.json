@@ -75,6 +75,10 @@
     "smu_addr": "USB0::0x05E6::0x2602::4649721::INSTR",
     "pm_wavelength": 440.0,
     "pm_range": 1e-07,
+    "pm_autorange": true,
+    "pm_range_headroom": 1.5,
+    "pm_overrange_frac": 0.95,
+    "fastscan_pm_probe_n": 256,
     "pm_averaging": 3,
     "vled_voltage": 1.8,
     "vled_compliance": 1.0,
@@ -166,20 +170,27 @@
     "smu_display_off": false
   },
   "provenance": {
-    "commit": "6b9a0014a616cd4c69c9750a34d231babd9ab22a",
-    "commit_short": "6b9a001",
+    "commit": "273a44a54eb15b6ce38d93bce3e3157ab63117c8",
+    "commit_short": "273a44a",
     "branch": "main",
-    "committed": "2026-10-25T13:35:40+01:00",
-    "describe": "v0.2-179-g6b9a001-dirty",
+    "committed": "2026-10-25T17:59:08+01:00",
+    "describe": "v0.2-186-g273a44a-dirty",
     "dirty": true,
     "changed": [
+      "characterize_capacitance.py",
+      "configs/standard.yaml",
+      "instruments/pm400.py",
+      "instruments/sim.py",
+      "measure_iqe/acquire.py",
+      "measure_iqe/config.py",
+      "test_measure_iqe.py",
       "test_run_format.py"
     ],
     "untracked": [
       "CLAUDE.md"
     ],
-    "diff_sha256": "0b2da68bb1745aec",
-    "started": "2026-10-25T13:39:58+01:00",
+    "diff_sha256": "f3633221568107e6",
+    "started": "2026-10-25T19:43:42+01:00",
     "host": "IHT-RE316",
     "python": "3.13.5",
     "platform": "Windows-11-10.0.26100-SP0"

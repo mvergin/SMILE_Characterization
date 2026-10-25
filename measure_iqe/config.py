@@ -377,7 +377,19 @@ class IQEConfig:
     smu_addr: str = "USB0::0x05E6::0x2602::4649721::INSTR"  # VISA address of the Keithley 2602B SMU
     # ── PM400 ───────────────────────────────────────────────────────────
     pm_wavelength: float = 440.0  # wavelength (nm) the PM400 uses for its responsivity; also sets the photon energy
-    pm_range: float = 1e-7  # W, fixed (no autorange)
+    pm_range: float = 1e-7  # W. With pm_autorange off, THE range, fixed. With it on, only
+                            # the starting point; the run picks its own ranges.
+    pm_autorange: bool = True  # pick the PM400 range per bias (sweep) and per pass (fast
+                            # scan), like pick_limit does for the SMU: the smallest
+                            # realised range >= pm_range_headroom x the predicted power,
+                            # stepping up and re-reading when a point over-ranges. NOT the
+                            # meter's own autorange, which switches mid-burst. The first
+                            # burst after every change is discarded (set_pm_range). False
+                            # = one fixed range, every run before 2026-10-25.
+    pm_range_headroom: float = 1.5  # predicted power x this must fit the range
+    pm_overrange_frac: float = 0.95  # a reading at this fraction of full scale is over
+    fastscan_pm_probe_n: int = 256  # pixels read on the widest range before each
+                            # fast-scan bias pass; the brightest x headroom sets the range
     pm_averaging: int = 3  # internal averaging per reading
 
     # ── VLED (ch A) — constant LED anode drive ──────────────────────────
@@ -959,6 +971,11 @@ class IQEConfig:
                 raise ValueError(
                     f"fastscan_pool_detrend={self.fastscan_pool_detrend}; expected an "
                     f"odd window of at least 3 groups")
+        if self.pool_pm_range_below_v is not None and self.pm_autorange:
+            raise ValueError(
+                "pool_pm_range_below_v with pm_autorange: the per-bias ranging already "
+                "moves the pooled targets to a coarser range where they need it. Set "
+                "pm_autorange=false to use the fixed two-range switch.")
         if self.pool_pm_range_below_v is not None:
             if not self.pool_groups:
                 raise ValueError(

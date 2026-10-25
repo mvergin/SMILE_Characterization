@@ -47,7 +47,7 @@ AGG_SWEEP = (AGG_REQUIRED[:6] + ["QUADRANT"]
                 for c in ([f"{ch}_{s}" for s in _STATS] + [f"{ch}_REF"]
                           + [f"{ch}_REF_{s}" for s in _STATS])]
              + ["LEAK_REF_BITVAL", "LEAK_REF_TRIES", "LEAK_REF_FRAC", "LEAK_REF_CACHED",
-                "NVLED_LIMIT_A", "NVLED_AT_COMPLIANCE"])
+                "NVLED_LIMIT_A", "NVLED_AT_COMPLIANCE", "PM_RANGE_W"])
 # Written ONLY when pool_groups is non-empty, which is not the default. Listed apart
 # from AGG_SWEEP on purpose: an ordinary run must write the columns above and
 # no others, or every existing reader has to learn a column to read a run with no
@@ -83,10 +83,11 @@ def _check_layout(run_dir: Path, label: str):
 
     fast_agg = _header(sorted(fast.glob("*aggregated_bitval=*_mean_std.csv"))[0])
     # QUADRANT last, so the columns a positional reader counts stay where they were
-    assert fast_agg == AGG_REQUIRED + ["QUADRANT"], (
+    # QUADRANT and PM_RANGE_W (pm_autorange, the default) after the old columns
+    assert fast_agg == AGG_REQUIRED + ["QUADRANT", "PM_RANGE_W"], (
         f"{label}: fast-scan columns changed -> {fast_agg}")
     sweep_agg = _header(sorted(sweep.glob("*aggregated_bitval=*_mean_std.csv"))[0])
-    assert sweep_agg in (AGG_SWEEP, AGG_SWEEP + AGG_POOL), \
+    assert sweep_agg in (AGG_SWEEP, AGG_SWEEP[:-1] + AGG_POOL + AGG_SWEEP[-1:]), \
         f"{label}: sweep columns changed -> {sweep_agg}"
 
     raw = run_file(run_dir, "NVLEDSweep/Sweep/raw_data/Sweep.csv")
@@ -164,7 +165,7 @@ def test_an_interrupted_run_is_still_readable():
             m.shutdown(pm, smu, smile, cfg)
         assert sel, "fast scan found no pixels"
         agg = run_file(run_dir, "FastScan/aggregated_bitval=15_mean_std.csv")
-        assert _header(agg) == AGG_REQUIRED + ["QUADRANT"]
+        assert _header(agg) == AGG_REQUIRED + ["QUADRANT", "PM_RANGE_W"]
         with open(agg, newline="", encoding="utf-8") as f:
             assert len(list(csv.DictReader(f))) == 64      # every ROI pixel
 

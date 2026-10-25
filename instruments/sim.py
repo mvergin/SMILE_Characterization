@@ -27,7 +27,11 @@ class PM400Sim:
     def set_auto_range(self, enable):
         pass
 
+    def get_range(self):
+        return getattr(self, "_req_range", 1e-7)
+
     def set_range(self, upper_limit):
+        self._req_range = float(upper_limit)
         pass
 
     def set_averaging(self, count):

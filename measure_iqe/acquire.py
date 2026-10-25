@@ -612,7 +612,7 @@ def agg_cols(cfg: IQEConfig) -> list[str]:
         cols += _AGG_COLS_LIMIT
     if cfg.pool_groups:
         cols += _AGG_COLS_POOL
-    if cfg.pool_pm_range_below_v is not None:
+    if cfg.pool_pm_range_below_v is not None or cfg.pm_autorange:
         cols += _AGG_COLS_PMRANGE
     return cols
 
@@ -1162,7 +1162,8 @@ class _SimPM:
     def set_wavelength(self, *a): pass
     def set_power_unit(self, *a): pass
     def set_auto_range(self, *a): pass
-    def set_range(self, *a): pass
+    def set_range(self, r, *a): self._req_range = float(r)
+    def get_range(self): return getattr(self, "_req_range", 1e-7)
     def set_averaging(self, *a): pass
     def display_off(self): pass
     def display_on(self): pass
@@ -1549,6 +1550,13 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
     t0 = time.perf_counter()
     screen_rows: list[Row] = []
     if cfg.fastscan_pool:
+        if cfg.pm_autorange:
+            # K pixels lit at once emit ~K x one pixel: range the screen for that.
+            smu.set_voltage("b", float(volts[0]))
+            time.sleep(max(cfg.fastscan_settle_ms, cfg.thermal_settle_ms) / 1000.0)
+            probe_pm_range(pm, smu, smile, list(roi_pixels(x1, y1, x2, y2)), cfg, log,
+                           cfg.fastscan_bitval, cfg.fastscan_pm_probe_n,
+                           scale=cfg.fastscan_pool, tag=" for the group screen")
         # The screen narrows `order` once, at volts[0]. Extra biases then cover the
         # same narrowed set, which is the only coherent choice: a bias pass over
         # pixels the screen never kept would have nothing to compare against.
@@ -1570,6 +1578,14 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
             # settle a pixel switch gets before the first pixel is judged.
             time.sleep(max(cfg.fastscan_settle_ms, cfg.thermal_settle_ms) / 1000.0)
             log(f"  pass {volts.index(v_fs) + 1}/{len(volts)} @ {v_fs:g} V")
+        # Every bias pass picks its own PM400 range: from -2.6 V to -0.8 V the light
+        # spans three decades, and no one range is both on scale at the bright end and
+        # quiet at the faint one.
+        pm_rng = None
+        if cfg.pm_autorange:
+            time.sleep(max(cfg.fastscan_settle_ms, cfg.thermal_settle_ms) / 1000.0)
+            pm_rng = probe_pm_range(pm, smu, smile, order, cfg, log, cfg.fastscan_bitval,
+                                    cfg.fastscan_pm_probe_n, tag=f" @ {v_fs:+.3f} V")
         # The first fastscan_remeasure_n pixels come round again at the end of the
         # SAME loop -- no pause, no second scan -- so the pair differs only in time.
         n_re = min(max(0, int(cfg.fastscan_remeasure_n)), len(order))
@@ -1581,24 +1597,36 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
                 time.sleep(cfg.fastscan_settle_ms / 1000.0)
             ts = time.perf_counter() - t0
             p, ps, iv, ivs, inv, invs, _, _ = acquire_point(pm, smu, cfg.fastscan_n_smu, 3)
+            # Brighter than the probe saw: up a range, re-read, and stay up for the
+            # rest of the pass rather than flap back and forth.
+            while pm_rng is not None and pm_over(p, pm_rng, cfg):
+                up = pm_range_up(pm, smu, pm_rng, cfg.fastscan_n_smu, 3, cfg, log)
+                if up == pm_rng:
+                    break
+                pm_rng = up
+                ts = time.perf_counter() - t0
+                p, ps, iv, ivs, inv, invs, _, _ = acquire_point(
+                    pm, smu, cfg.fastscan_n_smu, 3)
             (fs_rows if i < len(order) else re_rows).append(
                 dict(X=x, Y=y, BITVAL=cfg.fastscan_bitval, NVLED_V=v_fs,
                      TIME_START=ts, TIME_END=time.perf_counter() - t0,
                      NVLED_CURR_MEAN=inv, NVLED_CURR_SEM=invs,
                      VLED_CURR_MEAN=iv, VLED_CURR_SEM=ivs,
-                     PM400_POWER_MEAN=p, PM400_POWER_SEM=ps))
+                     PM400_POWER_MEAN=p, PM400_POWER_SEM=ps,
+                     **({"PM_RANGE_W": pm_rng} if pm_rng is not None else {})))
     # Every file a run writes carries <sample>_<stamp>_, so a CSV that is copied out of
     # its directory can still be traced back to the run that made it.
     pfx = run_slug(cfg.sample_name, run_dir) + "_"
     # One aggregated file per bias. A single-bias scan keeps the name it always had;
     # with several, each file says its bias, so no reader gets two rows per pixel
     # from one file. raw_data/FastScan.csv stays one long-format file with NVLED_V.
+    fs_cols = _AGG_COLS + (["PM_RANGE_W"] if cfg.pm_autorange else [])
     for v_fs in volts:
         tag = "" if len(volts) == 1 else f"_v={v_fs:+.3f}"
         write_aggregated_one(
             run_dir / "FastScan"
             / f"{pfx}aggregated_bitval={cfg.fastscan_bitval}{tag}_mean_std.csv",
-            [r for r in fs_rows if r["NVLED_V"] == v_fs])
+            [r for r in fs_rows if r["NVLED_V"] == v_fs], cols=fs_cols)
     raw = IncrementalRaw(run_dir / "FastScan" / "raw_data" / f"{pfx}FastScan.csv")
     raw.append(fs_rows); raw.close()
     if re_rows:
@@ -1608,7 +1636,7 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
             write_aggregated_one(
                 run_dir / "FastScan"
                 / f"{pfx}remeasure_bitval={cfg.fastscan_bitval}{tag}_mean_std.csv",
-                [r for r in re_rows if r["NVLED_V"] == v_fs])
+                [r for r in re_rows if r["NVLED_V"] == v_fs], cols=fs_cols)
         raw = IncrementalRaw(run_dir / "FastScan" / "raw_data"
                              / f"{pfx}FastScan_remeasure.csv")
         raw.append(re_rows); raw.close()
@@ -1899,6 +1927,14 @@ def pool_members(x, y) -> tuple[tuple[int, int], ...]:
     return _pool_members.get((int(x), int(y)), ((int(x), int(y)),))
 
 
+def fs_power_anchor(r) -> float:
+    """A selected target's fast-scan power x its member count: the first PM-range guess."""
+    try:
+        return abs(float(r.get("PM400_POWER_MEAN") or 0.0)) * len(pool_members(r["X"], r["Y"]))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def light(smile, x, y, bitval):
     """Drive the target keyed by ``(x, y)`` at ``bitval``.
 
@@ -2015,7 +2051,9 @@ def prefill_reference_cache(pm, smu, smile, pixels, cfg: IQEConfig, log: Logger)
         if not reads:
             continue
         best = min(reads, key=lambda r: abs(r[4]))    # r[4] = NVLED current mean
-        _ref_cache[(int(x), int(y))] = best
+        # keyed by the range it was read on when the range moves (see measure_point)
+        _ref_cache[(int(x), int(y))
+                   + ((_pm_range_now[0],) if cfg.pm_autorange else ())] = best
         hi = max(abs(r[4]) for r in reads)
         if hi > 2.0 * abs(best[4]):
             # Not a rejection -- the minimum already rejected it. This says the pixel
@@ -2086,6 +2124,92 @@ def flush_pm_after_range(pm, smu, n_smu: int, n_pm: int, cfg: IQEConfig) -> None
         pass            # a throwaway read must never be what ends a 30 h run
 
 
+# The PM400's hardware ranges as the meter realises them, learned once per session:
+# a request picks the smallest range that covers it (1e-7 -> 470 nW on the S171C), so
+# the ladder is asked for, not assumed.
+_pm_ladder: list[float] = []
+
+
+def pm_ladder(pm, cfg: IQEConfig, log: Logger | None = None) -> list[float]:
+    """The realised full scales, ascending. Requests every decade 1e-9..1e-2 W once."""
+    if _pm_ladder:
+        return _pm_ladder
+    got = set()
+    if hasattr(pm, "get_range"):
+        for e in range(-9, -1):
+            try:
+                pm.set_range(10.0 ** e)
+                got.add(float(pm.get_range()))
+            except Exception:
+                pass
+        try:
+            pm.set_range(_pm_range_now[0] or cfg.pm_range)   # back where it was
+        except Exception:
+            pass
+    _pm_ladder.extend(sorted(r for r in got if r > 0) or [cfg.pm_range])
+    if log is not None:
+        log("  PM400 ranges: " + ", ".join(f"{r:.3g} W" for r in _pm_ladder))
+    return _pm_ladder
+
+
+def pick_pm_range(p_pred: float | None, cfg: IQEConfig, ladder: list[float]) -> float:
+    """The smallest range >= pm_range_headroom x the predicted power. With nothing
+    predicted, the widest: a clipped point is lost, a coarse one only noisier."""
+    if p_pred is None or not math.isfinite(p_pred) or p_pred <= 0:
+        return ladder[-1]
+    need = cfg.pm_range_headroom * abs(p_pred)
+    return next((r for r in ladder if r >= need), ladder[-1])
+
+
+def pm_over(p, rng: float, cfg: IQEConfig) -> bool:
+    """An over-range (or unreadable) PM400 reading on full scale ``rng``."""
+    return p is None or not math.isfinite(p) or abs(p) >= cfg.pm_overrange_frac * rng
+
+
+def pm_range_up(pm, smu, rng: float, n_smu: int, n_pm: int, cfg: IQEConfig,
+                log: Logger) -> float:
+    """One range up the ladder, with the discarded burst. ``rng`` at the top."""
+    up = next((r for r in (_pm_ladder or [rng]) if r > rng), None)
+    if up is None:
+        return rng
+    log(f"      PM400 over-range on {rng:.3g} W: up to {up:.3g} W and read again")
+    set_pm_range(pm, up)
+    flush_pm_after_range(pm, smu, n_smu, n_pm, cfg)
+    return up
+
+
+def probe_pm_range(pm, smu, smile, pixels, cfg: IQEConfig, log: Logger, bitval: int,
+                   n: int, scale: float = 1.0, tag: str = "") -> float:
+    """Set the range from the brightest of up to ``n`` pixels read on the widest range.
+
+    For a pass whose power nothing predicts yet: a fast-scan bias, a pixel search. The
+    brightest x ``scale`` (K for groups) x headroom picks the range; a pixel that is
+    brighter still is caught by the per-point over-range retry."""
+    ladder = pm_ladder(pm, cfg, log)
+    set_pm_range(pm, ladder[-1])
+    flush_pm_after_range(pm, smu, 1, 1, cfg)
+    pick = list(pixels)
+    if len(pick) > n:
+        idx = np.random.default_rng(0).choice(len(pick), n, replace=False)
+        pick = [pick[i] for i in sorted(idx)]
+    p_max = 0.0
+    for (x, y) in pick:
+        smile.blank_frame()
+        smile.set_pixel(x, y, bitval)
+        time.sleep(max(cfg.fastscan_settle_ms, 5.0) / 1000.0)
+        p = pm.measure()
+        if p is not None and math.isfinite(p):
+            p_max = max(p_max, abs(p))
+    smile.blank_frame()
+    rng = pick_pm_range(p_max * scale, cfg, ladder)
+    _, changed = set_pm_range(pm, rng)
+    if changed:
+        flush_pm_after_range(pm, smu, 1, 1, cfg)
+    log(f"  PM400 range {rng:.3g} W{tag}: brightest of {len(pick)} probed pixel(s) "
+        f"{p_max:.3g} W" + (f" x{scale:g}" if scale != 1 else ""))
+    return rng
+
+
 # A lit reading that draws no more than this times its own leakage reference did not
 # light the pixel: the frame write was dropped, as the bitval-0 write sometimes is
 # (section 19). A working pixel is >= ~1.9x even at -0.80 V, where the reference is at
@@ -2096,7 +2220,8 @@ LIT_FAIL_RATIO = 1.10
 
 def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
                   cfg: IQEConfig, t0: float, log: Logger,
-                  restore: bool = True) -> tuple[dict, dict | None]:
+                  restore: bool = True,
+                  pm_rng: float | None = None) -> tuple[dict, dict | None]:
     """Acquire one (pixel, bias) point and build its row.
 
     The caller has already driven the bias, chosen the limit/range and the NPLC, and
@@ -2118,6 +2243,10 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
         rng, changed = set_pm_range(pm, pm_range_for(x, y, v, cfg), log=log)
         if changed:
             flush_pm_after_range(pm, smu, n_smu, n_pm, cfg)
+    if pm_rng is not None:                      # the caller's per-bias pick
+        rng, changed = set_pm_range(pm, pm_rng)
+        if changed:
+            flush_pm_after_range(pm, smu, n_smu, n_pm, cfg)
     # TIME_START/TIME_END bracket the lit burst that the row reports -- the re-read's,
     # when the first lit frame did not land.
     t_lit = [0.0, 0.0]
@@ -2136,6 +2265,14 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
         return pt[:6], raw
 
     (p, ps, iv, ivs, inv, invs), raw_s = read_lit()
+    # Over range: one range up and read again, as often as the ladder allows. The
+    # reference below is then read on the same, final range.
+    while pm_rng is not None and pm_over(p, rng, cfg):
+        up = pm_range_up(pm, smu, rng, n_smu, n_pm, cfg, log)
+        if up == rng:
+            break
+        rng = up
+        (p, ps, iv, ivs, inv, invs), raw_s = read_lit()
 
     # Leakage reference: the SAME pixel at bitval 0. Measured back to back with the lit
     # point so both carry the same relaxation history and the subtraction cancels most of
@@ -2159,11 +2296,16 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
         # reference is a few percent of the reading and a fixed per-pixel value costs
         # under 0.14%; measured per point above it, where it is 5-62% of the reading
         # and the subtraction decides the answer. See config.leak_ref_per_point_above_v.
-        use_cache = (cfg.leak_ref_per_point_above_v is not None
-                     and v <= cfg.leak_ref_per_point_above_v
-                     and (int(x), int(y)) in _ref_cache)
+        # With the PM range moving, a cached reference is only valid on the range it
+        # was read on: the ranges' dark offsets differ (1154 pW, 470 nW vs 4.7 uW).
+        # So the cache is per (pixel, range), and a pixel reaching a new range below
+        # the threshold measures its reference once there and caches it.
+        ck = (int(x), int(y)) + ((rng,) if pm_rng is not None else ())
+        below = (cfg.leak_ref_per_point_above_v is not None
+                 and v <= cfg.leak_ref_per_point_above_v)
+        use_cache = below and ck in _ref_cache
         if use_cache:
-            ref = _ref_cache[(int(x), int(y))]
+            ref = _ref_cache[ck]
             cached = True
             # The frame was never touched, so there is nothing to restore and no
             # settle to pay -- the saving is the 2 s reference settle, its burst, and
@@ -2176,6 +2318,8 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
         else:
             ref, tries, frac = read_reference(pm, smu, smile, x, y, n_pm, n_smu,
                                               cfg, p, log, v)
+            if pm_rng is not None and below and not (frac > cfg.leak_ref_max_frac):
+                _ref_cache[ck] = ref
             if restore:
                 light(smile, x, y, bitval)
                 time.sleep(cfg.leak_ref_settle_s * cfg.settle_scale)
@@ -2218,7 +2362,7 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
         # does not quote, so a comma inside a value silently shifts every later column.
         row.update(POOL_K=len(members),
                    POOL_MEMBERS=" ".join(f"{mx}:{my}" for mx, my in members))
-    if cfg.pool_pm_range_below_v is not None:
+    if cfg.pool_pm_range_below_v is not None or pm_rng is not None:
         row["PM_RANGE_W"] = rng
     if ref is not None:
         row.update(NVLED_CURR_REF=ref[4], VLED_CURR_REF=ref[2], PM400_POWER_REF=ref[0],
@@ -2531,6 +2675,16 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
     cur_nplc = cur_range = None      # cur_limit is set by the preconditioning block
     i_last = None
     v_last = None
+    # The PM400 range, chosen per bias from the brightest target of the previous bias
+    # scaled by the measured P(V), exactly as the SMU limit is. The first bias has no
+    # prediction and starts on the widest range.
+    p_last = pv_last = None
+    pm_lad = pm_ladder(pm, cfg, log) if cfg.pm_autorange else None
+    if pm_lad:
+        # the first bias, from the brightest target's own fast-scan power
+        p0 = max((fs_power_anchor(r) for r in selected), default=0.0)
+        if p0 > 0:
+            p_last, pv_last = p0, float(cfg.nvled_v_fastscan)
     # The first sweep bias at or below the threshold -- the one whose pooled targets
     # switched range. None when the switch is off or no grid point is past it.
     dual_rows: list[Row] = []
@@ -2579,6 +2733,14 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
                     and cfg.nvled_range_i != cur_range):
                 set_measure_range_b(smu, cfg.nvled_range_i); cur_range = cfg.nvled_range_i
             i_bias = 0.0
+            p_bias = 0.0
+            pm_rng = None
+            if pm_lad:
+                pm_rng = pick_pm_range(
+                    p_last * bias_scale(v, pv_last)[0] if p_last else None, cfg, pm_lad)
+                # set before the dwell, so the dwell's own P(t) trace is on scale too
+                if set_pm_range(pm, pm_rng)[1]:
+                    flush_pm_after_range(pm, smu, n_smu, n_pm, cfg)
 
             # --- the one dwell this bias costs, for all the pixels below it ---
             #
@@ -2637,11 +2799,15 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
                 light(smile, x, y, bitval)
                 time.sleep(cfg.pixel_switch_settle_s * cfg.settle_scale)
                 row, raw_s = measure_point(pm, smu, smile, x, y, bitval, v, limit,
-                                           n_pm, n_smu, cfg, t0, log, restore=False)
+                                           n_pm, n_smu, cfg, t0, log, restore=False,
+                                           pm_rng=pm_rng)
                 if raw_s is not None:
                     samps.append((x, y, bitval, row["NVLED_V"], row["TIME_START"], raw_s))
                 rows.append(row)
                 i_bias = max(i_bias, abs(row["NVLED_CURR_MEAN"]))
+                p_bias = max(p_bias, abs(row["PM400_POWER_MEAN"]))
+                if pm_rng is not None:      # an over-range moved it up: keep it up
+                    pm_rng = max(pm_rng, row.get("PM_RANGE_W", pm_rng))
                 # Dead-pixel abort, judged at the FIRST bias only -- which under
                 # high_to_low is the brightest, exactly as in pixel_major. Here it
                 # drops the pixel from every remaining bias, so one judgement saves
@@ -2653,6 +2819,8 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
                     dead_here.append((x, y))
             if i_bias > 0:
                 i_last, v_last = i_bias, float(v)
+            if p_bias > 0:
+                p_last, pv_last = p_bias, float(v)
             for px in dead_here:
                 live.remove(px)
                 n_dead += 1
@@ -2920,6 +3088,7 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                               cfg, log, append=bool(skip), prefix=pfx)
     sw_rows = []
     live_peaks = []                 # brightest-point power (W) of confirmed-live pixels
+    p_first_prev = None             # first-point power of the previous pixel (PM range)
     n_dead = 0
     t0 = time.perf_counter()
     try:
@@ -2967,6 +3136,14 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
             cur_range = None
             cur_limit = None
             i_last = None          # drives the compliance ladder; see pick_limit
+            # The PM400 range follows the same rule along the pixel; its first point
+            # starts from the previous pixel's first-point power.
+            pm_lad = pm_ladder(pm, cfg, log) if cfg.pm_autorange else None
+            p_px = pv_px = None
+            if pm_lad:
+                p_px, pv_px = fs_power_anchor(r), float(cfg.nvled_v_fastscan)
+                if not p_px:          # no fast-scan reading: the previous pixel's first
+                    p_px, pv_px = p_first_prev, (fine[0][0] if fine else None)
             for jpt, (v, i_target) in enumerate(fine):
                 if parked():      # Ctrl-C / shutdown: stop before touching a dead session
                     break
@@ -3021,9 +3198,17 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                     # In High-C the limit governs the range — writing it here is the
                     # conflict that made earlier High-C runs fail. Leave it alone.
                     set_measure_range_b(smu, cfg.nvled_range_i); cur_range = cfg.nvled_range_i
+                pm_rng = None
+                if pm_lad:
+                    pm_rng = pick_pm_range(
+                        p_px * bias_scale(v, pv_px)[0] if p_px else None, cfg, pm_lad)
                 row, raw_s = measure_point(pm, smu, smile, x, y, bitval, v, limit,
-                                           n_pm, n_smu, cfg, t0, log)
+                                           n_pm, n_smu, cfg, t0, log, pm_rng=pm_rng)
                 p, inv = row["PM400_POWER_MEAN"], row["NVLED_CURR_MEAN"]
+                if pm_lad:
+                    p_px, pv_px = abs(p), v
+                    if jpt == 0:
+                        p_first_prev = abs(p)
                 if raw_s is not None:
                     psamps.append((x, y, bitval, row["NVLED_V"], row["TIME_START"], raw_s))
                 i_last = abs(inv)

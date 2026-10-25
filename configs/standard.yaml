@@ -207,6 +207,10 @@ smu_addr: "USB0::0x05E6::0x2602::4649721::INSTR"
 # ---- PM400 ----
 pm_wavelength: 440.0
 pm_range: 1.0e-07   # W, fixed (no autorange)
+pm_autorange: true   # pick the PM400 range per sweep bias / fast-scan pass from the predicted power; step up and re-read on over-range. false = pm_range fixed
+pm_range_headroom: 1.5   # predicted power x this must fit the range
+pm_overrange_frac: 0.95   # a reading at this fraction of full scale counts as over-range
+fastscan_pm_probe_n: 256   # pixels probed on the widest range before each fast-scan pass
 pm_averaging: 3   # internal averaging per reading
 
 # ---- VLED (ch A) — constant LED anode drive ----

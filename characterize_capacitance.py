@@ -157,6 +157,9 @@ def check_alive(pm, smu, smile, cfg, x, y, args, log):
     smile.blank_frame()
     smu.set_voltage("b", cfg.nvled_v_fastscan)
     time.sleep(settle)
+    if cfg.pm_autorange:          # on scale for THIS pixel before dark and lit are read
+        m.acquire.probe_pm_range(pm, smu, smile, [(x, y)], cfg, log, cfg.fastscan_bitval, 1,
+                                 tag=f" for ({x},{y})")
     dark, _ = read_power(pm, args.alive_n_pm)
     smile.set_pixel(x, y, cfg.fastscan_bitval)
     time.sleep(settle)
@@ -204,6 +207,10 @@ def select_pixels(pm, smu, smile, cfg, args, log):
         wx2, wy2 = min(x2, wx1 + args.quadrant_window - 1), min(y2, wy1 + args.quadrant_window - 1)
         log(f"  {quad}: scanning window ({wx1},{wy1})-({wx2},{wy2})")
         rows = []
+        if cfg.pm_autorange:
+            win_px = [(x, y) for y in range(wy1, wy2 + 1) for x in range(wx1, wx2 + 1)]
+            m.acquire.probe_pm_range(pm, smu, smile, win_px, cfg, log, cfg.fastscan_bitval,
+                                     16, tag=f" for the {quad} window")
         smile.blank_frame()
         time.sleep(0.02)
         dark, _ = read_power(pm, args.alive_n_pm)
@@ -1800,19 +1807,32 @@ def exp_switchmatrix(pm, smu, smile, cfg, args, log):
                                         nvled_range_i=None)
             m.configure_voltage_source_b(smu, probe, log)
             smu.set_voltage("b", float(v))
-            cur = {}
+            pm_lad = m.acquire.pm_ladder(pm, cfg, log) if cfg.pm_autorange else None
+            if pm_lad:                  # probe the light on the widest range
+                m.acquire.set_pm_range(pm, pm_lad[-1])
+                m.acquire.flush_pm_after_range(pm, smu, 1, 1, cfg)
+            cur, pw = {}, {}
             for k, xy in (("B", b), ("A", a)):
                 smile.set_pixel(*xy, bv)
                 time.sleep(0.3)
-                cur[k] = abs(m.acquire_point(pm, smu, 10, 1)[4])
+                pt = m.acquire_point(pm, smu, 10, 1)
+                cur[k], pw[k] = abs(pt[4]), abs(pt[0])
             need = 1.5 * max(cur.values())
             rng = next((r for r in m.SMU_I_RANGES if r >= need), m.SMU_I_RANGES[-1])
             scfg = dataclasses.replace(cfg, nvled_compliance=rng, nvled_range_i=None)
             m.configure_voltage_source_b(smu, scfg, log)
+            # The PM400 range for the brighter of the two, set before the hold so it
+            # never changes inside the record.
+            pm_rng = cfg.pm_range
+            if pm_lad:
+                pm_rng = m.acquire.pick_pm_range(max(pw.values()), cfg, pm_lad)
+                if m.acquire.set_pm_range(pm, pm_rng)[1]:
+                    m.acquire.flush_pm_after_range(pm, smu, 1, 1, cfg)
             tag = f"swm_v{v:+.3f}_p{ka}-{a[0]}-{a[1]}_p{kb}-{b[0]}-{b[1]}"
             log(f"    {v:+.3f} V  p{ka}{a} {_quadrant_of(*a)} <-> p{kb}{b} "
                 f"{_quadrant_of(*b)}: I_A {cur['A'] * 1e6:.2f} uA, I_B "
-                f"{cur['B'] * 1e6:.2f} uA -> range {rng:g} A")
+                f"{cur['B'] * 1e6:.2f} uA -> range {rng:g} A; P_A {pw['A'] * 1e9:.1f} nW, "
+                f"P_B {pw['B'] * 1e9:.1f} nW -> PM400 {pm_rng:.3g} W")
             ptrace = (PowerTrace(pm, args.swm_n_pm, averaging=1)
                       if args.swm_n_pm else None)
             seq = swm_sequence(a, b, bv, args.swm_cycles)
@@ -1863,6 +1883,7 @@ def exp_switchmatrix(pm, smu, smile, cfg, args, log):
                 a_quadrant=_quadrant_of(*a), b_slot=f"p{kb}", b_x=b[0], b_y=b[1],
                 b_quadrant=_quadrant_of(*b), bitval=bv, i_a_probe=cur["A"],
                 i_b_probe=cur["B"], range_a=rng, highc=int(cfg.highc_b),
+                p_a_probe=pw["A"], p_b_probe=pw["B"], pm_range_w=pm_rng,
                 nplc=args.swm_nplc, n=int(t.size), n_overflow=n_over,
                 interval_us=(1e6 * float(np.median(np.diff(t))) if t.size > 1 else nan),
                 hold_s=args.swm_hold_s, pre_s=args.swm_pre_s, gap_s=args.swm_gap_s,
@@ -1910,6 +1931,11 @@ def exp_leakmatrix(pm, smu, smile, pixel, cfg, args, log):
     rows = []
     x, y = pixel
     probe_lim = 1e-4
+    pm_rng = cfg.pm_range
+    if cfg.pm_autorange:            # LED off at these biases: the finest, quietest range
+        pm_rng = m.acquire.pm_ladder(pm, cfg, log)[0]
+        if m.acquire.set_pm_range(pm, pm_rng)[1]:
+            m.acquire.flush_pm_after_range(pm, smu, 1, 1, cfg)
     for v in args.leakm_voltages:
         pcfg = dataclasses.replace(cfg, nvled_compliance=probe_lim, nvled_range_i=None)
         m.configure_voltage_source_b(smu, pcfg, log)
@@ -1940,6 +1966,7 @@ def exp_leakmatrix(pm, smu, smile, pixel, cfg, args, log):
                                       return_raw=True)
             rows.append(dict(v=v, state=label, frame=kind, bitval=bit, enables=en,
                              x=x, y=y, quadrant=_quadrant_of(x, y), range_a=rng,
+                             pm_range_w=pm_rng,
                              highc=int(cfg.highc_b), i_probe=i_probe,
                              **m.stat_columns("NVLED_CURR", raw["nvled"]),
                              **m.stat_columns("VLED_CURR", raw["vled"]),

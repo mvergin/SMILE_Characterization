@@ -101,6 +101,10 @@ class PM400:
     def set_range(self, upper_limit):
         self._write_and_wait(f"SENS:POW:RANG {upper_limit}")
 
+    def get_range(self):
+        """The full scale the meter actually chose (W). set_range is only a request."""
+        return float(self.inst.query("SENS:POW:RANG?"))
+
     def zero_device(self):
         print("Zeroing device... (Ensure sensor is covered)")
         self.inst.write("SENS:CORR:COLL:ZERO:INIT")
