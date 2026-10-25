@@ -1573,7 +1573,9 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
     """
     rows = []
     x, y = pixel
-    fx, fy = args.switch_from if args.switch_from else (x, y)
+    # "X,Y" like --pixels, or the older "X Y"
+    fx, fy = ([int(v) for v in ",".join(args.switch_from).replace(" ", ",").split(",") if v]
+              if args.switch_from else (x, y))
     m.configure_voltage_source_b(smu, cfg, log)
     if not cfg.highc_b:
         m.set_measure_range_b(smu, args.ranges[0])
@@ -2334,8 +2336,7 @@ def build_parser():
     ap.add_argument("--isrc-seconds", type=float, default=120.0,
                     help="hold time per setpoint - needs to be minutes, not ms")
     ap.add_argument("--isrc-period", type=float, default=0.5, help="log period (s)")
-    ap.add_argument("--switch-from", nargs=2, type=int, default=None,
-                    metavar=("X", "Y"),
+    ap.add_argument("--switch-from", nargs="+", default=None, metavar="X,Y",
                     help="switch: the pixel lit while the bias settles, before the "
                          "frame changes to the target (default: the target itself, "
                          "which tests re-addressing only)")

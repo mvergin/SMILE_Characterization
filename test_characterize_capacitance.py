@@ -590,7 +590,7 @@ def test_a_simulated_switch_run_records_where_the_switch_is():
     cfg = m.IQEConfig()
     pm, smu, sim = m.connect(cfg, lambda _s: None, simulate=True)
     args = build_parser().parse_args(
-        ["--what", "switch", "--pixels", "300,40", "--switch-from", "10", "20",
+        ["--what", "switch", "--pixels", "300,40", "--switch-from", "10,20",
          "--voltages", "-1.2", "--switch-hold-s", "0", "--max-presettle-s", "0",
          "--samples", "200", "--switch-pre-s", "0.05", "--switch-n-pm", "1"])
     smile = _FakeSmile(sim)
