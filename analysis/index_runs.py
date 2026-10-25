@@ -44,7 +44,7 @@ def kind_of(d: Path) -> str:
         return "sweep"
     if (d / "FastScan").is_dir():
         return "fastscan"
-    if d.name.endswith("_CAPACITANCE"):
+    if "_CAPACITANCE" in d.name:          # since 2026-10-25 followed by _Switch, _Cap...
         return "bench"
     return "other"
 

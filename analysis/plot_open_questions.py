@@ -181,7 +181,7 @@ def q2(ax=None):
 
 # ----------------------------------------------------------------------------- Q3
 def q3(ax=None):
-    z = np.load(one("demo/transients/261014-1550_CAPACITANCE/traces.npz"),
+    z = np.load(one("demo/transients/261014-1550_CAPACITANCE*/traces.npz"),
                 allow_pickle=True)
     by: dict[str, dict] = {}
     for k in z.keys():
@@ -230,7 +230,7 @@ def q4(ax=None):
           + "".join(f"{f'@{x}s':>9}" for x in (0.1, 0.5, 1, 2, 5, 10)) + f"{'noise':>8}")
     traces = {}
     for run, hc in (("261014-2223", "High-C"), ("261014-2151", "no High-C")):
-        z = np.load(one(f"demo/switchtest/{run}_CAPACITANCE/traces.npz"),
+        z = np.load(one(f"demo/switchtest/{run}_CAPACITANCE*/traces.npz"),
                     allow_pickle=True)
         for k in sorted(z.keys()):
             t, _, ib = z[k]

@@ -2611,7 +2611,10 @@ def main(argv=None):
     # results/ -- 24 did before this (report, Appendix C.7).
     if args.simulate:
         slug = "SIMULATED_" + slug
-    out_dir = root / f"{datetime.datetime.now():%y%m%d-%H%M}_{slug}_CAPACITANCE"
+    # The experiments that ran, after CAPACITANCE: <stamp>_<sample>_CAPACITANCE_Switch,
+    # ..._CAPACITANCE_Cap_Step. The folder says what is inside without opening it.
+    out_dir = root / (f"{datetime.datetime.now():%y%m%d-%H%M}_{slug}_CAPACITANCE_"
+                      + "_".join(w.capitalize() for w in what))
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"Output: {out_dir}")
     (out_dir / "run_config.json").write_text(

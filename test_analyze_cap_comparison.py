@@ -146,6 +146,8 @@ def test_a_run_directory_with_neither_csv_is_not_silently_empty(tmp=None):
         p.mkdir()
         r = Run(p)
         assert r.name == "Nothing" and r.stamp == "261021-1200", (r.name, r.stamp)
+        # and with the experiment names the folder carries since 2026-10-25
+        assert Run(Path(d) / "261021-1200_Array38_CAPACITANCE_Cap_Step").name == "Array38"
         assert r.cap == [] and r.step == [] and r.keys == []
         assert r.step_traces() == [] and r.cap_traces() == []
 

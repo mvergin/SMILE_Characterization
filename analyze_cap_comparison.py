@@ -96,9 +96,9 @@ class Run:
         self.step = _rows(path / "step.csv")
         self.npz = (np.load(path / "traces.npz") if (path / "traces.npz").exists()
                     else None)
-        # The run directory is named <stamp>_<sample>_CAPACITANCE. Anything written
-        # before --sample-name became mandatory has no trustworthy name.
-        m = re.match(r"\d{6}-\d{4}_(.+)_CAPACITANCE$", path.name)
+        # The run directory is named <stamp>_<sample>_CAPACITANCE[_Cap_Step...]. Anything
+        # written before --sample-name became mandatory has no trustworthy name.
+        m = re.match(r"\d{6}-\d{4}_(.+?)_CAPACITANCE(?:_[A-Za-z]+)*$", path.name)
         self.name = m.group(1) if m else path.name
         self.stamp = path.name[:11]
         self._st = None
