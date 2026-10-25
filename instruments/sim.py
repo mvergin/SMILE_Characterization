@@ -239,7 +239,7 @@ class SmileFPGASim:
     def __init__(self, resource_id=None):
         print("[SIM] SMILE FPGA")
 
-    def set_pixel(self, log_x, log_y, bit_val):
+    def set_pixel(self, log_x, log_y, bit_val, enables=None):
         # Simulate the ~5 ms ACK latency of a real set_pixel call.
         time.sleep(0.005)
         return time.perf_counter()
@@ -249,7 +249,7 @@ class SmileFPGASim:
         time.sleep(0.005)
         return time.perf_counter()
 
-    def blank_frame(self):
+    def blank_frame(self, enables=None):
         time.sleep(0.005)
         return time.perf_counter()
 

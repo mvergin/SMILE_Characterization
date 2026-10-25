@@ -238,6 +238,7 @@ settle_ms: 15.0   # wait after each setpoint before averaging
 fastscan_settle_ms: 10.0   # fast scan settle after lighting a pixel. Back to 10 ms (was 5) — the 5 ms save wasn't ...
 fastscan_random_order: true   # visit fast-scan pixels in a shuffled order (not a raster). A raster correlates any ...
 fastscan_order_seed: 0   # seed for the shuffle (reproducible)
+fastscan_remeasure_n: 100   # re-measure the first N pixels at the end of each bias pass, to remeasure_bitval=*.csv (drift); 0 = off
 fastscan_blank_between: true   # send a black (all-off) frame before lighting each pixel, so exactly ONE pixel is ever ...
 
 # ---- Dead-pixel early abort (voltage sweep) ----
@@ -261,6 +262,8 @@ vramp_lowv_n_pm: 32
 vramp_lowv_n_smu: 12
 vramp_lowv_settle_s: 8.0      # rising side: 1% needs 5-55 s
 vramp_lowv_limit_a: 1.0e-05   # the rising side never exceeds ~5 uA
+vramp_leak_limit_a: 1.0e-06   # range floor from vramp_leak_above_v to 0 V (LED off, ~100-500 nA leak); WITHOUT High-C only
+vramp_leak_above_v: -0.8   # biases at or above this get the vramp_leak_limit_a floor
 vramp_highv_nplc: 1.0       # was 0.5 -- not an integer, so it nulled no mains at all
 vramp_highv_n_pm: 8
 vramp_highv_n_smu: 8

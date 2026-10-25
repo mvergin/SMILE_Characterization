@@ -28,8 +28,11 @@ it. If a change breaks one side, the other side's test fails too.
 │   ├── <P>aggregated_bitval=<b>_mean_std.csv   one row per ROI pixel (one bias)
 │   ├── <P>aggregated_bitval=<b>_v=<V>_mean_std.csv  one file per bias, when the
 │   │                                           fast scan ran at several (2026-10-25+)
+│   ├── <P>remeasure_bitval=<b>[_v=<V>]_mean_std.csv  the first fastscan_remeasure_n
+│   │                                           pixels again, at the end of the pass
 │   └── raw_data/
 │       ├── <P>FastScan.csv                     long-format per-channel rows
+│       ├── <P>FastScan_remeasure.csv           the same, for the re-measured pixels
 │       └── <P>FastScan_config.json             settings used
 └── NVLEDSweep/
     └── Sweep/
@@ -92,6 +95,10 @@ run root instead of `NVLEDSweep/`, and are not part of this contract.
   example `aggregated_bitval=15_v=-1.350_mean_std.csv`). Before 2026-10-25 all
   biases went into one file, told apart by `NVLED_V`. Concatenate, then split on
   `NVLED_V`, and both layouts read the same.
+* `remeasure_bitval=*.csv` (since 2026-10-25, `fastscan_remeasure_n`, default 100)
+  repeats the first N pixels of each fast-scan pass at its end, in the same loop. It
+  has the fast-scan columns and is kept out of `aggregated_*`, so a fast-scan reader
+  still sees every pixel once. Pair it with the fast scan on `X, Y, NVLED_V`.
 * The sweep file holds each pixel's rows as one block, pixels in run order, since
   2026-10-25. `bias_major` writes bias by bias while it runs and reorders the file
   once when the sweep ends, so a run that died mid-sweep is still in bias order.

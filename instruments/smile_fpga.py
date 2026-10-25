@@ -68,8 +68,24 @@ class SmileFPGA:
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
-    def set_pixel(self, log_x, log_y, bit_val):
+    # The four quadrant enables in the frame instruction. With sel_*_pixen = 0 (the
+    # default) the frame's own bits are the enable source (smile set-pixen).
+    _ENABLES = ("tl_pixen", "tr_pixen", "bl_pixen", "br_pixen")
+
+    def _enable_cfg(self, quad_cfg, enables):
+        """Frame config for ``enables``: "own" (None) = the pixel's quadrant only,
+        "all" = all four quadrants, "none" = no quadrant."""
+        if enables in (None, "own"):
+            return quad_cfg
+        if enables not in ("all", "none"):
+            raise ValueError(f"enables must be own, all or none, not {enables!r}")
+        return {k: int(enables == "all") for k in self._ENABLES}
+
+    def set_pixel(self, log_x, log_y, bit_val, enables=None):
         """Turn on a single logical pixel at (log_x, log_y) with intensity bit_val.
+
+        ``enables`` sets the quadrant enables of the frame: None/"own" enables the
+        pixel's own quadrant (every caller before 2026-10-25), "all" or "none".
 
         Returns
         -------
@@ -78,7 +94,8 @@ class SmileFPGA:
         """
         row, col, quad_cfg = self.map_logical_to_physical(log_x, log_y)
         if self._dev is not None:
-            self._set_pixel(self._dev, row, col, bit_val, cfg=quad_cfg)
+            self._set_pixel(self._dev, row, col, bit_val,
+                            cfg=self._enable_cfg(quad_cfg, enables))
         return time.perf_counter()
 
     def set_pixels(self, coords, bit_val):
@@ -115,8 +132,12 @@ class SmileFPGA:
                              cfg=quad_cfg)
         return time.perf_counter()
 
-    def blank_frame(self):
+    def blank_frame(self, enables=None):
         """Send an all-zero frame (turns every pixel off).
+
+        With no ``enables`` the frame carries the library default, which is ALL FOUR
+        quadrants enabled -- what every blank frame before 2026-10-25 sent. "none"
+        sends the same zeros with every quadrant disabled.
 
         Returns
         -------
@@ -124,7 +145,8 @@ class SmileFPGA:
             `time.perf_counter()` taken immediately after the FPGA ACK.
         """
         if self._dev is not None:
-            self._send_image(self._dev, [0] * self.BLANK_FRAME_CHUNK_COUNT)
+            cfg = None if enables in (None, "all") else self._enable_cfg({}, enables)
+            self._send_image(self._dev, [0] * self.BLANK_FRAME_CHUNK_COUNT, cfg)
         return time.perf_counter()
 
     def close(self):

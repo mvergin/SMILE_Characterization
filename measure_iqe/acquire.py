@@ -925,8 +925,13 @@ def pick_limit(i_last: float | None, cfg: IQEConfig,
     not one bias late; going up (``low_to_high``) the rise is covered instead of left to
     the 1.5x headroom, which a 0.03 V step on the rising side (x1.4) nearly uses up.
     """
-    ladder = [r for r in SMU_I_RANGES
-              if cfg.vramp_lowv_limit_a <= r <= cfg.vramp_highv_limit_a]
+    # Between vramp_leak_above_v and 0 V the LED is off and only the leak flows, so the
+    # floor drops a decade there -- without High-C only, where the limit is not also
+    # the current that charges the array.
+    floor = (cfg.vramp_leak_limit_a
+             if (not cfg.highc_b and v_to is not None and v_to >= cfg.vramp_leak_above_v)
+             else cfg.vramp_lowv_limit_a)
+    ladder = [r for r in SMU_I_RANGES if floor <= r <= cfg.vramp_highv_limit_a]
     if not ladder:
         return cfg.vramp_highv_limit_a
     if i_last is None or not math.isfinite(i_last):
@@ -1176,8 +1181,8 @@ class _SimSmile:
         h = (1103515245 * (x * 1009 + y) + 12345) & 0x7fffffff
         return 0.0 if (h % 13 == 0) else 0.6 + 0.7 * ((h >> 8) % 1000) / 1000.0
 
-    def set_pixel(self, x, y, bit):
-        self._smu._on = True
+    def set_pixel(self, x, y, bit, enables=None):
+        self._smu._on = enables != "none"      # a disabled quadrant does not light
         self._smu._pixel_gain = self._gain(x, y)
         self._smu._n_lit = 1
         self._smu._bit_scale = max(1, int(bit)) / 15.0
@@ -1198,7 +1203,7 @@ class _SimSmile:
         self._smu._bit_scale = max(1, int(bit)) / 15.0
         return time.perf_counter()
 
-    def blank_frame(self):
+    def blank_frame(self, enables=None):
         self._smu._on = False
         return time.perf_counter()
 
@@ -1524,6 +1529,7 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
         smu, dataclasses.replace(cfg, nvled_compliance=cfg.fastscan_limit_a), log)
     set_nplc(smu, cfg.fastscan_nplc)
     fs_rows = []
+    re_rows: list[Row] = []         # the fastscan_remeasure_n repeats, kept apart
     t0 = time.perf_counter()
     screen_rows: list[Row] = []
     if cfg.fastscan_pool:
@@ -1548,7 +1554,10 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
             # settle a pixel switch gets before the first pixel is judged.
             time.sleep(max(cfg.fastscan_settle_ms, cfg.thermal_settle_ms) / 1000.0)
             log(f"  pass {volts.index(v_fs) + 1}/{len(volts)} @ {v_fs:g} V")
-        for (x, y) in order:
+        # The first fastscan_remeasure_n pixels come round again at the end of the
+        # SAME loop -- no pause, no second scan -- so the pair differs only in time.
+        n_re = min(max(0, int(cfg.fastscan_remeasure_n)), len(order))
+        for i, (x, y) in enumerate(order + order[:n_re]):
             if cfg.fastscan_blank_between:
                 smile.blank_frame()         # black frame → guarantee only this pixel emits
             smile.set_pixel(x, y, cfg.fastscan_bitval)
@@ -1556,11 +1565,12 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
                 time.sleep(cfg.fastscan_settle_ms / 1000.0)
             ts = time.perf_counter() - t0
             p, ps, iv, ivs, inv, invs, _, _ = acquire_point(pm, smu, cfg.fastscan_n_smu, 3)
-            fs_rows.append(dict(X=x, Y=y, BITVAL=cfg.fastscan_bitval, NVLED_V=v_fs,
-                                TIME_START=ts, TIME_END=time.perf_counter() - t0,
-                                NVLED_CURR_MEAN=inv, NVLED_CURR_SEM=invs,
-                                VLED_CURR_MEAN=iv, VLED_CURR_SEM=ivs,
-                                PM400_POWER_MEAN=p, PM400_POWER_SEM=ps))
+            (fs_rows if i < len(order) else re_rows).append(
+                dict(X=x, Y=y, BITVAL=cfg.fastscan_bitval, NVLED_V=v_fs,
+                     TIME_START=ts, TIME_END=time.perf_counter() - t0,
+                     NVLED_CURR_MEAN=inv, NVLED_CURR_SEM=invs,
+                     VLED_CURR_MEAN=iv, VLED_CURR_SEM=ivs,
+                     PM400_POWER_MEAN=p, PM400_POWER_SEM=ps))
     # Every file a run writes carries <sample>_<stamp>_, so a CSV that is copied out of
     # its directory can still be traced back to the run that made it.
     pfx = run_slug(cfg.sample_name, run_dir) + "_"
@@ -1575,6 +1585,19 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
             [r for r in fs_rows if r["NVLED_V"] == v_fs])
     raw = IncrementalRaw(run_dir / "FastScan" / "raw_data" / f"{pfx}FastScan.csv")
     raw.append(fs_rows); raw.close()
+    if re_rows:
+        # "remeasure_", not "aggregated_": the fast-scan globs must not pick it up
+        for v_fs in volts:
+            tag = "" if len(volts) == 1 else f"_v={v_fs:+.3f}"
+            write_aggregated_one(
+                run_dir / "FastScan"
+                / f"{pfx}remeasure_bitval={cfg.fastscan_bitval}{tag}_mean_std.csv",
+                [r for r in re_rows if r["NVLED_V"] == v_fs])
+        raw = IncrementalRaw(run_dir / "FastScan" / "raw_data"
+                             / f"{pfx}FastScan_remeasure.csv")
+        raw.append(re_rows); raw.close()
+        log(f"  re-measured the first {len(re_rows) // len(volts)} pixel(s) of each "
+            f"bias at the end of its pass -> remeasure_bitval=*.csv")
     if screen_rows:
         write_aggregated_one(
             run_dir / "FastScan"
@@ -3388,7 +3411,7 @@ def calibration_pixels(pm, smu, smile, out_dir: Path, cfg: IQEConfig,
             cfg, roi=(wx1, wy1, wx2, wy2), sweep_select="blocks", block_size=win,
             pixels_per_block=cfg.calibrate_per_quadrant,
             max_sweep_pixels=cfg.calibrate_per_quadrant,
-            pool_groups=(), fastscan_pool=0, sweep_rotate=0)
+            pool_groups=(), fastscan_pool=0, sweep_rotate=0, fastscan_remeasure_n=0)
         # Its own directory per quadrant: run_fast_scan writes a fixed set of file
         # names, so four calls into one directory would overwrite each other.
         sel = run_fast_scan(pm, smu, smile, wx1, wy1, wx2, wy2,

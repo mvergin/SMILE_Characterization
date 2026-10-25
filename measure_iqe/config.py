@@ -462,6 +462,13 @@ class IQEConfig:
                                      # raster correlates any residual/crosstalk with spatial position;
                                      # randomizing turns it into position-independent noise.
     fastscan_order_seed: int = 0  # seed for the shuffle (reproducible)
+    fastscan_remeasure_n: int = 100  # after the last pixel of each fast-scan bias, measure
+                                     # the FIRST N again in the same loop, with the same
+                                     # blank, settle and burst. Written apart, to
+                                     # remeasure_bitval=<b>[_v=<V>].csv and
+                                     # raw_data/FastScan_remeasure.csv, so no reader of
+                                     # the fast scan sees a pixel twice. The pair says how
+                                     # far a pixel drifted over the scan. 0 = off.
     fastscan_blank_between: bool = True  # send a black (all-off) frame before lighting each pixel, so
                                      # exactly ONE pixel is ever emitting when the PM reads — guards
                                      # against a lingering previous pixel / accumulated frame inflating
@@ -682,6 +689,14 @@ class IQEConfig:
     vramp_lowv_settle_s: float = 8.0  # rising side: 1% needs 5-55 s. 8 s is the compromise
                                       # that keeps a 30-point sweep under ~10 min/pixel.
     vramp_lowv_limit_a: float = 1e-5  # the rising side never exceeds ~5 uA
+    vramp_leak_limit_a: float = 1e-6  # the ladder's floor from vramp_leak_above_v to 0 V,
+                                      # where the LED is off and the reading is the
+                                      # ~100-500 nA leak: a 1 uA range resolves it 10x
+                                      # better than 10 uA. WITHOUT High-C only -- in
+                                      # High-C the limit is also the charging current,
+                                      # and 1 uA charges 45.7 uF at 22 mV/s.
+    vramp_leak_above_v: float = -0.80  # biases at or above this (toward 0 V) get the
+                                       # vramp_leak_limit_a floor
     vramp_highv_nplc: float = 1.0  # was 0.5 -- not an integer, so it nulled no mains at all
     vramp_highv_n_pm: int = 8  # droop segment (below vramp_knee_v): PM400 readings per point
     vramp_highv_n_smu: int = 8  # droop segment: SMU readings per point

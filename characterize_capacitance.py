@@ -1881,6 +1881,76 @@ def exp_switchmatrix(pm, smu, smile, cfg, args, log):
     return rows
 
 
+# Frame states for the leakage matrix: (label, kind, bitval, enables). "pixel" writes
+# the pixel at that bitval, "blank" an all-zero frame. own = the pixel's quadrant only.
+LEAKM_STATES = (
+    ("lit_own", "pixel", 15, "own"), ("off_own", "pixel", 0, "own"),
+    ("lit_all", "pixel", 15, "all"), ("off_all", "pixel", 0, "all"),
+    ("lit_none", "pixel", 15, "none"), ("off_none", "pixel", 0, "none"),
+    ("blank_all", "blank", 0, "all"), ("blank_none", "blank", 0, "none"),
+)
+
+
+def exp_leakmatrix(pm, smu, smile, pixel, cfg, args, log):
+    """Cathode current with the LED off, per bias x frame state x quadrant enables.
+
+    Between 0 V and -0.4 V the LED does not conduct, so the current is the backplane
+    and CMOS leakage alone. Eight frame states separate what the frame does to it:
+    the pixel at bitval 15 and at bitval 0, and an all-zero frame, each with only the
+    pixel's own quadrant enabled ("own", what every measurement uses), all four
+    enabled ("all", what blank_frame() has always sent) and none enabled.
+
+    Per bias in ``--leakm-voltages``: step there at a 100 uA probe limit and settle
+    ``--leakm-settle-s``. Per state: write the frame, settle ``--leakm-state-settle-s``,
+    probe the current at 100 uA, then drop to the smallest range >= 1.5x it (1 uA
+    floor) and measure. A lower limit after the step, not before it: the probe limit
+    charges the array, the measurement range resolves the leak. In High-C the limit
+    is also the range, so it stays at one value (10 uA) and nothing is switched.
+    """
+    rows = []
+    x, y = pixel
+    probe_lim = 1e-4
+    for v in args.leakm_voltages:
+        pcfg = dataclasses.replace(cfg, nvled_compliance=probe_lim, nvled_range_i=None)
+        m.configure_voltage_source_b(smu, pcfg, log)
+        m.set_nplc(smu, args.leakm_nplc)
+        smile.blank_frame()
+        smu.set_voltage("b", float(v))
+        time.sleep(args.leakm_settle_s)
+        for label, kind, bit, en in LEAKM_STATES:
+            if kind == "pixel":
+                smile.set_pixel(x, y, bit, enables=en)
+            else:
+                smile.blank_frame(enables=en)
+            if not cfg.highc_b:
+                m.configure_voltage_source_b(smu, pcfg, log)     # back to the probe limit
+            time.sleep(args.leakm_state_settle_s)
+            i_probe = abs(m.acquire_point(pm, smu, 5, 1)[4])
+            if cfg.highc_b:
+                rng = 1e-5
+            else:
+                rng = next((r for r in m.SMU_I_RANGES
+                            if r >= max(1e-6, 1.5 * i_probe)), m.SMU_I_RANGES[-1])
+                m.configure_voltage_source_b(
+                    smu, dataclasses.replace(cfg, nvled_compliance=rng, nvled_range_i=None),
+                    log)
+                time.sleep(args.leakm_range_settle_s)
+            m.set_nplc(smu, args.leakm_nplc)
+            pt, raw = m.acquire_point(pm, smu, args.leakm_n_smu, args.leakm_n_pm,
+                                      return_raw=True)
+            rows.append(dict(v=v, state=label, frame=kind, bitval=bit, enables=en,
+                             x=x, y=y, quadrant=_quadrant_of(x, y), range_a=rng,
+                             highc=int(cfg.highc_b), i_probe=i_probe,
+                             **m.stat_columns("NVLED_CURR", raw["nvled"]),
+                             **m.stat_columns("VLED_CURR", raw["vled"]),
+                             **m.stat_columns("PM400_POWER", raw["pm"])))
+            r = rows[-1]
+            log(f"    {v:+.2f} V  {label:<10}  I_B {abs(r['NVLED_CURR_MEDIAN']) * 1e9:9.2f} nA "
+                f"(SEM {r['NVLED_CURR_SEM'] * 1e9:.2f})  range {rng:g} A")
+    smile.blank_frame()
+    return rows
+
+
 def exp_decay(pm, smu, smile, pixel, cfg, args, log):
     """Charge-decay: let the capacitor discharge through the LED and watch V(t).
 
@@ -2346,7 +2416,8 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
 
 
 PER_PIXEL = {"step": exp_step, "cap": exp_cap, "leak": exp_leak, "isrc": exp_isrc,
-             "stepdir": exp_stepdir, "switch": exp_switch, "decay": exp_decay}
+             "stepdir": exp_stepdir, "switch": exp_switch, "decay": exp_decay,
+             "leakmatrix": exp_leakmatrix}
 ARRAY_WIDE = {"optfloor": exp_optfloor, "cluster": exp_cluster,
               "switchmatrix": exp_switchmatrix}
 ALL = [*PER_PIXEL, *ARRAY_WIDE]
@@ -2412,6 +2483,11 @@ def estimate_seconds(what, cfg, args, n_pixels):
         total += n_pixels * len(args.isrc_currents) * args.isrc_seconds
     if "decay" in what:
         total += n_pixels * 2 * (args.decay_charge_s + args.decay_seconds)
+    if "leakmatrix" in what:
+        per_state = (args.leakm_state_settle_s + args.leakm_range_settle_s
+                     + args.leakm_n_smu * 2 * args.leakm_nplc / 50.0 + 0.5)
+        total += n_pixels * len(args.leakm_voltages) * (args.leakm_settle_s
+                                                         + len(LEAKM_STATES) * per_state)
     if "switchmatrix" in what:
         rec = args.swm_samples * sample_interval_s(args.swm_nplc, args.switch_channels)
         total += len(args.swm_voltages) * 7 * (args.swm_hold_s + 1.0 + max(rec, 1.5))
@@ -2542,6 +2618,20 @@ def build_parser():
                          "when the switch was sent and acknowledged on the trace's own "
                          "time axis. Negative restores the pre-2026-10-25 order, where "
                          "the switch came first and the record started after it.")
+    ap.add_argument("--leakm-voltages", nargs="+", type=float, default=[0.0, -0.2, -0.4],
+                    help="leakmatrix: biases where the LED is off, so only leakage flows")
+    ap.add_argument("--leakm-settle-s", type=float, default=30.0,
+                    help="leakmatrix: settle after each bias step, blank frame")
+    ap.add_argument("--leakm-state-settle-s", type=float, default=5.0,
+                    help="leakmatrix: settle after each frame state, before the probe")
+    ap.add_argument("--leakm-range-settle-s", type=float, default=1.0,
+                    help="leakmatrix: settle after dropping to the measurement range")
+    ap.add_argument("--leakm-nplc", type=float, default=1.0,
+                    help="leakmatrix: integration per reading (1.0 nulls the mains)")
+    ap.add_argument("--leakm-n-smu", type=int, default=20,
+                    help="leakmatrix: SMU readings per state")
+    ap.add_argument("--leakm-n-pm", type=int, default=8,
+                    help="leakmatrix: PM readings per state (the LED should be dark)")
     ap.add_argument("--swm-voltages", nargs="+", type=float, default=[-3.0, -2.0, -1.2],
                     help="switchmatrix: biases, each with every pixel pair")
     ap.add_argument("--swm-window", type=int, default=10,

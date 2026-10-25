@@ -241,8 +241,9 @@ class _FakeSmile:
         self.frames = []
         self._sim = sim
 
-    def set_pixel(self, x, y, bit):
-        self.frames.append(("one", ((int(x), int(y)),), int(bit)))
+    def set_pixel(self, x, y, bit, enables=None):
+        self.frames.append(("one", ((int(x), int(y)),), int(bit))
+                           + (() if enables is None else (enables,)))
         return self._sim.set_pixel(x, y, bit)
 
     def set_pixels(self, coords, bit):
@@ -250,8 +251,8 @@ class _FakeSmile:
         self.frames.append(("many", tuple(coords), int(bit)))
         return self._sim.set_pixels(coords, bit)
 
-    def blank_frame(self):
-        self.frames.append(("blank", (), 0))
+    def blank_frame(self, enables=None):
+        self.frames.append(("blank", (), 0) + (() if enables is None else (enables,)))
         return self._sim.blank_frame()
 
 
@@ -640,6 +641,30 @@ def test_the_switch_matrix_runs_every_pair_and_times_every_write():
         assert t == sorted(t) and t[0] >= 0.02, "writes in order, after the baseline"
         assert r["n_events"] == 9 and np.isfinite(r["fpga_refresh_ms"]), r
     cc._EXTRA_ROWS.clear()
+
+
+def test_the_leakage_matrix_measures_every_state_with_its_enables():
+    """Three biases x eight frame states, each frame written with the enables it names."""
+    import measure_iqe as m
+    from characterize_capacitance import LEAKM_STATES, build_parser, exp_leakmatrix
+
+    cfg = m.IQEConfig(highc_b=False)
+    pm, smu, sim = m.connect(cfg, lambda _s: None, simulate=True)
+    args = build_parser().parse_args(
+        ["--what", "leakmatrix", "--pixels", "300,40", "--leakm-settle-s", "0",
+         "--leakm-state-settle-s", "0", "--leakm-range-settle-s", "0",
+         "--leakm-n-smu", "4", "--leakm-n-pm", "2"])
+    smile = _FakeSmile(sim)
+    rows = exp_leakmatrix(pm, smu, smile, (300, 40), cfg, args, lambda _s: None)
+    assert len(rows) == 3 * len(LEAKM_STATES)
+    assert [r["v"] for r in rows[::len(LEAKM_STATES)]] == [0.0, -0.2, -0.4]
+    assert {r["enables"] for r in rows} == {"own", "all", "none"}
+    assert all(r["range_a"] >= 1e-6 and r["quadrant"] == "TR" for r in rows)
+    assert all(r["NVLED_CURR_N"] == 4 for r in rows), "every state has its own burst"
+    # the frames carry their enables: own is the plain write, all/none are explicit
+    sent = [f for f in smile.frames if f[0] in ("one", "blank")]
+    assert ("one", ((300, 40),), 0, "none") in sent and ("blank", (), 0, "none") in sent
+    assert ("one", ((300, 40),), 15, "own") in sent
 
 
 if __name__ == "__main__":

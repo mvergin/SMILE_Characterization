@@ -928,6 +928,28 @@ def test_the_fast_scan_measures_every_bias_and_judges_on_the_first():
                      fastscan_voltages=(-1.65, -1.35, -1.05)).fastscan_v_list() ==         (-1.35, -1.65, -1.05), "nvled_v_fastscan must lead, and must not repeat"
 
 
+def test_the_fast_scan_remeasures_its_first_pixels_into_a_file_of_their_own():
+    """fastscan_remeasure_n repeats the first N pixels at the end of the same loop.
+
+    The repeats go to remeasure_bitval=*.csv and raw_data/FastScan_remeasure.csv, so
+    the fast-scan file still has every pixel exactly once."""
+    with tempfile.TemporaryDirectory() as tmp:
+        res = _run(tmp, fastscan_remeasure_n=5)
+        fs = _agg_rows(res.run_dir, "FastScan")
+        assert len(fs) == 64 and len({(r["X"], r["Y"]) for r in fs}) == 64
+        fsd = Path(res.run_dir) / "FastScan"
+        re_f = sorted(fsd.glob("*remeasure_bitval=*.csv"))
+        assert len(re_f) == 1, re_f
+        with re_f[0].open() as fh:
+            re_rows = list(csv.DictReader(fh))
+        assert [(r["X"], r["Y"]) for r in re_rows] == [(r["X"], r["Y"]) for r in fs[:5]]
+        assert float(re_rows[0]["TIME_START"]) > float(fs[-1]["TIME_START"]),             "the repeats come after the last pixel of the pass"
+        assert len(list((fsd / "raw_data").glob("*FastScan_remeasure.csv"))) == 1
+    with tempfile.TemporaryDirectory() as tmp:
+        res = _run(tmp, fastscan_remeasure_n=0)
+        assert not list((Path(res.run_dir) / "FastScan").glob("*remeasure*"))
+
+
 def test_fastscan_only_scans_every_bias_and_sweeps_nothing():
     """``--fastscan V [V ...]`` is a fast scan and nothing else.
 
@@ -1099,6 +1121,13 @@ def test_the_measure_range_follows_the_limit_with_or_without_high_c():
     assert pick_limit(7.7e-6, base, -1.05, -1.02) == 1e-5         # predicted ~6.2 uA
     assert pick_limit(6e-6, base, -1.02, -1.05) == 1e-4           # rise to ~7.5 uA
     assert pick_limit(None, base, -1.0, -0.9) == base.vramp_highv_limit_a
+    # From -0.80 V to 0 V only the leak flows, so without High-C the floor is 1 uA.
+    # Not in High-C (the limit charges the array), and not below -0.80 V.
+    off = dc.replace(base, highc_b=False)
+    assert pick_limit(0.5e-6, off, -0.85, -0.80) == 1e-6
+    assert pick_limit(0.3e-6, off, -0.40, -0.20) == 1e-6
+    assert pick_limit(0.5e-6, base, -0.85, -0.80) == 1e-5, "High-C keeps the 10 uA floor"
+    assert pick_limit(0.5e-6, off, -0.80, -0.85) == 1e-5, "below -0.80 V keeps 10 uA"
 
 
 def test_bias_major_pays_each_dwell_once_for_all_pixels():
