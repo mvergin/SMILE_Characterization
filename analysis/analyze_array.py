@@ -2346,6 +2346,7 @@ def analyse_sweep(sweep_dir, label, log):
     _safe(
         plot_burst_scatter, sweep_dir, out / "burst_scatter.png", plt
     )  # raw burst overlay (if saved)
+    _safe(plot_settling_traces, sweep_dir, out / "settling_traces.png", plt)
 
     # Median EQE(J) over reliable points, binned in log(J). Binning by J (not by
     # NVLED_V) works for both fixed-voltage and adaptive per-pixel-voltage sweeps,
@@ -3101,6 +3102,56 @@ def _quadrant_col(df):
         return df["QUADRANT"].astype(str)
     q = (df["X"].astype(int) >= 256).astype(int) + 2 * (df["Y"].astype(int) >= 256).astype(int)
     return q.map({0: "TL", 1: "TR", 2: "BL", 3: "BR"})
+
+
+def plot_settling_traces(sweep_dir, out, plt):
+    """The dwell transients the sweep records in settling_traces.npz, one curve a bias.
+
+    bias_major records ONE trace per bias: |I| and P polled through the bias dwell on
+    the first pixel lit, at whatever rate the meter allows (~4 Hz), and only where the
+    dwell is at least trace_settling_min_s. Each curve is divided by its own last 10 %,
+    so all biases share one axis and the panel shows how far from settled each was.
+    Panels: current, optical power, and their ratio P/I (EQE up to a constant).
+    """
+    npz = next(iter(sorted(Path(sweep_dir).glob("*settling_traces.npz"))), None)
+    if npz is None:
+        return None
+    with np.load(npz) as d:
+        tr = {k: d[k] for k in d.files if d[k].ndim == 2 and d[k].shape[0] == 3}
+    if not tr:
+        return None
+
+    def bias(k):
+        try:
+            return float(k.split("_v")[-1])
+        except ValueError:
+            return np.nan
+
+    keys = sorted(tr, key=bias)
+    cmap = plt.get_cmap("viridis")
+    fig, ax = plt.subplots(1, 3, figsize=(17, 4.8), sharex=True)
+    for i, k in enumerate(keys):
+        t, I, P = tr[k]
+        I, P = np.abs(I), np.abs(P)
+        tail = t >= t[-1] - 0.1 * (t[-1] - t[0])
+        c = cmap(i / max(1, len(keys) - 1))
+        for a, y in zip(ax, (I, P, P / np.where(I > 0, I, np.nan))):
+            ref = np.nanmedian(y[tail])
+            if np.isfinite(ref) and ref:
+                a.plot(t, y / ref, lw=0.9, color=c, label=f"{bias(k):+.3f} V")
+    for a, name in zip(ax, ("|I|", "P", "P / I")):
+        a.axhline(1, color="0.5", lw=0.8)
+        a.set_xlabel("time in the bias dwell (s)")
+        a.set_ylabel(f"{name} / its last 10 %")
+        a.set_title(name, fontsize=10)
+        a.grid(alpha=0.3)
+    ax[0].legend(fontsize=7, ncol=2, title="bias")
+    fig.suptitle(f"Settling through each bias dwell, first pixel lit "
+                 f"({len(keys)} traces from {npz.name})", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out, dpi=200)
+    plt.close(fig)
+    return len(keys)
 
 
 def plot_fastscan_ip(fs, out_dir, plt, tag=""):
