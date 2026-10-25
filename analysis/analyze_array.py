@@ -1106,22 +1106,27 @@ def fs_target_values(fs, targets):
     return pd.DataFrame(rows, index=targets.index)
 
 
-def nearest_scale(fs, targets, value_col):
-    """Per fast-scan pixel: value / fast-scan EQE of the NEAREST swept target, single or
+def nearest_scale(fs, targets, value_col, n_nearest=1):
+    """Per fast-scan pixel: value / fast-scan EQE of the nearest swept target, single or
     pooled. Returns (scale per fs row, number of targets used), or (None, 0).
 
-    Replaces one array-wide median factor: a pixel is calibrated by the swept target
-    beside it, so a region whose fast scan reads differently from the sweep is
-    corrected locally rather than by the array's typical offset."""
+    n_nearest=1: the one nearest target. n_nearest=k: the median over the k nearest,
+    which keeps a regional correction but no longer copies one target's own scatter
+    onto its whole neighbourhood. n_nearest=None: one median over every target, the
+    same number for every pixel (the calibration before 2026-10-25)."""
     from scipy.spatial import cKDTree
     t = targets.join(fs_target_values(fs, targets))
     r = (t[value_col] / t["FS_EQE"]).replace([np.inf, -np.inf], np.nan)
     ok = r.notna() & (r > 0)
     if not ok.any():
         return None, 0
+    rv = r[ok].to_numpy(float)
+    if n_nearest is None:
+        return np.full(len(fs), float(np.median(rv))), int(ok.sum())
+    k = min(int(n_nearest), len(rv))
     _, idx = cKDTree(np.c_[t.loc[ok, "cx"], t.loc[ok, "cy"]]).query(
-        np.c_[fs["X"].to_numpy(float), fs["Y"].to_numpy(float)])
-    return r[ok].to_numpy(float)[idx], int(ok.sum())
+        np.c_[fs["X"].to_numpy(float), fs["Y"].to_numpy(float)], k=k)
+    return (rv[idx] if k == 1 else np.median(rv[idx], axis=1)), int(ok.sum())
 
 
 def sweep_targets(sw_raw):
@@ -3702,7 +3707,18 @@ def plot_fastscan_remeasure(fs_dir, out, plt):
     return res
 
 
-def fastscan_peak_iqe_pixels(fs, peak_iqe_ref):
+# How the peak-IQE proxy turns a fast-scan EQE into a peak IQE. The factor is a swept
+# pixel's fitted peak IQE over its own fast-scan EQE; the three differ in WHICH swept
+# pixels set it for a given fast-scan pixel. All three are drawn side by side.
+PEAK_PROXY_MODES = {
+    "median": (None, "one median over all swept pixels"),
+    "nearest": (1, "the nearest swept pixel"),
+    "nearest8": (8, "median of the 8 nearest swept pixels"),
+}
+PEAK_PROXY_DEFAULT = "nearest8"     # what the anomaly report reads
+
+
+def fastscan_peak_iqe_pixels(fs, peak_iqe_ref, mode=PEAK_PROXY_DEFAULT):
     """Per-pixel peak-IQE proxy from the fast scan (X, Y, iqe%%), or (None, J) if the
     fast-scan bias is off the EQE plateau (so EQE≠peak and the proxy is invalid).
 
@@ -3734,7 +3750,7 @@ def fastscan_peak_iqe_pixels(fs, peak_iqe_ref):
         tg = pd.DataFrame({"X": [i[0] for i in peak_iqe_ref.index],
                            "Y": [i[1] for i in peak_iqe_ref.index],
                            "val": peak_iqe_ref.values})
-        scale, n = nearest_scale(fs, tg, "val")
+        scale, n = nearest_scale(fs, tg, "val", PEAK_PROXY_MODES[mode][0])
         if scale is None:
             return None, J
     else:
@@ -3756,18 +3772,36 @@ def plot_fastscan_peak_iqe(fs, peak_iqe_ref, out, plt):
     """Full-coverage per-pixel PEAK-IQE proxy raster from the fast scan (calibrated to the sweep).
     A full-coverage estimate, not a per-pixel fit — see fastscan_peak_iqe_pixels. Returns stats or
     None (off the plateau)."""
-    d, J = fastscan_peak_iqe_pixels(fs, peak_iqe_ref)
+    modes = (list(PEAK_PROXY_MODES) if isinstance(peak_iqe_ref, pd.Series)
+             else [PEAK_PROXY_DEFAULT])          # a single number has no neighbours
+    maps = {m: fastscan_peak_iqe_pixels(fs, peak_iqe_ref, m) for m in modes}
+    d, J = maps[PEAK_PROXY_DEFAULT]
     if d is None:
         return None
-    raster_grid(
-        d["X"].values,
-        d["Y"].values,
-        d["iqe"].values,
-        out,
-        plt,
-        "peak IQE est. (%)",
-        f"Full-coverage peak-IQE proxy — fast scan @ J≈{J:.0f}, calibrated to the sweep",
-    )
+    allv = np.concatenate([dm["iqe"].values for dm, _ in maps.values() if dm is not None])
+    lo, hi = np.nanpercentile(allv, [2, 98])
+    fig, ax = plt.subplots(1, len(modes), figsize=(7 * len(modes), 6.2), squeeze=False)
+    for a, m in zip(ax[0], modes):
+        dm, _ = maps[m]
+        if dm is None:
+            a.set_axis_off(); continue
+        X, Y, V = dm["X"].to_numpy(int), dm["Y"].to_numpy(int), dm["iqe"].to_numpy(float)
+        G = np.full((Y.max() - Y.min() + 1, X.max() - X.min() + 1), np.nan)
+        G[Y - Y.min(), X - X.min()] = V
+        cm = plt.get_cmap("viridis").copy(); cm.set_bad("white")
+        im = a.imshow(np.ma.masked_invalid(G), cmap=cm, vmin=lo, vmax=hi, origin="upper",
+                      interpolation="nearest",
+                      extent=(X.min() - .5, X.max() + .5, Y.max() + .5, Y.min() - .5))
+        plt.colorbar(im, ax=a, fraction=0.046, label="peak IQE est. (%)")
+        a.set_title(f"factor = {PEAK_PROXY_MODES[m][1]}\nmedian {np.median(V):.1f} %, "
+                    f"{100 * np.mean(V > 90):.1f} % of pixels above 90 %", fontsize=9)
+        a.set_xlabel("X"); a.set_ylabel("Y")
+    fig.suptitle(f"Peak-IQE proxy from the fast scan @ J≈{J:.0f} A/cm²: fast-scan EQE x "
+                 f"(fitted peak IQE / fast-scan EQE) of swept pixels. White = dead.",
+                 fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out, dpi=200)
+    plt.close(fig)
     v = d["iqe"].values
     return dict(
         n=int(v.size),
