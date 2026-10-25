@@ -371,7 +371,9 @@ def analyse_sweep_data(sweep_dir, label, log):
     import pandas as pd
 
     sweep_dir = Path(sweep_dir)
-    out_dir = sweep_dir / "IQE_EQE"
+    # beside every other plot of the run, not inside the instrument's folder
+    out_dir = sweep_dir.parent.parent / "REPORT_assets" / (
+        "IQE_EQE" if sweep_dir.name == "Sweep" else f"IQE_EQE_{sweep_dir.name}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Find aggregated CSVs

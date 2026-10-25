@@ -97,7 +97,9 @@ def sweep(d: Path, row: dict) -> None:
                n_biases=a["NVLED_V"].round(4).nunique() if "NVLED_V" in a else "",
                has_reference="NVLED_CURR_REF" in a.columns,
                has_cached_reference="LEAK_REF_CACHED" in a.columns)
-    fits = sorted((d / "NVLEDSweep").rglob("IQE_EQE/abc_fit_per_pixel.csv"))
+    # REPORT_assets/IQE_EQE since 2026-10-25, NVLEDSweep/<group>/IQE_EQE before
+    fits = sorted([*(d / "REPORT_assets").glob("IQE_EQE*/abc_fit_per_pixel.csv"),
+                   *(d / "NVLEDSweep").rglob("IQE_EQE/abc_fit_per_pixel.csv")])
     if fits:
         f = pd.read_csv(fits[0])
         if {"clean_fit", "peak_IQE"} <= set(f.columns):

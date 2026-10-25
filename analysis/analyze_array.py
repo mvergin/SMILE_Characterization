@@ -2657,6 +2657,16 @@ def truncation_check(df, med, per_bias, out, plt, log):
                 if (t.scope == "pixels").any() else 0)
 
 
+def iqe_dir(sweep_dir):
+    """Where a sweep group's IQE/EQE outputs go: <run>/REPORT_assets/IQE_EQE, or
+    IQE_EQE_<group> for a group not named Sweep. Every plot and table of a run lives
+    under REPORT_assets; NVLEDSweep holds only what the instrument wrote. Runs analysed
+    before 2026-10-25 had this under NVLEDSweep/<group>/IQE_EQE."""
+    sweep_dir = Path(sweep_dir)
+    name = "IQE_EQE" if sweep_dir.name == "Sweep" else f"IQE_EQE_{sweep_dir.name}"
+    return sweep_dir.parent.parent / "REPORT_assets" / name
+
+
 def analyse_sweep(sweep_dir, label, log):
     sweep_dir = Path(sweep_dir)
     df_raw = _load_aggregated(sweep_dir)
@@ -2665,7 +2675,7 @@ def analyse_sweep(sweep_dir, label, log):
         return None
     dark = _dark_power(sweep_dir)
     df = enrich(df_raw, dark_W=dark)
-    out = sweep_dir / "IQE_EQE"
+    out = iqe_dir(sweep_dir)
     out.mkdir(parents=True, exist_ok=True)
     plt = _plt()
     d_cm = ACTIVE_THICKNESS_NM * 1e-7
@@ -3266,6 +3276,8 @@ def write_report(
                 f"{sp['lo'] * 100:.0f}–{sp['hi'] * 100:.0f}%, {trend}. Map in iqe_spatial_map.png "
                 f"(assumes uniform collection across the ROI; sweep more pixels for a finer map)."
             )
+        # relative to REPORT.md, which sits in the run directory beside REPORT_assets
+        rel = "REPORT_assets/" + iqe_dir(Path(s["label"])).name
         iq = s.get("iqe_spatial")
         if iq:
             grd = iq["grad_edge"]
@@ -3274,16 +3286,15 @@ def write_report(
                 if grd < 2 * iq["std"]
                 else f"a gradient of ≈**{grd:.0f}% edge-to-edge**"
             )
-            rel = Path(s["label"]).name
             A(
                 f"- **Spatial distribution of IQE** ({iq['n']} {iq.get('src', 'clean fits')}): pixel-to-pixel std "
                 f"**{iq['std']:.0f}%**, linear trend {unif}; blocked (median±spread, multi-scale) and "
-                f"row/column band views in `{rel}/IQE_EQE/iqe_blocked_maps.png` and "
+                f"row/column band views in `{rel}/iqe_blocked_maps.png` and "
                 f"`iqe_row_col_profiles.png`."
             )
-            A(f"\n![Blocked IQE maps]({rel}/IQE_EQE/iqe_blocked_maps.png)\n")
+            A(f"\n![Blocked IQE maps]({rel}/iqe_blocked_maps.png)\n")
         A(
-            f"- Plots: `{Path(s['label']).name}/IQE_EQE/` — IVL_full, eqe_vs_J_LED, "
+            f"- Plots: `{rel}/` — IVL_full, eqe_vs_J_LED, "
             f"iqe_split_branch, eqe_vs_J_by_bitval, first_pixels_diagnostics, iqe_all_pixels_LED, "
             f"iqe_spatial_map, iqe_fitquality_map, iqe_blocked_maps, iqe_row_col_profiles, "
             f"leakage_vs_bias\n"
@@ -4098,7 +4109,7 @@ def analyse_run(run_dir, log):
             eta = fit_s["median_fit"].get("eta_LEE")
     enr = None
     if fit_s:
-        ep = run_dir / fit_s["label"] / "IQE_EQE" / "enriched_points.csv"
+        ep = iqe_dir(run_dir / fit_s["label"]) / "enriched_points.csv"
         enr = pd.read_csv(ep) if ep.exists() else None
     fs_maps = []
     try:
@@ -4129,7 +4140,7 @@ def analyse_run(run_dir, log):
     # peak IQE is only the fallback when no per-pixel fit is clean.
     peak_ref = None
     if fit_s:
-        fp = run_dir / fit_s["label"] / "IQE_EQE" / "abc_fit_per_pixel.csv"
+        fp = iqe_dir(run_dir / fit_s["label"]) / "abc_fit_per_pixel.csv"
         if fp.exists():
             pf = pd.read_csv(fp)
             if {"clean_fit", "peak_IQE"} <= set(pf.columns):
