@@ -132,6 +132,8 @@ grouped by channel (below), so **find columns by name, never by position**.
 | `PM400_POWER_MEAN` | W | optical power |
 | `PM400_POWER_SEM` | W | standard error of the mean |
 
+**`QUADRANT`** (TL, TR, BL, BR, from `X` and `Y`) is written since 2026-10-25: the LAST column of the fast-scan file, so the older columns keep their positions, and right after `TIME_END` in the sweep file. For older runs, derive it: `X >= 256` is right, `Y >= 256` is bottom.
+
 **`*_SEM` was called `*_STD` before 2026-10-24.** It held the same quantity, so a
 reader renames `*_STD` to `*_SEM` when `*_SEM` is absent (`analyze_array.legacy_sem`).
 No file written since carries `*_STD`, so a stale reader fails instead of reading an

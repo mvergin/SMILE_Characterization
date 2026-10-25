@@ -3091,6 +3091,122 @@ def plot_fastscan_efficiency(fs, out, plt):
 FASTSCAN_PEAK_J_BAND = (5.0, 40.0)
 
 
+QUAD_COLORS = {"TL": "tab:blue", "TR": "tab:orange", "BL": "tab:green", "BR": "tab:red"}
+IP_DENSITY_BINS = 200     # square bins across the larger of the two spans
+
+
+def _quadrant_col(df):
+    """QUADRANT from the file when it has one (since 2026-10-25), else from X and Y."""
+    if "QUADRANT" in df.columns:
+        return df["QUADRANT"].astype(str)
+    q = (df["X"].astype(int) >= 256).astype(int) + 2 * (df["Y"].astype(int) >= 256).astype(int)
+    return q.map({0: "TL", 1: "TR", 2: "BL", 3: "BR"})
+
+
+def plot_fastscan_ip(fs, out_dir, plt, tag=""):
+    """Fast scan: current on x, optical power on y, three ways. One set per bias.
+
+    fastscan_IP_quadrant: coloured by quadrant, all pixels and zoomed on the dim ones,
+        where each quadrant's own leakage separates the clouds.
+    fastscan_IP_density: coloured by how many pixels share a square cell, the cell
+        being IP_DENSITY_BINS-th of the larger span, with 1 uA on x the same length
+        as 1 nW on y. A distance in those units weighs current and light equally, so
+        the colours do not change when an axis is rescaled.
+    fastscan_IP_position: coloured by where the pixel sits: a 2D colour for (X, Y),
+        then X alone and Y alone.
+    """
+    from matplotlib.colors import LogNorm
+    I = fs["NVLED_CURR_MEAN"].astype(float).abs().values * 1e6     # uA
+    P = fs["PM400_POWER_MEAN"].astype(float).abs().values * 1e9    # nW
+    quad = _quadrant_col(fs).values
+    v = float(fs["NVLED_V"].iloc[0]) if "NVLED_V" in fs.columns else float("nan")
+    ok = np.isfinite(I) & np.isfinite(P)
+    I, P, quad = I[ok], P[ok], quad[ok]
+    X, Y = fs["X"].astype(int).values[ok], fs["Y"].astype(int).values[ok]
+    lbl = f"fast scan @ {v:+.3f} V, {ok.sum()} pixels"
+    files = []
+
+    # 1. by quadrant, full and zoomed on the dim end
+    # The near-origin corner: pixels that give almost no light, so the current is the
+    # quadrant's leakage. Below 10 % of the dead threshold in light, and below 10 % of
+    # the lit pixels' median current, which leaves out the shorted ones near the limit.
+    p_lit = float(np.nanpercentile(P, FASTSCAN_ALIVE_PCTL))
+    p_thr = 0.1 * DEAD_THRESHOLD_FRAC * p_lit
+    lit = P >= DEAD_THRESHOLD_FRAC * p_lit
+    i_thr = 0.1 * float(np.nanmedian(I[lit])) if lit.any() else np.inf
+    dim = (P < p_thr) & (I < i_thr)
+    fig, ax = plt.subplots(1, 2, figsize=(13, 5.2))
+    for a, sel, ttl in ((ax[0], np.ones_like(dim), "all pixels"),
+                        (ax[1], dim, f"near the origin: P < {p_thr:.2g} nW, I < {i_thr:.2g} uA: the leakage")):
+        for q, c in QUAD_COLORS.items():
+            m = sel & (quad == q)
+            a.scatter(I[m], P[m], s=1, alpha=0.25, color=c, label=f"{q} ({m.sum()})",
+                      rasterized=True)
+        a.set_xlabel("|I_NVLED| (uA)")
+        a.set_ylabel("P (nW)")
+        a.set_title(ttl, fontsize=9)
+        a.grid(alpha=0.3)
+        a.legend(fontsize=8, markerscale=8)
+    fig.suptitle(f"Current vs optical power by quadrant -- {lbl}", fontsize=10)
+    fig.tight_layout()
+    files.append(out_dir / f"fastscan_IP_quadrant{tag}.png")
+    fig.savefig(files[-1], dpi=200)
+    plt.close(fig)
+
+    # 2. density, equal weight for 1 uA and 1 nW
+    span = max(np.ptp(I), np.ptp(P), 1e-12)
+    cell = span / IP_DENSITY_BINS
+    ix = np.floor((I - I.min()) / cell).astype(np.int64)
+    iy = np.floor((P - P.min()) / cell).astype(np.int64)
+    key = ix * (iy.max() + 1) + iy
+    _, inv, cnt = np.unique(key, return_inverse=True, return_counts=True)
+    dens = cnt[inv]
+    o = np.argsort(dens)                       # densest on top
+    fig, ax = plt.subplots(figsize=(7.5, 5.8))
+    sc = ax.scatter(I[o], P[o], c=dens[o], s=2, cmap="viridis",
+                    norm=LogNorm(), rasterized=True)
+    fig.colorbar(sc, ax=ax, label="pixels in the same cell")
+    ax.set_xlabel("|I_NVLED| (uA)")
+    ax.set_ylabel("P (nW)")
+    ax.grid(alpha=0.3)
+    ax.set_title(f"Density -- {lbl}\ncell {cell:.3g} uA x {cell:.3g} nW: 1 uA and 1 nW "
+                 f"weigh the same", fontsize=9)
+    fig.tight_layout()
+    files.append(out_dir / f"fastscan_IP_density{tag}.png")
+    fig.savefig(files[-1], dpi=200)
+    plt.close(fig)
+
+    # 3. by position: 2D colour, X, Y
+    rgb = np.c_[X / 511.0, np.full(len(X), 0.35), Y / 511.0]
+    fig, ax = plt.subplots(1, 3, figsize=(18, 5.2))
+    ax[0].scatter(I, P, c=rgb, s=1, alpha=0.4, rasterized=True)
+    ax[0].set_title("colour = position: red grows with X, blue with Y", fontsize=9)
+    for a, val, name in ((ax[1], X, "X"), (ax[2], Y, "Y")):
+        sc = a.scatter(I, P, c=val, s=1, alpha=0.4, cmap="turbo", vmin=0, vmax=511,
+                       rasterized=True)
+        fig.colorbar(sc, ax=a, label=f"{name} (px)")
+        a.set_title(f"colour = {name}", fontsize=9)
+    inset = ax[0].inset_axes([0.72, 0.05, 0.25, 0.25])
+    g = np.linspace(0, 1, 64)
+    inset.imshow(np.dstack([np.tile(g, (64, 1)), np.full((64, 64), 0.35),
+                            np.tile(g[:, None], (1, 64))]), origin="upper",
+                 extent=(0, 511, 511, 0))
+    inset.set_xlabel("X", fontsize=6)
+    inset.set_ylabel("Y", fontsize=6)
+    inset.tick_params(labelsize=5)
+    for a in ax:
+        a.set_xlabel("|I_NVLED| (uA)")
+        a.set_ylabel("P (nW)")
+        a.grid(alpha=0.3)
+    fig.suptitle(f"Current vs optical power by position on the array -- {lbl}",
+                 fontsize=10)
+    fig.tight_layout()
+    files.append(out_dir / f"fastscan_IP_position{tag}.png")
+    fig.savefig(files[-1], dpi=200)
+    plt.close(fig)
+    return files
+
+
 def plot_fastscan_remeasure(fs_dir, out, plt):
     """EQE of the first N fast-scan pixels, measured at the start and again at the end.
 
@@ -3501,6 +3617,12 @@ def analyse_run(run_dir, log):
             log(f"  (skipped the per-bias fast-scan comparison: {e})")
     cls = classify_fastscan(fs)
     plot_fastscan_overview(fs, cls, out / "fastscan_overview.png", plt)
+    for fsv in [fs, *fs_extra.values()]:
+        try:
+            tag = "" if not fs_extra else f"_v{float(fsv['NVLED_V'].iloc[0]):+.3f}"
+            plot_fastscan_ip(fsv, out, plt, tag)
+        except Exception as e:
+            log(f"  (skipped the current-vs-power plots: {e})")
     try:
         drift = plot_fastscan_remeasure(fs_dir, out / "fastscan_remeasure.png", plt)
         for d in drift or []:

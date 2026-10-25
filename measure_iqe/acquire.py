@@ -539,8 +539,22 @@ def build_fine_voltages(pm, smu, cfg: IQEConfig, log: Logger,
 # per-sample spread. Before 2026-10-24 it was written as *_STD; analyze_array renames
 # that on load. Here *_MEAN is _stats()'s centre: the MEDIAN for the two currents.
 _AGG_KEYS = ["X", "Y", "BITVAL", "NVLED_V", "TIME_START", "TIME_END"]
+# QUADRANT (TL/TR/BL/BR, from X and Y) is LAST in the fast-scan file, so a reader that
+# counts columns there still finds the old ones where they were. In the sweep, which
+# is read by name, it follows the keys.
 _AGG_COLS = _AGG_KEYS + ["NVLED_CURR_MEAN", "NVLED_CURR_SEM", "VLED_CURR_MEAN",
-                         "VLED_CURR_SEM", "PM400_POWER_MEAN", "PM400_POWER_SEM"]
+                         "VLED_CURR_SEM", "PM400_POWER_MEAN", "PM400_POWER_SEM",
+                         "QUADRANT"]
+
+
+def quadrant_of(x, y) -> str:
+    """Which 256x256 quadrant a logical pixel sits in: TL, TR, BL or BR."""
+    return ("TL", "TR", "BL", "BR")[(int(x) >= 256) + 2 * (int(y) >= 256)]
+
+
+def _with_quadrant(r: Row) -> Row:
+    """The row with QUADRANT filled in from X and Y, if it does not carry one."""
+    return r if "QUADRANT" in r else {**r, "QUADRANT": quadrant_of(r["X"], r["Y"])}
 _CHANNELS = ["NVLED_CURR", "VLED_CURR", "PM400_POWER"]
 _STATS = list(_STAT_SUFFIX.values())
 
@@ -591,7 +605,7 @@ def agg_cols(cfg: IQEConfig) -> list[str]:
     Grouped by channel and found by NAME: a reader that indexes columns by position
     breaks on this file.
     """
-    cols = _AGG_KEYS + _sweep_stat_cols(cfg.leak_reference)
+    cols = _AGG_KEYS + ["QUADRANT"] + _sweep_stat_cols(cfg.leak_reference)
     if cfg.leak_reference:
         cols += _AGG_COLS_REF
     if cfg.fine_sweep_mode == "voltage":
@@ -627,6 +641,7 @@ def write_aggregated_one(path: str | Path, rows: list[Row],
     with open(path, "w") as f:
         f.write(",".join(cols) + "\n")
         for r in rows:
+            r = _with_quadrant(r)
             f.write(",".join(agg_field(r[c]) for c in cols) + "\n")
 
 
@@ -751,6 +766,7 @@ class BackgroundWriter:
                         self._samp_f.write(f"{x},{y},{b},{v},{t},{typ},{k},{val!r}\n")
             self._samp_f.flush()
         for r in prows:
+            r = _with_quadrant(r)
             self._agg_fh(r["BITVAL"]).write(
                 ",".join(agg_field(r.get(c, float("nan"))) for c in self._cols) + "\n")
         for f in self._agg_f.values():

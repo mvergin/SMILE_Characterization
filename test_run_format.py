@@ -42,7 +42,7 @@ AGG_REQUIRED = ["X", "Y", "BITVAL", "NVLED_V", "TIME_START", "TIME_END",
 # reference (section 6), then the reference bookkeeping and the per-point compliance
 # limit. Pinned exactly, so a column cannot appear or vanish unnoticed.
 _STATS = ["MEAN", "MEDIAN", "SAMPSTD", "MADSTD", "SEM", "N"]
-AGG_SWEEP = (AGG_REQUIRED[:6]
+AGG_SWEEP = (AGG_REQUIRED[:6] + ["QUADRANT"]
              + [c for ch in ("NVLED_CURR", "VLED_CURR", "PM400_POWER")
                 for c in ([f"{ch}_{s}" for s in _STATS] + [f"{ch}_REF"]
                           + [f"{ch}_REF_{s}" for s in _STATS])]
@@ -82,7 +82,9 @@ def _check_layout(run_dir: Path, label: str):
         assert not missing, f"{label}/{folder.name}: required columns lost -> {missing}"
 
     fast_agg = _header(sorted(fast.glob("*aggregated_bitval=*_mean_std.csv"))[0])
-    assert fast_agg == AGG_REQUIRED, f"{label}: fast-scan columns changed -> {fast_agg}"
+    # QUADRANT last, so the columns a positional reader counts stay where they were
+    assert fast_agg == AGG_REQUIRED + ["QUADRANT"], (
+        f"{label}: fast-scan columns changed -> {fast_agg}")
     sweep_agg = _header(sorted(sweep.glob("*aggregated_bitval=*_mean_std.csv"))[0])
     assert sweep_agg in (AGG_SWEEP, AGG_SWEEP + AGG_POOL), \
         f"{label}: sweep columns changed -> {sweep_agg}"
@@ -159,7 +161,7 @@ def test_an_interrupted_run_is_still_readable():
             m.shutdown(pm, smu, smile, cfg)
         assert sel, "fast scan found no pixels"
         agg = run_file(run_dir, "FastScan/aggregated_bitval=15_mean_std.csv")
-        assert _header(agg) == AGG_REQUIRED
+        assert _header(agg) == AGG_REQUIRED + ["QUADRANT"]
         with open(agg, newline="", encoding="utf-8") as f:
             assert len(list(csv.DictReader(f))) == 64      # every ROI pixel
 
