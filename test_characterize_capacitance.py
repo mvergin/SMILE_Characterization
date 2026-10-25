@@ -591,18 +591,22 @@ def test_a_simulated_switch_run_records_where_the_switch_is():
     pm, smu, sim = m.connect(cfg, lambda _s: None, simulate=True)
     args = build_parser().parse_args(
         ["--what", "switch", "--pixels", "300,40", "--switch-from", "10,20",
-         "--voltages", "-1.2", "--switch-hold-s", "0", "--max-presettle-s", "0",
-         "--samples", "200", "--switch-pre-s", "0.05", "--switch-n-pm", "1"])
+         "--voltages", "-1.2", "--switch-hold-s", "0.35", "--max-presettle-s", "0.35",
+         "--switch-refresh-s", "0.1", "--samples", "200", "--switch-pre-s", "0.05",
+         "--switch-n-pm", "1"])
     smile = _FakeSmile(sim)
     rows = exp_switch(pm, smu, smile, (300, 40), cfg, args, lambda _s: None)
     r = rows[0]
-    # hold pixel, then straight to the target: no blank frame inside the switch
-    lit = [f for f in smile.frames if f[0] == "one"]
-    i = smile.frames.index(lit[0])
-    assert smile.frames[i + 1] == ("one", ((300, 40),), 15), smile.frames
+    # the hold pixel is re-written during the hold (0.35 s at 0.1 s, plus once just
+    # before the record), then straight to the target: no blank frame in between
+    hold = [i for i, f in enumerate(smile.frames) if f == ("one", ((10, 20),), 15)]
+    assert len(hold) >= 4, smile.frames
+    assert smile.frames[hold[-1] + 1] == ("one", ((300, 40),), 15), smile.frames
+    assert all(f[0] == "one" for f in smile.frames[hold[0]:hold[-1] + 2]), smile.frames
     assert (r["from_quadrant"], r["to_quadrant"]) == ("TL", "TR"), r
     assert 0.05 <= r["sync_switch_sent_s"] <= r["sync_switch_ack_s"], r
     assert r["pm_on_trace_axis"] == 1 and r["trace_tag"].startswith("switch_"), r
+    assert np.isfinite(r["fpga_refresh_ms"]), "the last pre-record re-write is timed"
 
 
 if __name__ == "__main__":

@@ -258,7 +258,7 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
                  chunk=2000, log=None, limit_a=None, capacitance=45.7e-6,
                  max_presettle_s=60.0, cfg=None, charge_limit=None,
                  switch_settle_s=0.5, trigger=None, channels=2,
-                 pre_s=None, sync=None, on_fire=None):
+                 pre_s=None, sync=None, on_fire=None, hold_tick=None, tick_s=5.0):
     """Step ch B from v_from to v_to, then burst-capture I(t) with timestamps.
 
     `trigger` replaces the voltage step with any other perturbation -- `exp_switch`
@@ -286,6 +286,10 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
 
     ``on_fire`` runs just before the burst is sent, to start a host-clock record that
     should include the baseline.
+
+    ``hold_tick`` runs every ``tick_s`` during the pre-settle. exp_switch re-writes the
+    lit pixel with it, because the FPGA's USB link sleeps after 10-30 s idle and the
+    next write then waits ~1 s for it to wake (fpga_timing.py, 261025).
 
     The burst is issued in chunks. One ``measure_burst(20000)`` blocks the VISA
     read for the whole burst — about 8 s at NPLC 0.01 — which overruns the
@@ -329,7 +333,14 @@ def capture_step(smu, v_from, v_to, n_samples, nplc=0.01, settle_first_s=2.0,
             f"Raise --max-presettle-s or the limit.")
     elif pre > settle_first_s and log:
         log(f"      pre-settle {pre:.1f}s (charge-limited at {limit_a:g} A)")
-    time.sleep(pre)                            # start from a known, settled state
+    t_end = time.perf_counter() + pre          # start from a known, settled state
+    while True:
+        left = t_end - time.perf_counter()
+        if left <= 0:
+            break
+        time.sleep(min(left, tick_s) if hold_tick is not None else left)
+        if hold_tick is not None and time.perf_counter() < t_end:
+            hold_tick()
     smu.clear_buffers_only()
     if pre_s is not None:
         return _capture_with_baseline(smu, v_to, n_samples, nplc, chunk, log, trigger,
@@ -1614,6 +1625,24 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
         # v_from == v_to: the bias never moves, so the pre-settle is the only wait and
         # the trigger is the frame change.
         sync = {}
+        wake = {}
+
+        def _relight(_x=fx, _y=fy, _b=cfg.bitvals[0]):
+            # Re-write the SAME lit pixel during the hold. The FPGA's USB link sleeps
+            # after 10-30 s without traffic, and the next write then waits ~1 s for it
+            # to wake (fpga_timing.py, 261025: 982 ms after 30 s, 1058 ms after 60 s).
+            # Without this the switch window was ~1 s on every run with a 60 s hold.
+            smile.set_pixel(_x, _y, _b)
+
+        def _relight_then_record():
+            # once more just before the record, timed: ~1000 ms here would mean the
+            # link slept anyway and the refresh period is too long
+            t = time.perf_counter()
+            _relight()
+            wake["ms"] = 1e3 * (time.perf_counter() - t)
+            if ptrace is not None:
+                ptrace.start()
+
         t, ia, ib = capture_step(smu, v, v, args.samples, args.nplc,
                                  settle_first_s=args.switch_hold_s,
                                  chunk=args.chunk, log=log,
@@ -1625,8 +1654,8 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
                                  switch_settle_s=args.switch_settle_s,
                                  trigger=_switch, pre_s=pre_s, sync=sync,
                                  channels=args.switch_channels,
-                                 on_fire=(ptrace.start if ptrace is not None
-                                          and pre_s is not None else None))
+                                 on_fire=_relight_then_record if pre_s is not None else None,
+                                 hold_tick=_relight, tick_s=args.switch_refresh_s)
         # Every metric below asks what happens AFTER the switch, so it reads the record
         # from the switch's ack on, with t = 0 there. The baseline before it is kept in
         # the trace for the plot.
@@ -1679,6 +1708,9 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
                          sync_switch_sent_s=sync.get("trigger_lo_s", nan),
                          sync_switch_ack_s=sync.get("trigger_hi_s", nan),
                          sync_start_ack_late=sync.get("start_ack_late", nan),
+                         # the last re-write of the hold pixel, just before the
+                         # record: ~1000 ms means the link slept during the hold
+                         fpga_refresh_ms=wake.get("ms", nan),
                          pm_on_trace_axis=int(ptrace is not None and pre_s is not None),
                          **{f"spec_{k}": val for k, val in spec.items()}))
 
@@ -2359,6 +2391,11 @@ def build_parser():
                          "when the switch was sent and acknowledged on the trace's own "
                          "time axis. Negative restores the pre-2026-10-25 order, where "
                          "the switch came first and the record started after it.")
+    ap.add_argument("--switch-refresh-s", type=float, default=5.0,
+                    help="switch: re-write the hold pixel this often during the hold, "
+                         "so the FPGA's USB link never sleeps. It sleeps after 10-30 s "
+                         "idle and the next write then takes ~1 s (fpga_timing.py), "
+                         "which put a 1 s delay inside every switch window.")
     ap.add_argument("--switch-channels", type=int, choices=(1, 2), default=1,
                     help="switch: 1 (default) reads ch B only, 2 reads ch A as well. ch A "
                          "costs one integration plus 569 us per reading (sample_interval_s) "
