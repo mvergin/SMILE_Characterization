@@ -1508,8 +1508,8 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
     Procedure, per bias:
 
       1. light the `--switch-from` pixel and hold the bias until the node is settled
-      2. start the burst, record `--switch-pre-s` of baseline, then blank the frame
-         and light the target pixel while the SMU integrates. Host times bracket the
+      2. start the burst, record `--switch-pre-s` of baseline, then light the target
+         pixel with ONE set_pixel (no blank frame first) while the SMU integrates. Host times bracket the
          burst start and the frame write, so switch.csv places the switch on the
          trace (sync_switch_sent_s .. sync_switch_ack_s). Before 2026-10-25 the
          switch came FIRST and the burst started after it, so no record before then
@@ -1601,7 +1601,10 @@ def exp_switch(pm, smu, smile, pixel, cfg, args, log):
         pre_s = args.switch_pre_s if args.switch_pre_s >= 0 else None
 
         def _switch(_x=x, _y=y, _b=to_bv):
-            smile.blank_frame()
+            # ONE frame write, no blank_frame() first. set_pixel opens with RESET_DIS,
+            # which clears the display itself, so the old pixel goes off and the new
+            # one comes on in a single acknowledged instruction. The blank used to be
+            # a second write -- a full 2048-word image -- inside the switch window.
             smile.set_pixel(_x, _y, _b)
             if ptrace is not None and pre_s is None:
                 ptrace.start()
