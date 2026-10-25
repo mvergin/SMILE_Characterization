@@ -96,6 +96,14 @@ def test_a_run_from_before_the_sem_rename_reads_the_same():
     assert {"NVLED_CURR_SAMPSTD", "NVLED_CURR_MADSTD"} <= set(aa.legacy_sem(df).columns)
 
 
+def test_decimation_keeps_both_ends_and_every_kth_bias():
+    """--decimation refits on every k-th bias; the lowest and highest always stay."""
+    assert aa.decimated_biases(list(range(10)), 3) == [0, 3, 6, 9]
+    assert aa.decimated_biases(list(range(11)), 3) == [0, 3, 6, 9, 10]
+    assert aa.decimated_biases(list(range(30)), 1) == list(range(30))
+    assert not aa.RUN_TRUNCATION and not aa.RUN_DECIMATION, "both stay off by default"
+
+
 def test_leakage_reference_is_subtracted():
     """I_LED must be the corrected current, or the rising side stays wrong."""
     df = aa._load_aggregated(SWEEP)

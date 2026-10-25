@@ -2099,6 +2099,11 @@ def gate_table(df):
     return dict(rows=rows, limits=limits, tries=tries, n=len(df))
 
 
+# Both checks refit every sampled pixel many times and are OFF by default: the
+# truncation check took most of an analysis and changed no conclusion. --truncation
+# and --decimation turn them on.
+RUN_TRUNCATION = False
+RUN_DECIMATION = False
 TRUNC_MAX_PIXELS = 100   # ponytail: per-pixel truncation on an even sample; ~0.2 s a fit
 TRUNC_N = 5              # cut 0..5 points from each end
 TRUNC_WARN_PTS = 2.0     # warn when one or two cuts move the peak IQE more than this
@@ -2122,6 +2127,98 @@ def _trunc_peaks(J, E):
             ok, _ = classify_fit(f)
             out[(mode, c)] = 100 * f["peak_IQE"] if ok else np.nan
     return out
+
+
+DECIM_STEPS = (1, 2, 3, 4, 5, 10)   # use every k-th bias
+DECIM_MAX_PIXELS = 300               # ponytail: an even sample; ~0.2 s a fit, 6 fits a pixel
+DECIM_MIN_POINTS = 4                 # an ABC fit needs at least this many biases
+
+
+def decimated_biases(vs, k):
+    """Every k-th bias from the first, and always the last: both ends stay in."""
+    keep = list(vs[::k])
+    if keep[-1] != vs[-1]:
+        keep.append(vs[-1])
+    return keep
+
+
+def decimation_check(df, out, plt, log):
+    """Could fewer biases have given the same peak IQE?
+
+    Keeps the lowest and highest bias and uses every k-th one in between, k in
+    DECIM_STEPS, with no interpolation. Refits the joint per-bias median curve and the
+    clean single pixels (an even sample of up to DECIM_MAX_PIXELS) on each subset, and
+    reports how far the peak IQE moves from the fit on every bias. Writes
+    decimation.csv and decimation.png. Off by default (RUN_DECIMATION).
+    """
+    rel = df[df["RELIABLE"]].copy()
+    rel["_v"] = rel["NVLED_V"].astype(float).round(4)
+    vs = sorted(rel["_v"].unique())
+    if len(vs) < 2 * DECIM_MIN_POINTS:
+        return None
+    groups = [g for _, g in rel.groupby(["X", "Y"])
+              if not ("POOL_K_EFF" in g and g["POOL_K_EFF"].iloc[0] > 1)]
+    if len(groups) > DECIM_MAX_PIXELS:
+        groups = groups[:: int(np.ceil(len(groups) / DECIM_MAX_PIXELS))]
+    n_px = rel.groupby(["X", "Y"]).ngroups
+
+    def peak(J, E):
+        if len(J) < DECIM_MIN_POINTS:
+            return np.nan
+        f = fit_abc(np.asarray(J, float), np.asarray(E, float))
+        ok, _ = classify_fit(f)
+        return 100 * f["peak_IQE"] if ok else np.nan
+
+    joint, pix = {}, {}
+    for k in DECIM_STEPS:
+        keep = decimated_biases(vs, k)
+        sub = rel[rel["_v"].isin(keep)]
+        med = median_eqe_curve(sub["J_LED"].values, sub["EQE_LED"].values,
+                               min_count=max(3, int(0.15 * n_px)), V=sub["_v"].values)
+        joint[k] = (peak(med["J"], med["EQE"]) if len(med) else np.nan, len(keep))
+        pix[k] = []
+        for g in groups:
+            gg = g[g["_v"].isin(keep)]
+            pix[k].append(peak(gg["J_LED"], gg["EQE_LED"]))
+    base_px = np.asarray(pix[1], float)
+    rows = []
+    for k in DECIM_STEPS:
+        d = np.asarray(pix[k], float) - base_px
+        d = d[np.isfinite(d)]
+        rows.append(dict(k=k, n_biases=joint[k][1], joint_peak_IQE=joint[k][0],
+                         joint_shift=joint[k][0] - joint[1][0],
+                         pixel_median_shift=float(np.median(d)) if d.size else np.nan,
+                         pixel_p10=float(np.percentile(d, 10)) if d.size else np.nan,
+                         pixel_p90=float(np.percentile(d, 90)) if d.size else np.nan,
+                         pixel_median_abs_shift=float(np.median(np.abs(d))) if d.size else np.nan,
+                         n_pixels=int(d.size), n_pixels_sampled=len(groups)))
+    t = pd.DataFrame(rows)
+    t.to_csv(out / "decimation.csv", index=False)
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    ax.plot(t.n_biases, t.joint_shift, "ko-", label="joint per-bias median fit")
+    ax.plot(t.n_biases, t.pixel_median_shift, "o-", color="tab:green",
+            label=f"per-pixel median shift ({int(t.n_pixels.max())} pixels)")
+    ax.fill_between(t.n_biases, t.pixel_p10, t.pixel_p90, color="tab:green", alpha=0.2,
+                    label="per-pixel 10-90 %")
+    for r in t.itertuples():
+        ax.annotate(f"every {r.k}", (r.n_biases, r.pixel_median_shift), fontsize=7,
+                    textcoords="offset points", xytext=(3, 5))
+    ax.axhline(0, color="0.5", lw=0.8)
+    ax.invert_xaxis()
+    ax.set_xlabel("biases used (both ends always kept)")
+    ax.set_ylabel("peak IQE change vs every bias (points)")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    fig.suptitle(f"Decimation: the peak IQE from every k-th of {len(vs)} biases, "
+                 f"no interpolation", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out / "decimation.png", dpi=200)
+    plt.close(fig)
+    for r in t.itertuples():
+        log(f"    decimation every {r.k} ({r.n_biases} biases): joint {r.joint_shift:+.2f}, "
+            f"per-pixel median {r.pixel_median_shift:+.2f} [{r.pixel_p10:+.2f}, "
+            f"{r.pixel_p90:+.2f}] points, {r.n_pixels} pixels")
+    return t
 
 
 def truncation_check(df, med, per_bias, out, plt, log):
@@ -2451,7 +2548,10 @@ def analyse_sweep(sweep_dir, label, log):
                     if {"clean_fit", "POOL_K", "eta_LEE"} <= set(df_fits.columns)
                     else df_fits.iloc[:0])
     gates = gate_table(df)
-    trunc = _safe(truncation_check, df, med, per_bias, out, plt, log)
+    trunc = (_safe(truncation_check, df, med, per_bias, out, plt, log)
+             if RUN_TRUNCATION else None)
+    if RUN_DECIMATION:
+        _safe(decimation_check, df, out, plt, log)
     if spatial is not None:
         Pmap, _jref, grad = spatial
         spatial_info = dict(
@@ -2991,6 +3091,65 @@ def plot_fastscan_efficiency(fs, out, plt):
 FASTSCAN_PEAK_J_BAND = (5.0, 40.0)
 
 
+def plot_fastscan_remeasure(fs_dir, out, plt):
+    """EQE of the first N fast-scan pixels, measured at the start and again at the end.
+
+    measure_iqe repeats the first ``fastscan_remeasure_n`` pixels at the end of each
+    bias pass (remeasure_bitval=*.csv). Per bias: the two point clouds at their median
+    times, t = 0 at the first, and one least-squares line through both clouds. No
+    other analysis uses these numbers yet. Returns the slopes, or None without data.
+    """
+    files = sorted(Path(fs_dir).glob("*remeasure_bitval=*.csv"))
+    if not files:
+        return None
+    rem = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+    fs = _load_aggregated(fs_dir)
+    keys = ["X", "Y", "NVLED_V"]
+    both = rem.merge(fs, on=keys, suffixes=("_re", "_fs"))
+    biases = sorted(both["NVLED_V"].round(4).unique())
+    fig, axes = plt.subplots(1, len(biases), figsize=(5.5 * len(biases), 4.6),
+                             squeeze=False)
+    res = []
+    for ax, v in zip(axes[0], biases):
+        b = both[both["NVLED_V"].round(4) == v]
+        p_all = fs.loc[fs["NVLED_V"].round(4) == v, "PM400_POWER_MEAN"].abs()
+        thr = DEAD_THRESHOLD_FRAC * float(np.nanpercentile(p_all, FASTSCAN_ALIVE_PCTL))
+        b = b[b["PM400_POWER_MEAN_fs"].abs() >= thr]          # alive on the first pass
+        if b.empty:
+            continue
+        t1 = float(b["TIME_START_fs"].median())
+        t2 = (float(b["TIME_START_re"].median()) - t1) / 60.0
+        e1 = 100 * compute_eqe(b["PM400_POWER_MEAN_fs"].abs(), b["NVLED_CURR_MEAN_fs"].abs(),
+                               WAVELENGTH_NM)
+        e2 = 100 * compute_eqe(b["PM400_POWER_MEAN_re"].abs(), b["NVLED_CURR_MEAN_re"].abs(),
+                               WAVELENGTH_NM)
+        x = np.r_[np.zeros(len(e1)), np.full(len(e2), t2)]
+        y = np.r_[np.asarray(e1, float), np.asarray(e2, float)]
+        ok = np.isfinite(y)
+        slope, icpt = np.polyfit(x[ok], y[ok], 1)
+        ax.scatter(x[:len(e1)], e1, s=10, alpha=0.4, color="tab:blue", label="first pass")
+        ax.scatter(x[len(e1):], e2, s=10, alpha=0.4, color="tab:orange", label="re-measured")
+        xx = np.array([0.0, t2])
+        rel = 100 * slope / icpt if icpt else float("nan")
+        ax.plot(xx, icpt + slope * xx, color="k", lw=1.5,
+                label=f"fit: {slope:+.3g} %-pt/min ({rel:+.2f} % of start / min)")
+        ax.set_xlabel("time since the first pass (min)")
+        ax.set_ylabel("EQE (%)")
+        ax.set_title(f"{v:+.3f} V: {len(e1)} pixels, re-measured {t2:.1f} min later",
+                     fontsize=9)
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+        res.append(dict(v=v, n=len(e1), dt_min=t2, slope_pctpt_per_min=slope,
+                        slope_rel_pct_per_min=rel))
+    fig.suptitle("Fast-scan drift: the first pixels measured again at the end of the pass\n"
+                 "EQE = P/I of one fast-scan burst; pixels alive on the first pass only",
+                 fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out, dpi=200)
+    plt.close(fig)
+    return res
+
+
 def fastscan_peak_iqe_pixels(fs, peak_iqe_ref):
     """Per-pixel peak-IQE proxy from the fast scan (X, Y, iqe%%), or (None, J) if the
     fast-scan bias is off the EQE plateau (so EQE≠peak and the proxy is invalid).
@@ -3343,6 +3502,13 @@ def analyse_run(run_dir, log):
     cls = classify_fastscan(fs)
     plot_fastscan_overview(fs, cls, out / "fastscan_overview.png", plt)
     try:
+        drift = plot_fastscan_remeasure(fs_dir, out / "fastscan_remeasure.png", plt)
+        for d in drift or []:
+            log(f"  fast-scan re-measure @ {d['v']:+.3f} V: {d['n']} pixels, "
+                f"{d['dt_min']:.1f} min apart, {d['slope_rel_pct_per_min']:+.3f} %/min")
+    except Exception as e:
+        log(f"  (skipped the fast-scan re-measure plot: {e})")
+    try:
         fs_eff = plot_fastscan_efficiency(fs, out / "fastscan_efficiency.png", plt)
     except Exception as e:
         log(f"  (skipped fast-scan efficiency map: {e})")
@@ -3491,7 +3657,7 @@ def analyse_run(run_dir, log):
 
 
 def main():
-    global PIXEL_AREA_UM2, ACTIVE_THICKNESS_NM, WAVELENGTH_NM
+    global PIXEL_AREA_UM2, ACTIVE_THICKNESS_NM, WAVELENGTH_NM, RUN_TRUNCATION, RUN_DECIMATION
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -3500,7 +3666,13 @@ def main():
     ap.add_argument("--area", type=float, default=PIXEL_AREA_UM2)
     ap.add_argument("--thickness", type=float, default=ACTIVE_THICKNESS_NM)
     ap.add_argument("--wavelength", type=float, default=WAVELENGTH_NM)
+    ap.add_argument("--truncation", action="store_true",
+                    help="run the end-point truncation check (slow, off by default)")
+    ap.add_argument("--decimation", action="store_true",
+                    help="refit on every k-th bias, ends kept: could fewer biases have "
+                         "given the same peak IQE? (slow, off by default)")
     args = ap.parse_args()
+    RUN_TRUNCATION, RUN_DECIMATION = args.truncation, args.decimation
 
     PIXEL_AREA_UM2, ACTIVE_THICKNESS_NM, WAVELENGTH_NM = (
         args.area,
