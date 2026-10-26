@@ -3664,26 +3664,49 @@ def point_image(ax, x, y, rgb, alpha=1.0, bins=(320, 240)):
     ax.set_ylim(y0, y1)
 
 
+def si_unit(v, unit):
+    """(scale, label) that puts v between 1 and 1000: si_unit(3e-5, "A") = (1e6, "uA")."""
+    v = abs(float(v)) if np.isfinite(v) else 0.0
+    e = min(max(int(np.floor(np.log10(v) / 3)) * 3, -15), 0) if v > 0 else 0
+    return 10.0 ** -e, {0: "", -3: "m", -6: "u", -9: "n", -12: "p", -15: "f"}[e] + unit
+
+
+def ip_equivalence(I, P):
+    """W per A at which current and light weigh the same in the density plot: the
+    ratio of their spans rounded to a power of ten. 40 nW / 30 uA -> 1e-3 (1 nW = 1 uA),
+    30 uW / 30 uA -> 1 (1 uW = 1 uA)."""
+    si, sp = np.ptp(I), np.ptp(P)
+    if not (si > 0 and sp > 0):
+        return 1e-3
+    return 10.0 ** round(np.log10(sp / si))
+
+
 def plot_fastscan_ip(fs, out_dir, plt, tag=""):
     """Fast scan: current on x, optical power on y, three ways. One set per bias.
 
     fastscan_IP_quadrant: coloured by quadrant, all pixels and zoomed on the dim ones,
         where each quadrant's own leakage separates the clouds.
     fastscan_IP_density: coloured by how many pixels share a square cell, the cell
-        being IP_DENSITY_BINS-th of the larger span, with 1 uA on x the same length
-        as 1 nW on y. A distance in those units weighs current and light equally, so
-        the colours do not change when an axis is rescaled.
+        being IP_DENSITY_BINS-th of the larger span. Current and light weigh the same
+        per decade of their spans: ip_equivalence() rounds P-span / I-span to a power
+        of ten, so 40 nW against 30 uA makes 1 nW = 1 uA, and 30 uW against 30 uA makes
+        1 uW = 1 uA. The colours then do not change when an axis is rescaled.
     fastscan_IP_position: coloured by where the pixel sits: a 2D colour for (X, Y),
         then X alone and Y alone.
     """
     from matplotlib.cm import ScalarMappable
     from matplotlib.colors import LogNorm, Normalize
-    I = fs["NVLED_CURR_MEAN"].astype(float).abs().values * 1e6     # uA
-    P = fs["PM400_POWER_MEAN"].astype(float).abs().values * 1e9    # nW
+    I = fs["NVLED_CURR_MEAN"].astype(float).abs().values           # A
+    P = fs["PM400_POWER_MEAN"].astype(float).abs().values          # W
     quad = _quadrant_col(fs).values
     v = float(fs["NVLED_V"].iloc[0]) if "NVLED_V" in fs.columns else float("nan")
     ok = np.isfinite(I) & np.isfinite(P)
     I, P, quad = I[ok], P[ok], quad[ok]
+    k = ip_equivalence(I, P)            # 1 A weighs as much as k W, before rescaling
+    # plotted in the units that suit the data: 40 nW as nW, 30 uW as uW
+    isc, iu = si_unit(np.nanpercentile(I, 99), "A")
+    psc, pu = si_unit(np.nanpercentile(P, 99), "W")
+    I, P = I * isc, P * psc
     X, Y = fs["X"].astype(int).values[ok], fs["Y"].astype(int).values[ok]
     lbl = f"fast scan @ {v:+.3f} V, {ok.sum()} pixels"
     files = []
@@ -3702,12 +3725,12 @@ def plot_fastscan_ip(fs, out_dir, plt, tag=""):
     qrgb = lut[pd.Index(list(QUAD_COLORS)).get_indexer(np.asarray(quad, object))]  # -1: grey
     fig, ax = plt.subplots(1, 2, figsize=(13, 5.2))
     for a, sel, ttl in ((ax[0], np.ones_like(dim), "all pixels"),
-                        (ax[1], dim, f"near the origin: P < {p_thr:.2g} nW, I < {i_thr:.2g} uA: the leakage")):
+                        (ax[1], dim, f"near the origin: P < {p_thr:.2g} {pu}, I < {i_thr:.2g} {iu}: the leakage")):
         point_image(a, I[sel], P[sel], qrgb[sel], alpha=0.25)
         for q, c in QUAD_COLORS.items():             # legend entries only
             a.scatter([], [], s=1, color=c, label=f"{q} ({(sel & (quad == q)).sum()})")
-        a.set_xlabel("|I_NVLED| (uA)")
-        a.set_ylabel("P (nW)")
+        a.set_xlabel(f"|I_NVLED| ({iu})")
+        a.set_ylabel(f"P ({pu})")
         a.set_title(ttl, fontsize=9)
         a.grid(alpha=0.3)
         a.legend(fontsize=8, markerscale=8)
@@ -3717,11 +3740,13 @@ def plot_fastscan_ip(fs, out_dir, plt, tag=""):
     fig.savefig(files[-1], dpi=200)
     plt.close(fig)
 
-    # 2. density, equal weight for 1 uA and 1 nW
-    span = max(np.ptp(I), np.ptp(P), 1e-12)
+    # 2. density: square cells in units where 1 iu of current weighs r pu of light
+    r = k * psc / isc
+    span = max(np.ptp(I), np.ptp(P) / r, 1e-12)
     cell = span / IP_DENSITY_BINS
     ix = np.floor((I - I.min()) / cell).astype(np.int64)
-    iy = np.floor((P - P.min()) / cell).astype(np.int64)
+    iy = np.floor((P - P.min()) / (cell * r)).astype(np.int64)
+    ps, pu1 = si_unit(k / isc, "W")      # what 1 iu of current is worth in light
     key = ix * (iy.max() + 1) + iy
     _, inv, cnt = np.unique(key, return_inverse=True, return_counts=True)
     dens = cnt[inv]
@@ -3729,11 +3754,11 @@ def plot_fastscan_ip(fs, out_dir, plt, tag=""):
     sc = ScalarMappable(LogNorm(dens.min(), dens.max()), "viridis")
     point_image(ax, I, P, sc.to_rgba(dens))
     fig.colorbar(sc, ax=ax, label="pixels in the same cell")
-    ax.set_xlabel("|I_NVLED| (uA)")
-    ax.set_ylabel("P (nW)")
+    ax.set_xlabel(f"|I_NVLED| ({iu})")
+    ax.set_ylabel(f"P ({pu})")
     ax.grid(alpha=0.3)
-    ax.set_title(f"Density -- {lbl}\ncell {cell:.3g} uA x {cell:.3g} nW: 1 uA and 1 nW "
-                 f"weigh the same", fontsize=9)
+    ax.set_title(f"Density -- {lbl}\ncell {cell:.3g} {iu} x {cell * r:.3g} {pu}: "
+                 f"1 {iu} weighs as much as {k / isc * ps:g} {pu1}", fontsize=9)
     fig.tight_layout()
     files.append(out_dir / f"fastscan_IP_density{tag}.png")
     fig.savefig(files[-1], dpi=200)
@@ -3758,8 +3783,8 @@ def plot_fastscan_ip(fs, out_dir, plt, tag=""):
     inset.set_ylabel("Y", fontsize=6)
     inset.tick_params(labelsize=5)
     for a in ax:
-        a.set_xlabel("|I_NVLED| (uA)")
-        a.set_ylabel("P (nW)")
+        a.set_xlabel(f"|I_NVLED| ({iu})")
+        a.set_ylabel(f"P ({pu})")
         a.grid(alpha=0.3)
     fig.suptitle(f"Current vs optical power by position on the array -- {lbl}",
                  fontsize=10)

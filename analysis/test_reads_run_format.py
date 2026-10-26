@@ -305,6 +305,14 @@ def test_analyze_finds_runs_and_knows_when_they_are_stale():
     assert "failed" in analyze.why_stale("t", dict(ok, exit=1), "c", "i")
 
 
+def test_density_weighs_current_and_light_by_decade():
+    I = np.array([0, 30e-6])
+    assert aa.ip_equivalence(I, np.array([0, 40e-9])) == 1e-3     # 1 nW = 1 uA
+    assert aa.ip_equivalence(I, np.array([0, 30e-6])) == 1.0      # 1 uW = 1 uA
+    assert aa.si_unit(3e-5, "A") == (1e6, "uA")
+    assert aa.si_unit(40e-9, "W")[1] == "nW" and aa.si_unit(30e-6, "W")[1] == "uW"
+
+
 def test_block_stats_match_the_per_block_loop():
     rng = np.random.default_rng(1)
     X = rng.integers(3, 70, 400)
