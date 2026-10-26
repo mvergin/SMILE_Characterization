@@ -2367,19 +2367,36 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
             # waiting for it to settle would be two seconds spent on a state nothing
             # reads. In bias_major that is half the per-point cost, on every point.
 
-    if ref is not None and abs(inv) <= LIT_FAIL_RATIO * abs(ref[4]):
-        # The lit frame did not land: the pixel drew only its leakage. Write it again,
-        # give it the pixel-switch settle, and read once more. One retry -- a pixel that
-        # is dark twice is dead or dropping out, and the analysis gates remove it.
-        log(f"      ({x},{y}) at {v:+.3f} V: lit read {abs(inv) * 1e9:.0f} nA against a "
-            f"{abs(ref[4]) * 1e9:.0f} nA reference -- the lit frame did not land. "
+    def lit_failed():
+        # By current: the pixel drew only its leakage. By light, for a CACHED reference
+        # only: the cache is a clean pre-pass minimum, so a reference carrying more than
+        # leak_ref_max_frac of the lit light means the lit reading is dark. The current
+        # test alone misses that at the bright end, because the cache was read at the
+        # pre-pass bias: at -3.2 V in 261025-2146, 408 dark points drew 1.12-2.44x
+        # their -0.9 V reference current, never <= 1.10x, so none was re-written, and
+        # the first-bias dead check then dropped all 408 from the sweep. Their fast
+        # scan had them at 22-117 % of the median light.
+        return ref is not None and (abs(inv) <= LIT_FAIL_RATIO * abs(ref[4]) or (
+            cached and abs(ref[0] / p if p else float("inf")) > cfg.leak_ref_max_frac))
+
+    if lit_failed():
+        # The lit frame did not land. Write it again, give it the pixel-switch settle,
+        # and read once more. One retry -- a pixel that is dark twice is dead or
+        # dropping out, and the analysis gates remove it.
+        log(f"      ({x},{y}) at {v:+.3f} V: lit read {abs(inv) * 1e9:.0f} nA, "
+            f"{abs(p) * 1e9:.3g} nW against a {abs(ref[4]) * 1e9:.0f} nA, "
+            f"{abs(ref[0]) * 1e9:.3g} nW reference -- the lit frame did not land. "
             f"Re-writing it.")
         light(smile, x, y, bitval)
         time.sleep(cfg.pixel_switch_settle_s * cfg.settle_scale)
         (p, ps, iv, ivs, inv, invs), raw_s = read_lit()
-        if abs(inv) <= LIT_FAIL_RATIO * abs(ref[4]):
-            log(f"      ({x},{y}): still {abs(inv) * 1e9:.0f} nA after the re-write -- the "
-                f"pixel is dark here, not the frame. Point kept; the analysis drops it.")
+        if lit_failed():
+            log(f"      ({x},{y}): still {abs(inv) * 1e9:.0f} nA, {abs(p) * 1e9:.3g} nW "
+                f"after the re-write -- the pixel is dark here, not the frame. Point "
+                f"kept; the analysis drops it.")
+        else:
+            log(f"      ({x},{y}): lit after the re-write ({abs(p) * 1e9:.3g} nW) -- the "
+                f"first write did not land. The re-read is kept.")
         frac = abs(ref[0] / p) if p else float("nan")   # the gate, against the new read
 
     vr = round(float(v), 4)
@@ -2421,8 +2438,8 @@ def measure_point(pm, smu, smile, x, y, bitval, v, limit, n_pm, n_smu,
             _ref_warned.add((x, y))
             how = ("the CACHED reference carries" if cached else
                    f"the bitval {cfg.leak_ref_bitval} reference still carries")
-            why = ("The cache holds a clean minimum from the pre-pass, so this is the "
-                   "LIT reading collapsing, not a failed write."
+            why = ("The cache holds a clean minimum from the pre-pass, and a re-write "
+                   "of the lit frame did not light it: the pixel is dark at this bias."
                    if cached else
                    f"The write did not land in {cfg.leak_ref_tries} tries, so the "
                    f"subtraction removes most of the signal.")

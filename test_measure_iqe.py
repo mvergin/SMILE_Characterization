@@ -495,6 +495,47 @@ def test_a_lit_frame_that_did_not_land_is_rewritten_once():
         acquire._ref_warned.clear()
 
 
+def test_a_dark_point_with_a_cached_reference_is_rewritten():
+    """261025-2146 at -3.2 V: the lit read was dark (0.1 % of the median light) but drew
+    1.12-2.44x the CACHED reference current, read at the -0.9 V pre-pass. The current test
+    never fired, and the dead check dropped 408 live pixels. The light test must."""
+    class _Smile:
+        def __init__(self):
+            self.writes = []
+
+        def set_pixel(self, x, y, bv):
+            self.writes.append((x, y, bv))
+
+    real = acquire.acquire_point
+    try:
+        for second, want_p, want_msg, who in (
+                ((1.4e-5, -1.2e-4), 1.4e-5, "lit after the re-write", "write failure"),
+                ((1e-11, -1.7e-7), 1e-11, "still", "dark twice")):
+            reads = [(1e-11, -1.7e-7), second]          # (P, I_NVLED) per lit read
+
+            def _f(*a, **k):
+                p, i = reads.pop(0)
+                return _as_point((p, 0.0, 1e-5, 0.0, i, 0.0, 0.0, 0.0), k)
+            acquire.acquire_point = _f
+            acquire._ref_warned.clear()
+            acquire._ref_cache.clear()
+            # clean pre-pass reference: 122 nA, 1e-11 W (a 4.7 uW-range dark offset)
+            acquire._ref_cache[(4, 5)] = (5e-12, 0.0, 1e-5, 0.0, -1.22e-7, 0.0, 0.0, 0.0)
+            cfg = IQEConfig(**dict(FAST, leak_reference=True, perpoint_range=False,
+                                   save_raw_samples=False, leak_ref_per_point_above_v=-1.0))
+            smile, said = _Smile(), []
+            row, _ = acquire.measure_point(None, None, smile, 4, 5, 15, -3.2, 1e-3,
+                                           8, 8, cfg, 0.0, said.append, restore=False)
+            assert row["LEAK_REF_CACHED"] == 1, who
+            assert smile.writes == [(4, 5, 15)], (who, smile.writes)
+            assert abs(row["PM400_POWER_MEAN"] - want_p) < 1e-15, (who, row)
+            assert any(want_msg in m for m in said), (who, said)
+    finally:
+        acquire.acquire_point = real
+        acquire._ref_warned.clear()
+        acquire._ref_cache.clear()
+
+
 def test_every_swept_pixel_starts_from_a_blank_frame():
     """The first swept pixel must not inherit whatever the fast scan left lit.
 
