@@ -39,6 +39,8 @@ a built-in ABC-model rig, with no hardware attached.
 
 from __future__ import annotations
 
+import bisect
+
 import csv
 import dataclasses
 import datetime
@@ -265,15 +267,29 @@ def select_sweep_pixels(alive: list[Row], cfg: IQEConfig, log: Logger) -> list[R
         n_extra = sum(int(k) - bool(cfg.pool_include_singles and cfg.pixels_per_block)
                       for k in cfg.pool_groups)
         want = cfg.pixels_per_block + n_extra
+        # Bucket the alive pixels by block once. Filtering the whole alive list inside
+        # the block loop was O(blocks x alive): 2.8 h for 262 144 one-pixel blocks and
+        # 113 266 alive pixels (Array38, 261025). The picks are bucketed the same way,
+        # so the avoid-set below reads only the blocks around this one.
+        bucket: dict[tuple[int, int], list[Row]] = {}
+        for r in alive:
+            bxi = int(np.searchsorted(xe, r["X"], side="right")) - 1
+            byi = int(np.searchsorted(ye, r["Y"], side="right")) - 1
+            if 0 <= bxi < nbx and 0 <= byi < nby:
+                bucket.setdefault((bxi, byi), []).append(r)
+        taken_at: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        # a block may be narrower than bs at the quadrant edge, so look two blocks out
+        reach = 2
         for bx in range(nbx):
             for by in range(nby):
-                block = [r for r in alive if xe[bx] <= r["X"] < xe[bx + 1]
-                         and ye[by] <= r["Y"] < ye[by + 1]]
+                block = bucket.get((bx, by), [])
                 if not block:
                     continue
                 # Only picks within one block of this one can end up touching it, so the
                 # avoid-set stays small however big the ROI is.
-                near = [p for p in taken if xe[bx] - bs <= p[0] < xe[bx + 1] + bs
+                near = [p for dx in range(-reach, reach + 1) for dy in range(-reach, reach + 1)
+                        for p in taken_at.get((bx + dx, by + dy), ())
+                        if xe[bx] - bs <= p[0] < xe[bx + 1] + bs
                         and ye[by] - bs <= p[1] < ye[by + 1] + bs]
                 # RANDOM start per block → each block's FPS pattern differs → sampled
                 # rows/columns diversified across blocks (no repeating sub-lattice).
@@ -285,6 +301,7 @@ def select_sweep_pixels(alive: list[Row], cfg: IQEConfig, log: Logger) -> list[R
                     n_short += 1          # too few well-separated alive pixels in this block
                 picks.append(split_block(got, cfg))
                 taken.extend((r["X"], r["Y"]) for r in got)
+                taken_at.setdefault((bx, by), []).extend((r["X"], r["Y"]) for r in got)
         # Round-robin MEASUREMENT ORDER: pass 0 takes the 1st pixel of every block, pass 1 the
         # 2nd, etc. So consecutive measurements hop between blocks and each block's K pixels are
         # spread across the whole run → slow thermal drift is decorrelated from spatial position
@@ -2814,6 +2831,7 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
 
             rows, samps = [], []
             dead_here = []
+            pw_sorted: list[float] = []     # per-member powers so far, kept sorted
             for (x, y) in live:
                 if parked():
                     break
@@ -2834,11 +2852,17 @@ def _sweep_bias_major(pm, smu, smile, selected: list[Row], writer: "BackgroundWr
                 # high_to_low is the brightest, exactly as in pixel_major. Here it
                 # drops the pixel from every remaining bias, so one judgement saves
                 # n_points measurements instead of n_points-1.
-                if cfg.dead_abort and jpt == 0 and per_member_power(row) < \
-                        max(cfg.dead_abort_nw * 1e-9,
-                            cfg.dead_abort_frac * float(np.median(
-                                [per_member_power(r) for r in rows]))):
-                    dead_here.append((x, y))
+                if cfg.dead_abort and jpt == 0:
+                    # The running median of every target so far, kept as a sorted list:
+                    # a np.median over a fresh list per pixel was O(n^2), about 2 h at
+                    # the first bias of a 112 000-pixel sweep.
+                    pm_row = per_member_power(row)
+                    bisect.insort(pw_sorted, pm_row)
+                    n_pw = len(pw_sorted)
+                    med = (pw_sorted[n_pw // 2] if n_pw % 2 else
+                           0.5 * (pw_sorted[n_pw // 2 - 1] + pw_sorted[n_pw // 2]))
+                    if pm_row < max(cfg.dead_abort_nw * 1e-9, cfg.dead_abort_frac * med):
+                        dead_here.append((x, y))
             if i_bias > 0:
                 i_last, v_last = i_bias, float(v)
             if p_bias > 0:
@@ -3011,9 +3035,14 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
         rng = ("range from the limit (High-C)" if cfg.highc_b
                else f"fixed {cfg.nvled_range_i:g} A range" if cfg.nvled_range_i
                else "range from the limit (High-C off, same ladder)")
-        log(f"VOLTAGE SWEEP — {len(selected)} pixels, {cfg.sweep_direction}, V ramp "
-            f"{cfg.nvled_v_coarse_start}→{cfg.nvled_v_coarse_stop} V ({cfg.n_fine} pts, low-J-dense @ knee "
-            f"{cfg.vramp_knee_v} V), {rng}, {eff}")
+        # The grid this run sweeps: the explicit list when there is one, else the ramp.
+        grid_v = [v for v, _ in build_fine_voltages(None, None, cfg, lambda _m: None)]
+        what = (f"{len(grid_v)} listed biases {max(grid_v):g}→{min(grid_v):g} V"
+                if cfg.sweep_voltages else
+                f"V ramp {cfg.nvled_v_coarse_start}→{cfg.nvled_v_coarse_stop} V "
+                f"({cfg.n_fine} pts, low-J-dense @ knee {cfg.vramp_knee_v} V)")
+        log(f"VOLTAGE SWEEP — {len(selected)} pixels, {cfg.sweep_direction}, {what}, "
+            f"{rng}, {eff}")
         if cfg.leak_reference and cfg.leak_ref_per_point_above_v is None:
             log(f"  leakage reference: every point re-measured at bitval {cfg.leak_ref_bitval} "
                 f"(+{cfg.leak_ref_settle_s:g}s each) → NVLED_CURR_REF. I_LED = MEAN - REF.")
@@ -3027,9 +3056,12 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                 f"30-point grid the cache removes it from 22 of them.")
         # Weight by the ACTUAL split, not the average of the two settles: with 18 slow
         # points and 12 fast ones the average under-reported by 16% (run 261014-1306).
-        n_low = max(2, int(round(cfg.n_fine * cfg.vramp_low_frac))) if (
-            cfg.vramp_low_frac and cfg.vramp_knee_v is not None) else cfg.n_fine // 2
-        n_high = max(0, cfg.n_fine - n_low)
+        n_pts = len(grid_v)
+        if cfg.vramp_knee_v is not None:      # the split the effort really follows
+            n_low = sum(1 for v in grid_v if v > cfg.vramp_knee_v)
+        else:
+            n_low = n_pts // 2
+        n_high = max(0, n_pts - n_low)
         ref_s = 2 * cfg.leak_ref_settle_s if cfg.leak_reference else 0
         npx = max(1, len(selected))
         dwell_all = n_low * cfg.vramp_lowv_settle_s + n_high * cfg.vramp_highv_settle_s
@@ -3039,7 +3071,7 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
             # here would overstate a 100-pixel run by more than an order of magnitude.
             # one reference settle per point here, not two: see measure_point(restore=)
             ref_bm = cfg.leak_ref_settle_s if cfg.leak_reference else 0
-            est = (dwell_all + npx * cfg.n_fine * (cfg.pixel_switch_settle_s + ref_bm)) \
+            est = (dwell_all + npx * n_pts * (cfg.pixel_switch_settle_s + ref_bm)) \
                 * cfg.settle_scale
             log(f"  settle time alone: ~{est/3600:.1f} h for {len(selected)} pixels "
                 f"(BIAS-MAJOR: {dwell_all:g}s of dwell ONCE for all of them "

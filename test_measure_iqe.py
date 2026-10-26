@@ -2072,6 +2072,25 @@ def test_a_ch_b_only_sweep_without_references_where_the_led_is_off():
             assert has_ref == (float(r["NVLED_V"]) <= -0.75), (r["NVLED_V"], has_ref)
 
 
+def test_one_pixel_blocks_select_every_alive_pixel_and_fast():
+    """block_size=1 with min_pixel_separation=1 sweeps every alive pixel. The default
+    separation of 2 keeps none that touch, which on Array38 (261025) silently dropped
+    75 081 of 113 266. And the selection is linear: it took 2.8 h when each block
+    scanned the whole alive list."""
+    import time as _time
+    rng = np.random.default_rng(1)
+    alive = [dict(X=x, Y=y) for x in range(128) for y in range(128) if rng.random() < 0.45]
+    cfg = IQEConfig(roi=(0, 0, 127, 127), block_size=1, pixels_per_block=1,
+                    min_pixel_separation=1).validate()
+    t0 = _time.perf_counter()
+    sel = acquire.select_sweep_pixels(alive, cfg, QUIET)
+    assert len(sel) == len(alive), (len(sel), len(alive))
+    assert _time.perf_counter() - t0 < 10, "the block selection must not scan per block"
+    sep2 = acquire.select_sweep_pixels(alive, IQEConfig(
+        roi=(0, 0, 127, 127), block_size=1, pixels_per_block=1).validate(), QUIET)
+    assert len(sep2) < 0.6 * len(alive), "separation 2 drops touching pixels, as documented"
+
+
 def test_the_pm400_range_is_picked_like_the_smu_limit():
     """Smallest realised range >= 1.5x the predicted power; widest when nothing is
     predicted; a reading at 95 % of full scale is over range."""
