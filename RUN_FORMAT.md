@@ -177,6 +177,11 @@ above, from the reference's own burst.
 | `LEAK_REF_FRAC` | - | `PM400_POWER_REF / PM400_POWER_MEAN`, the ratio the retry gated on |
 | `LEAK_REF_CACHED` | - | `1` = reused the per-pixel reference, `0` = measured at this point |
 
+A run taken before 2026-10-24 and rewritten in this format saved no reference samples.
+Its reference block holds only `*_REF`, the centre it equals (`NVLED_CURR_REF_MEDIAN`,
+`VLED_CURR_REF_MEDIAN`, `PM400_POWER_REF_MEAN`) and `NVLED`/`PM400` `*_REF_SEM`. The other
+reference columns are `nan`: not recorded, not zero.
+
 `LEAK_REF_CACHED = 1` says the four `*_REF` values came from the pre-pass rather than
 from a read taken beside this point, so they are the same at every cached bias of that
 pixel and `LEAK_REF_TRIES` is 0. The sweep references per point above
