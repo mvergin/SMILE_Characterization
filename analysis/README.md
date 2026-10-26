@@ -86,6 +86,21 @@ exact J and EQE arrays. A plot or report change reuses every fit. A gate or `enr
 change refits only the pixels whose reliable points it moved. A change to the fit code
 refits all of them.
 
+`REPORT_assets/IQE_EQE/pixel_summary.csv` has one row per swept pixel:
+
+| columns | meaning |
+|---|---|
+| `nvled_curr_*`, `vled_curr_*`, `pm400_power_*` | the burst at the pixel's own EQE peak (`v_at_eqe_max`), as measured |
+| `eqe_max_*` | EQE at that bias, leakage- and dark-corrected; std and MAD propagated from light and current |
+| `iqe_max`, `iqe_fit_r2` | the per-pixel ABC fit's peak IQE (clean fits only) and its R² |
+| `forward_voltage_mean`, `_median` | bias where J_LED first reaches 1 A/cm² from 0 V, interpolated in log J |
+| `forward_leakage_*`, `forward_leakage_v` | the reference current (pixel addressed, off) at the sweep bias nearest −1.0 V |
+
+`*` is `mean`, `median`, `std` (sample SD of the burst) and `mad` (1.4826 × MAD).
+`pixel_matrix_mean.png` and `pixel_matrix_median.png` plot every quantity against every
+other, one point per pixel, histograms on the diagonal. Runs before 2026-10-24 saved no
+reference samples, so their `forward_leakage` has only the median.
+
 ### `calc_iqe_eqe.py` — single-curve ABC fit
 
 Fits one I–V–L curve without the full array machinery. Useful for a quick check

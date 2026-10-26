@@ -313,6 +313,31 @@ def test_density_weighs_current_and_light_by_decade():
     assert aa.si_unit(40e-9, "W")[1] == "nW" and aa.si_unit(30e-6, "W")[1] == "uW"
 
 
+def test_pixel_summary_on_the_fixture():
+    run = FIXTURE
+    sw = run / "NVLEDSweep" / "Sweep"
+    df = aa.enrich(aa._load_aggregated(sw), dark_W=aa._dark_power(sw))
+    s = aa.pixel_summary(df, pd.DataFrame())
+    assert len(s) == df.groupby(["X", "Y"]).ngroups
+    for q in ("nvled_curr", "vled_curr", "pm400_power", "eqe_max", "forward_leakage"):
+        for st in ("mean", "median", "std", "mad"):
+            assert f"{q}_{st}" in s.columns, (q, st)
+    assert {"forward_voltage_mean", "forward_voltage_median", "v_at_eqe_max"} <= set(s.columns)
+    # the peak bias is a bias the pixel was measured at
+    ok = s["v_at_eqe_max"].notna()
+    assert ok.any() and set(s.loc[ok, "v_at_eqe_max"]) <= set(df["NVLED_V"].astype(float))
+
+
+def test_forward_voltage_interpolates_in_log_j():
+    V = np.array([0.0, -0.8, -0.9, -1.0] * 2)
+    J = np.array([1e-4, 0.1, 10.0, 100.0,     # crosses 1 A/cm2 halfway (log) -0.8..-0.9
+                  1e-4, 1e-3, 1e-2, 0.5])     # never reaches it
+    df = pd.DataFrame({"X": [0] * 4 + [1] * 4, "Y": 0, "NVLED_V": V})
+    vf = aa._forward_voltage(df, J)
+    assert abs(vf[(0, 0)] - (-0.85)) < 1e-12, vf
+    assert (1, 0) not in vf.index
+
+
 def test_block_stats_match_the_per_block_loop():
     rng = np.random.default_rng(1)
     X = rng.integers(3, 70, 400)

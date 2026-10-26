@@ -2751,6 +2751,157 @@ def truncation_check(df, med, per_bias, out, plt, log):
                 if (t.scope == "pixels").any() else 0)
 
 
+VF_J_A_CM2 = 1.0       # forward_voltage: the bias where J_LED first reaches this
+LEAK_AT_V = -1.0       # forward_leakage: the reference current at the sweep bias nearest this
+SUMMARY_STATS = {"mean": "MEAN", "median": "MEDIAN", "std": "SAMPSTD", "mad": "MADSTD"}
+SUMMARY_PLOT = ("nvled_curr", "vled_curr", "pm400_power", "eqe_max", "iqe_max",
+                "forward_voltage", "forward_leakage")
+
+
+def _col(g, name):
+    return (g[name].astype(float).values if name in g.columns
+            else np.full(len(g), np.nan))
+
+
+def _forward_voltage(df, J):
+    """Per pixel, the bias where J first reaches VF_J_A_CM2 going from 0 V towards the
+    bright end, interpolated linearly in log10(J). A Series on (X, Y); pixels whose J
+    never crosses it inside the sweep are absent."""
+    d = pd.DataFrame({"X": df["X"].values, "Y": df["Y"].values,
+                      "V": df["NVLED_V"].astype(float).values, "J": np.asarray(J, float)})
+    d = d[np.isfinite(d["J"]) & (d["J"] > 0)].sort_values(["X", "Y", "V"],
+                                                          ascending=[True, True, False])
+    g = d.groupby(["X", "Y"])
+    d["V0"], d["J0"] = g["V"].shift(1), g["J"].shift(1)
+    hit = d["J"] >= VF_J_A_CM2
+    first = d[hit & (hit.astype(int).groupby([d["X"], d["Y"]]).cumsum() == 1)
+              & d["J0"].notna()]
+    l0, l1 = np.log10(first["J0"]), np.log10(first["J"])
+    vf = first["V0"] + (first["V"] - first["V0"]) * (np.log10(VF_J_A_CM2) - l0) / (l1 - l0)
+    return pd.Series(vf.values, index=pd.MultiIndex.from_frame(first[["X", "Y"]]))
+
+
+def pixel_summary(df, df_fits):
+    """One row per pixel: the three channels at the pixel's own EQE peak, the EQE and
+    IQE peak, forward voltage and forward leakage, each as mean, median, std and MAD.
+
+    * nvled_curr, vled_curr, pm400_power: the burst at the bias of the pixel's highest
+      reliable EQE (v_at_eqe_max), as measured: |I| and P, no subtraction.
+    * eqe_max: EQE at that bias, leakage- and dark-corrected, from the burst means and
+      from the medians. std and MAD propagate the relative std (MAD) of the light and
+      of the corrected current.
+    * iqe_max: the per-pixel ABC fit's peak IQE, clean fits only. One value.
+    * forward_voltage: the bias where J_LED first reaches VF_J_A_CM2, from the mean and
+      from the median currents. No std or MAD.
+    * forward_leakage: |reference current| (pixel addressed, off) at the sweep bias
+      nearest LEAK_AT_V, the leakage the analysis subtracts; forward_leakage_v says which.
+    Runs before 2026-10-24 have no MEAN, SAMPSTD or MADSTD for the reference: NaN.
+    A pixel with no reliable point (dead) keeps only its leakage columns.
+    """
+    df = df.reset_index(drop=True)
+    key = ["X", "Y"]
+    out = pd.DataFrame(index=pd.MultiIndex.from_frame(df[key].drop_duplicates()
+                                                      .sort_values(key)))
+    out["pool_k"] = df.groupby(key)["POOL_K_EFF"].first().clip(lower=1).astype(int)         if "POOL_K_EFF" in df else 1
+    rel = df["RELIABLE"] if "RELIABLE" in df else pd.Series(True, index=df.index)
+    e = df["EQE_LED"].astype(float).where(rel)
+    ok = e.notna()
+    pk = df.loc[e[ok].groupby([df.loc[ok, "X"], df.loc[ok, "Y"]]).idxmax().values]
+    pk = pk.set_index(key)
+    out["v_at_eqe_max"] = pk["NVLED_V"].astype(float)
+    for q, base in (("nvled_curr", "NVLED_CURR"), ("vled_curr", "VLED_CURR"),
+                    ("pm400_power", "PM400_POWER")):
+        for st, suf in SUMMARY_STATS.items():
+            out[f"{q}_{st}"] = pd.Series(np.abs(_col(pk, f"{base}_{suf}")), pk.index)
+    # EQE from the means and from the medians, each with its own reference if it has one
+    led = {}
+    for st in ("mean", "median"):
+        suf = SUMMARY_STATS[st]
+        ri = pd.Series(_col(pk, f"NVLED_CURR_REF_{suf}"), pk.index)
+        rp = pd.Series(_col(pk, f"PM400_POWER_REF_{suf}"), pk.index)
+        ri = ri.fillna(pd.Series(_col(pk, "NVLED_CURR_REF"), pk.index)).abs().fillna(0)
+        rp = rp.fillna(pd.Series(_col(pk, "PM400_POWER_REF"), pk.index)).fillna(0)
+        i_led = (out.loc[pk.index, f"nvled_curr_{st}"] - ri).clip(lower=0)
+        p_led = out.loc[pk.index, f"pm400_power_{st}"] - rp
+        led[st] = (i_led, p_led)
+        out[f"eqe_max_{st}"] = pd.Series(compute_eqe(p_led.values, i_led.values,
+                                                     WAVELENGTH_NM), pk.index)
+    i_led, p_led = led["median"]
+    for st, ref_st in (("std", "SAMPSTD"), ("mad", "MADSTD")):
+        si = out.loc[pk.index, f"nvled_curr_{st}"]
+        sr = pd.Series(_col(pk, f"NVLED_CURR_REF_{ref_st}"), pk.index)
+        si = np.hypot(si, sr.fillna(0))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rel_e = np.hypot(out.loc[pk.index, f"pm400_power_{st}"] / p_led, si / i_led)
+        out[f"eqe_max_{st}"] = (out.loc[pk.index, "eqe_max_median"] * rel_e).abs()
+    if len(df_fits) and {"X", "Y"} <= set(df_fits.columns):
+        f = df_fits.set_index(key)
+        out["iqe_max"] = f["peak_IQE"] if "peak_IQE" in f else np.nan
+        out["iqe_fit_r2"] = f["R2"] if "R2" in f else np.nan
+    pool = df.groupby(key)["POOL_K_EFF"].transform("first").clip(lower=1)         if "POOL_K_EFF" in df else 1
+    for st in ("mean", "median"):
+        suf = SUMMARY_STATS[st]
+        ref = pd.Series(_col(df, f"NVLED_CURR_REF_{suf}")).fillna(
+            pd.Series(_col(df, "NVLED_CURR_REF"))).abs().fillna(0)
+        i_led = (pd.Series(np.abs(_col(df, f"NVLED_CURR_{suf}"))) - ref).clip(lower=0)
+        out[f"forward_voltage_{st}"] = _forward_voltage(
+            df, current_density(i_led / pool, PIXEL_AREA_UM2))
+    dv = (df["NVLED_V"].astype(float) - LEAK_AT_V).abs()
+    lk = df.loc[dv.groupby([df["X"], df["Y"]]).idxmin().values].set_index(key)
+    out["forward_leakage_v"] = lk["NVLED_V"].astype(float)
+    for st, suf in SUMMARY_STATS.items():
+        v = pd.Series(_col(lk, f"NVLED_CURR_REF_{suf}"), lk.index)
+        if st == "median":
+            v = v.fillna(pd.Series(_col(lk, "NVLED_CURR_REF"), lk.index))
+        out[f"forward_leakage_{st}"] = v.abs()
+    out.index.names = ["pixel_x", "pixel_y"]
+    return out.reset_index()
+
+
+def plot_pixel_matrix(summ, stat, out, plt):
+    """Every per-pixel quantity against every other, one point per pixel: histograms on
+    the diagonal. Axes span the 0.5-99.5 % range of each quantity, so a few wild pixels
+    do not squash the rest; those few fall outside the panels."""
+    cols = [c for c in (f"{q}_{stat}" if q != "iqe_max" else q for q in SUMMARY_PLOT)
+            if c in summ.columns and summ[c].notna().sum() >= 3]
+    if len(cols) < 2:
+        return
+    lim = {c: np.nanpercentile(summ[c], [0.5, 99.5]) for c in cols}
+    n = len(cols)
+    fig, ax = plt.subplots(n, n, figsize=(2.3 * n, 2.3 * n), squeeze=False)
+    for i, cy in enumerate(cols):
+        for j, cx in enumerate(cols):
+            a = ax[i][j]
+            xv, yv = summ[cx].values.astype(float), summ[cy].values.astype(float)
+            if i == j:
+                v = xv[np.isfinite(xv) & (xv >= lim[cx][0]) & (xv <= lim[cx][1])]
+                a.hist(v, bins=40, color="0.4")
+            else:
+                m = (np.isfinite(xv) & np.isfinite(yv) & (xv >= lim[cx][0])
+                     & (xv <= lim[cx][1]) & (yv >= lim[cy][0]) & (yv <= lim[cy][1]))
+                if len(xv) > 3000:          # a scatter of 100 000 markers per panel is slow
+                    point_image(a, xv[m], yv[m], np.zeros((m.sum(), 3)) + 0.15,
+                                alpha=0.35, bins=(120, 120))
+                else:
+                    a.scatter(xv[m], yv[m], s=3, alpha=0.5, color="k", lw=0)
+            a.tick_params(labelsize=6)
+            a.xaxis.get_offset_text().set_fontsize(6)
+            a.yaxis.get_offset_text().set_fontsize(6)
+            if i == n - 1:
+                a.set_xlabel(cx, fontsize=8)
+            else:
+                a.set_xticklabels([])
+            if j == 0:
+                a.set_ylabel(cy, fontsize=8)
+            elif i != j:
+                a.set_yticklabels([])
+    fig.suptitle(f"Per-pixel quantities, {stat}s, {len(summ)} pixels -- each against each; "
+                 f"axes 0.5-99.5 % of each quantity", fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+
+
 def iqe_dir(sweep_dir):
     """Where a sweep group's IQE/EQE outputs go: <run>/REPORT_assets/IQE_EQE, or
     IQE_EQE_<group> for a group not named Sweep. Every plot and table of a run lives
@@ -2907,6 +3058,11 @@ def analyse_sweep(sweep_dir, label, log):
     df_fits = pd.DataFrame(rows)
     df_fits.to_csv(out / "abc_fit_per_pixel.csv", index=False)
     write_fit_guide(out, df_fits)
+    summ = _safe(pixel_summary, df, df_fits)
+    if summ is not None and len(summ):
+        summ.to_csv(out / "pixel_summary.csv", index=False)
+        for stat in ("mean", "median"):
+            _safe(plot_pixel_matrix, summ, stat, out / f"pixel_matrix_{stat}.png", plt)
 
     peaks = (
         _safe(
