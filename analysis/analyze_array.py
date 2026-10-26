@@ -1085,6 +1085,9 @@ def roi_of(cfg, X, Y):
     return int(np.min(X)), int(np.min(Y)), int(np.max(X)), int(np.max(Y))
 
 
+_NEAREST_IDX: dict = {}   # (points, roi) -> nearest-point index of every ROI cell
+
+
 def nearest_grid(X, Y, V, roi):
     """A full raster over ``roi`` where every cell takes the value of the NEAREST measured
     point. Sparse measurements (swept pixels) become a block map: each block is the area
@@ -1095,9 +1098,15 @@ def nearest_grid(X, Y, V, roi):
     x1, y1, x2, y2 = roi
     if not ok.any():
         return np.full((y2 - y1 + 1, x2 - x1 + 1), np.nan)
-    gy, gx = np.mgrid[y1:y2 + 1, x1:x2 + 1]
-    _, idx = cKDTree(np.c_[X[ok], Y[ok]]).query(np.c_[gx.ravel(), gy.ravel()])
-    return V[ok][idx].reshape(gx.shape)
+    key = (np.c_[X[ok], Y[ok]].tobytes(), tuple(roi))
+    idx = _NEAREST_IDX.get(key)
+    if idx is None:      # the same targets are mapped for every quantity and bias
+        gy, gx = np.mgrid[y1:y2 + 1, x1:x2 + 1]
+        _, idx = cKDTree(np.c_[X[ok], Y[ok]]).query(np.c_[gx.ravel(), gy.ravel()])
+        if len(_NEAREST_IDX) > 8:
+            _NEAREST_IDX.clear()
+        _NEAREST_IDX[key] = idx
+    return V[ok][idx].reshape(y2 - y1 + 1, x2 - x1 + 1)
 
 
 def draw_nearest(ax, fig, X, Y, V, roi, label, cmap="viridis", log=False, vlo=None,
@@ -1121,7 +1130,10 @@ def draw_nearest(ax, fig, X, Y, V, roi, label, cmap="viridis", log=False, vlo=No
     im = ax.imshow(G, origin="upper", cmap=cmap, interpolation="nearest",
                    extent=(x1 - .5, x2 + .5, y2 + .5, y1 - .5), norm=norm,
                    **({} if (log or centred) else dict(vmin=vlo, vmax=vhi)))
-    ax.plot(X, Y, ".", ms=1.5, color="k", alpha=0.6)
+    # Dot the measured pixels only when they are sparse. On a full fast scan every cell is
+    # measured, and 262 144 markers took longer to draw than everything else on the axes.
+    if np.isfinite(np.asarray(V, float)).sum() < 0.25 * (x2 - x1 + 1) * (y2 - y1 + 1):
+        ax.plot(X, Y, ".", ms=1.5, color="k", alpha=0.6)
     fig.colorbar(im, ax=ax, fraction=0.046, label=label)
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
@@ -2007,7 +2019,8 @@ def plot_burst_scatter(sweep_dir, out, plt, n_pixels=20):
         "Per-pixel burst scatter — how noisy is each measured point? (dotted line = NPLC knee)"
     )
     fig.tight_layout()
-    fig.savefig(out, dpi=300)
+    # 150 dpi: the figure is 15 x 62 in, and at 300 dpi one PNG was 84 Mpx, 340 MB of RGBA
+    fig.savefig(out, dpi=150)
     plt.close(fig)
     return True
 
@@ -2079,7 +2092,8 @@ def plot_first_pixels(df, out, plt, n=FIRST_N_PIXELS, src="LED"):
     for c in range(3):
         axes[-1][c].set_xlabel(["NVLED voltage (V)", "J (A/cm²)", "J (A/cm²)"][c])
     fig.tight_layout()
-    fig.savefig(out, dpi=300)
+    # 150 dpi: the figure is 15 x 62 in, and at 300 dpi one PNG was 84 Mpx, 340 MB of RGBA
+    fig.savefig(out, dpi=150)
     plt.close(fig)
 
 
@@ -2260,6 +2274,29 @@ def raster_grid(
     plt.close(fig)
 
 
+def _block_stats(X, Y, V, S):
+    """Per S x S block (aligned to 0): median, robust std (1.4826 MAD, 0 for n=1) and
+    count, as (ny, nx) arrays over the blocks the data spans. Empty blocks: NaN, NaN, 0.
+
+    One groupby per block size. A mask over every pixel per block was O(blocks x pixels):
+    2.6 min for the 2x2 blocks of one 512x512 fast scan."""
+    X, Y, V = np.asarray(X, int), np.asarray(Y, int), np.asarray(V, float)
+    bx0, by0 = X.min() // S, Y.min() // S
+    nx, ny = X.max() // S - bx0 + 1, Y.max() // S - by0 + 1
+    med = np.full((ny, nx), np.nan)
+    spr = np.full((ny, nx), np.nan)
+    cnt = np.zeros((ny, nx), int)
+    cell = (Y // S - by0) * nx + (X // S - bx0)
+    g = pd.Series(V).groupby(cell)
+    m_, n_ = g.median(), g.size()
+    mad = pd.Series(np.abs(V - m_.reindex(cell).values)).groupby(cell).median() * 1.4826
+    jj, ii = np.divmod(m_.index.values, nx)
+    med[jj, ii] = m_.values
+    cnt[jj, ii] = n_.values
+    spr[jj, ii] = np.where(n_.values > 1, mad.values, 0.0)
+    return med, spr, cnt
+
+
 def blocked_maps(X, Y, V, out, plt, vlabel, title, fmt="{:.0f}"):
     """Multi-scale blocked maps of a scalar V at pixels (X,Y): top row = MEDIAN (robust central
     value), bottom row = SPREAD (robust std / MAD). Global-aligned power-of-2 block sizes.
@@ -2292,21 +2329,7 @@ def blocked_maps(X, Y, V, out, plt, vlabel, title, fmt="{:.0f}"):
         bxs = list(range(xlo // S, xhi // S + 1))
         bys = list(range(ylo // S, yhi // S + 1))
         nx, ny = len(bxs), len(bys)
-        med = np.full((ny, nx), np.nan)
-        spr = np.full((ny, nx), np.nan)
-        cnt = np.zeros((ny, nx), int)
-        for j, by in enumerate(bys):
-            for i, bx in enumerate(bxs):
-                mm = (X // S == bx) & (Y // S == by)
-                if mm.sum():
-                    v = V[mm]
-                    med[j, i] = np.median(v)
-                    cnt[j, i] = int(mm.sum())
-                    spr[j, i] = (
-                        1.4826 * np.median(np.abs(v - np.median(v)))
-                        if mm.sum() > 1
-                        else 0.0
-                    )
+        med, spr, cnt = _block_stats(X, Y, V, S)
         spr_max = max(spr_max, np.nanmax(spr) if np.isfinite(spr).any() else 0.0)
         extent = [bxs[0] * S, (bxs[-1] + 1) * S, (bys[-1] + 1) * S, bys[0] * S]
         im0 = axes[0][col].imshow(
@@ -2329,7 +2352,7 @@ def blocked_maps(X, Y, V, out, plt, vlabel, title, fmt="{:.0f}"):
         ims_spr.append(im1)
         axes[0][col].set_title(f"{S}×{S} px\n{nx}×{ny} blocks", fontsize=9)
         coarse = nx <= 10 and ny <= 10
-        for j, by in enumerate(bys):
+        for j, by in enumerate(bys if coarse else []):   # annotations: coarse grids only
             for i, bx in enumerate(bxs):
                 if not cnt[j, i]:
                     continue
@@ -3608,6 +3631,39 @@ def plot_settling_traces(sweep_dir, out, plt):
     return len(keys)
 
 
+def point_image(ax, x, y, rgb, alpha=1.0, bins=(320, 240)):
+    """A scatter of many points, drawn as one image: each point falls in one of
+    ``bins`` cells, a cell takes the mean colour of its points, and its opacity is
+    1 - (1 - alpha)^n, which is what n stacked markers of that alpha would give. At 320 x 240
+    cells over a 6.5 in axes at 200 dpi, a cell is ~3.5 px, one s=1 marker. Overlapping
+    colours mix instead of the last-drawn one hiding the others. matplotlib took 5-19 s to draw
+    262 144 markers; this takes well under one. ``rgb`` is an (n, 3) array of colours."""
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    rgb = np.asarray(rgb, float)[:, :3]
+    ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(rgb).all(axis=1)
+    x, y, rgb = x[ok], y[ok], rgb[ok]
+    if not x.size:
+        return
+
+    def pad(lo, hi):                  # matplotlib's own 5 % margin
+        d = (hi - lo) or abs(lo) or 1.0
+        return lo - 0.05 * d, hi + 0.05 * d
+
+    (x0, x1), (y0, y1) = pad(x.min(), x.max()), pad(y.min(), y.max())
+    nx, ny = bins
+    k = (np.clip(((y - y0) / (y1 - y0) * ny).astype(int), 0, ny - 1) * nx
+         + np.clip(((x - x0) / (x1 - x0) * nx).astype(int), 0, nx - 1))
+    n = np.bincount(k, minlength=nx * ny)
+    img = np.zeros((nx * ny, 4))
+    for ch in range(3):
+        img[:, ch] = np.bincount(k, rgb[:, ch], nx * ny) / np.maximum(n, 1)
+    img[:, 3] = 1.0 - (1.0 - alpha) ** n
+    ax.imshow(img.reshape(ny, nx, 4), origin="lower", extent=(x0, x1, y0, y1),
+              aspect="auto", interpolation="nearest")
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
+
+
 def plot_fastscan_ip(fs, out_dir, plt, tag=""):
     """Fast scan: current on x, optical power on y, three ways. One set per bias.
 
@@ -3620,7 +3676,8 @@ def plot_fastscan_ip(fs, out_dir, plt, tag=""):
     fastscan_IP_position: coloured by where the pixel sits: a 2D colour for (X, Y),
         then X alone and Y alone.
     """
-    from matplotlib.colors import LogNorm
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import LogNorm, Normalize
     I = fs["NVLED_CURR_MEAN"].astype(float).abs().values * 1e6     # uA
     P = fs["PM400_POWER_MEAN"].astype(float).abs().values * 1e9    # nW
     quad = _quadrant_col(fs).values
@@ -3640,13 +3697,15 @@ def plot_fastscan_ip(fs, out_dir, plt, tag=""):
     lit = P >= DEAD_THRESHOLD_FRAC * p_lit
     i_thr = 0.1 * float(np.nanmedian(I[lit])) if lit.any() else np.inf
     dim = (P < p_thr) & (I < i_thr)
+    from matplotlib.colors import to_rgb
+    lut = np.array([to_rgb(c) for c in QUAD_COLORS.values()] + [to_rgb("0.5")])
+    qrgb = lut[pd.Index(list(QUAD_COLORS)).get_indexer(np.asarray(quad, object))]  # -1: grey
     fig, ax = plt.subplots(1, 2, figsize=(13, 5.2))
     for a, sel, ttl in ((ax[0], np.ones_like(dim), "all pixels"),
                         (ax[1], dim, f"near the origin: P < {p_thr:.2g} nW, I < {i_thr:.2g} uA: the leakage")):
-        for q, c in QUAD_COLORS.items():
-            m = sel & (quad == q)
-            a.scatter(I[m], P[m], s=1, alpha=0.25, color=c, label=f"{q} ({m.sum()})",
-                      rasterized=True)
+        point_image(a, I[sel], P[sel], qrgb[sel], alpha=0.25)
+        for q, c in QUAD_COLORS.items():             # legend entries only
+            a.scatter([], [], s=1, color=c, label=f"{q} ({(sel & (quad == q)).sum()})")
         a.set_xlabel("|I_NVLED| (uA)")
         a.set_ylabel("P (nW)")
         a.set_title(ttl, fontsize=9)
@@ -3666,10 +3725,9 @@ def plot_fastscan_ip(fs, out_dir, plt, tag=""):
     key = ix * (iy.max() + 1) + iy
     _, inv, cnt = np.unique(key, return_inverse=True, return_counts=True)
     dens = cnt[inv]
-    o = np.argsort(dens)                       # densest on top
     fig, ax = plt.subplots(figsize=(7.5, 5.8))
-    sc = ax.scatter(I[o], P[o], c=dens[o], s=2, cmap="viridis",
-                    norm=LogNorm(), rasterized=True)
+    sc = ScalarMappable(LogNorm(dens.min(), dens.max()), "viridis")
+    point_image(ax, I, P, sc.to_rgba(dens))
     fig.colorbar(sc, ax=ax, label="pixels in the same cell")
     ax.set_xlabel("|I_NVLED| (uA)")
     ax.set_ylabel("P (nW)")
@@ -3684,11 +3742,11 @@ def plot_fastscan_ip(fs, out_dir, plt, tag=""):
     # 3. by position: 2D colour, X, Y
     rgb = np.c_[X / 511.0, np.full(len(X), 0.35), Y / 511.0]
     fig, ax = plt.subplots(1, 3, figsize=(18, 5.2))
-    ax[0].scatter(I, P, c=rgb, s=1, alpha=0.4, rasterized=True)
+    point_image(ax[0], I, P, rgb, alpha=0.4)
     ax[0].set_title("colour = position: red grows with X, blue with Y", fontsize=9)
     for a, val, name in ((ax[1], X, "X"), (ax[2], Y, "Y")):
-        sc = a.scatter(I, P, c=val, s=1, alpha=0.4, cmap="turbo", vmin=0, vmax=511,
-                       rasterized=True)
+        sc = ScalarMappable(Normalize(0, 511), "turbo")
+        point_image(a, I, P, sc.to_rgba(val), alpha=0.4)
         fig.colorbar(sc, ax=a, label=f"{name} (px)")
         a.set_title(f"colour = {name}", fontsize=9)
     inset = ax[0].inset_axes([0.72, 0.05, 0.25, 0.25])

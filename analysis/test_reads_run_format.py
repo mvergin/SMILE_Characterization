@@ -305,6 +305,25 @@ def test_analyze_finds_runs_and_knows_when_they_are_stale():
     assert "failed" in analyze.why_stale("t", dict(ok, exit=1), "c", "i")
 
 
+def test_block_stats_match_the_per_block_loop():
+    rng = np.random.default_rng(1)
+    X = rng.integers(3, 70, 400)
+    Y = rng.integers(10, 41, 400)
+    V = rng.normal(80, 5, 400)
+    for S in (2, 8, 32):
+        med, spr, cnt = aa._block_stats(X, Y, V, S)
+        for j, by in enumerate(range(Y.min() // S, Y.max() // S + 1)):
+            for i, bx in enumerate(range(X.min() // S, X.max() // S + 1)):
+                v = V[(X // S == bx) & (Y // S == by)]
+                assert cnt[j, i] == v.size
+                if v.size:
+                    assert med[j, i] == np.median(v)
+                    want = 1.4826 * np.median(np.abs(v - np.median(v))) if v.size > 1 else 0
+                    assert abs(spr[j, i] - want) < 1e-9
+                else:
+                    assert np.isnan(med[j, i])
+
+
 def test_pixel_fits_are_cached_and_parallel_fits_match():
     import tempfile
 
