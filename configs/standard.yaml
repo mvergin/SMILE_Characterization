@@ -343,6 +343,7 @@ leak_ref_bitval: 0        # addressed, but not driven. MUST be 0 when leak_ref_t
 leak_ref_settle_s: 2.0    # only the drive changes, not the bias. Ample at both ends:
                           # the leakage settles in 0.53 s at -0.85 V and shows no
                           # transient at all at -1.30 or -1.80 V (sections 20, 21).
+leak_ref_prepass_reads: 0   # reads per pixel in the reference pre-pass (minimum kept); 0 = leak_ref_tries
 leak_ref_tries: 3         # the FPGA drops the bitval-0 frame write intermittently, in
                           # both directions, so the reference is verified optically and
                           # the frame re-written up to this many times. Counted over 128

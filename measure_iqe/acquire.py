@@ -2062,7 +2062,8 @@ def prefill_reference_cache(pm, smu, smile, pixels, cfg: IQEConfig, log: Logger)
         return 0
     v = float(cfg.leak_ref_prepass_v)
     log(f"  leakage reference pre-pass: {len(pixels)} pixel(s) at {v:+.2f} V, "
-        f"min of {max(1, cfg.leak_ref_tries)} read(s) each. Reused at every bias "
+        f"min of {max(1, cfg.leak_ref_prepass_reads or cfg.leak_ref_tries)} read(s) each. "
+        f"Reused at every bias "
         f"<= {cfg.leak_ref_per_point_above_v:+.2f} V, re-measured above it.")
     # The pre-pass bias is on the faint side, so it takes the faint side's limit and
     # NPLC. That is also where the reference is most precise -- burst sem 0.13 nA on
@@ -2077,7 +2078,7 @@ def prefill_reference_cache(pm, smu, smile, pixels, cfg: IQEConfig, log: Logger)
     for (x, y) in pixels:
         smile.blank_frame()
         reads = []
-        for _ in range(max(1, cfg.leak_ref_tries)):
+        for _ in range(max(1, cfg.leak_ref_prepass_reads or cfg.leak_ref_tries)):
             r, _t, _f = read_reference(pm, smu, smile, x, y, cfg.vramp_lowv_n_pm,
                                        cfg.vramp_lowv_n_smu, cfg, None, log, v)
             if r is not None:
@@ -3484,7 +3485,7 @@ def estimate_run(cfg: IQEConfig, n_targets: int | None = None) -> dict[str, floa
     ch = 2 if cfg.sweep_read_vled else 1
 
     if cfg.leak_reference and above is not None:
-        out["reference pre-pass"] = T * max(1, cfg.leak_ref_tries) * (
+        out["reference pre-pass"] = T * max(1, cfg.leak_ref_prepass_reads or cfg.leak_ref_tries) * (
             cfg.leak_ref_settle_s * k + _acq_s(*rising[:3], ch))
     n_groups = T * len(cfg.pool_groups) / max(1, cfg.pixels_per_block + len(cfg.pool_groups))
     if cfg.pool_groups and cfg.pool_pm_range_below_v is not None and cfg.pm_range_check_targets:
@@ -3770,6 +3771,10 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
     out_dir = Path(run_dir) if run_dir is not None else make_run_dir(
         cfg, base_dir, suffix="FASTSCAN" if cfg.fastscan_only else None, simulated=simulate)
     out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        log.run_dir = out_dir      # so an interrupted run can still save its log
+    except AttributeError:
+        pass
     log(f"Output: {out_dir}   (source_mode={cfg.source_mode})")
     stamp_run(out_dir, cfg, log)
     log("estimated wall time, from the config:\n" + format_estimate(estimate_run(cfg)))

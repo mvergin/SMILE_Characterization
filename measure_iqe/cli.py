@@ -305,6 +305,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                                      run_dir=args.resume)
     except KeyboardInterrupt:
         log("interrupted — partial results are on disk")
+        # The log too: run 261025-2146 was stopped with Ctrl-C after 10 h and its
+        # warnings existed only in the terminal.
+        rd = getattr(log, "run_dir", None)
+        if rd is not None and hasattr(log, "save"):
+            log.save(Path(rd) / "Console_LOG.txt")
+            log(f"wrote {Path(rd) / 'Console_LOG.txt'}")
+            log.save(Path(rd) / "Console_LOG.txt")
         return 130
     log(f"run directory: {result.run_dir}")
     if cfg.analyze_after and not args.warmup_diag:

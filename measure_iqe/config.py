@@ -750,6 +750,10 @@ class IQEConfig:
     # current. Measured both ways, twice.
     leak_reference: bool = True  # measure each sweep point lit and at LEAK_REF_BITVAL
     leak_ref_bitval: int = 0  # the reference drive level: addressed, but off
+    leak_ref_prepass_reads: int = 0  # reads per pixel in the reference PRE-PASS, which
+                             # keeps their minimum. 0 = leak_ref_tries, as before. Set it
+                             # apart to keep the per-point retry (cheap: only failing
+                             # points repeat) without multiplying the pre-pass.
     leak_ref_tries: int = 3  # frame writes allowed for the bitval-0 reference.
                              # The FPGA does not always write the frame correctly, so
                              # the reference is verified optically and re-written when

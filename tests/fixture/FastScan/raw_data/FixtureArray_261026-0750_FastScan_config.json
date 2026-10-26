@@ -147,6 +147,7 @@
     "fastscan_limit_a": 0.001,
     "leak_reference": true,
     "leak_ref_bitval": 0,
+    "leak_ref_prepass_reads": 0,
     "leak_ref_tries": 3,
     "leak_ref_max_frac": 0.25,
     "leak_ref_settle_s": 2.0,
@@ -173,22 +174,22 @@
     "smu_display_off": false
   },
   "provenance": {
-    "commit": "834892975acf9aaffa46d6ff614f155dd65cf991",
-    "commit_short": "8348929",
+    "commit": "06fa2420bcb572c533939e947d8798d163540ceb",
+    "commit_short": "06fa242",
     "branch": "main",
-    "committed": "2026-10-25T20:42:54+01:00",
-    "describe": "v0.2-189-g8348929-dirty",
+    "committed": "2026-10-26T07:39:18+01:00",
+    "describe": "v0.2-191-g06fa242-dirty",
     "dirty": true,
     "changed": [
       "measure_iqe/acquire.py",
-      "measure_iqe/config.py",
-      "test_measure_iqe.py"
+      "measure_iqe/cli.py",
+      "measure_iqe/config.py"
     ],
     "untracked": [
       "CLAUDE.md"
     ],
-    "diff_sha256": "c4f8f1422261b848",
-    "started": "2026-10-25T20:50:23+01:00",
+    "diff_sha256": "6863257e31ddf6f7",
+    "started": "2026-10-26T07:50:33+01:00",
     "host": "IHT-RE316",
     "python": "3.13.5",
     "platform": "Windows-11-10.0.26100-SP0"
