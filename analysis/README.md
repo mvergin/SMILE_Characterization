@@ -98,7 +98,7 @@ refits all of them.
 
 `*` is `mean`, `median`, `std` (sample SD of the burst) and `mad` (1.4826 × MAD).
 `pixel_matrix_mean.png` and `pixel_matrix_median.png` plot every quantity against every
-other, one point per pixel, histograms on the diagonal. Runs before 2026-10-24 saved no
+other, one point per pixel coloured by `quadrant`, histograms per quadrant on the diagonal. Runs before 2026-10-24 saved no
 reference samples, so their `forward_leakage` has only the median.
 
 ### `calc_iqe_eqe.py` — single-curve ABC fit

@@ -2855,18 +2855,29 @@ def pixel_summary(df, df_fits):
             v = v.fillna(pd.Series(_col(lk, "NVLED_CURR_REF"), lk.index))
         out[f"forward_leakage_{st}"] = v.abs()
     out.index.names = ["pixel_x", "pixel_y"]
-    return out.reset_index()
+    out = out.reset_index()
+    out.insert(2, "quadrant", _quadrant_col(out.rename(columns={"pixel_x": "X",
+                                                                "pixel_y": "Y"})).values)
+    return out
 
 
 def plot_pixel_matrix(summ, stat, out, plt):
-    """Every per-pixel quantity against every other, one point per pixel: histograms on
-    the diagonal. Axes span the 0.5-99.5 % range of each quantity, so a few wild pixels
-    do not squash the rest; those few fall outside the panels."""
+    """Every per-pixel quantity against every other, one point per pixel, coloured by
+    quadrant: the quadrant enables set the leakage (leak matrix, 261025-1950), so the
+    quadrants are the first thing to tell apart. Histograms per quadrant on the
+    diagonal. Axes span the 0.5-99.5 % range of each quantity, so a few wild pixels do
+    not squash the rest; those few fall outside the panels."""
+    from matplotlib.colors import to_rgb
+    from matplotlib.lines import Line2D
     cols = [c for c in (f"{q}_{stat}" if q != "iqe_max" else q for q in SUMMARY_PLOT)
             if c in summ.columns and summ[c].notna().sum() >= 3]
     if len(cols) < 2:
         return
     lim = {c: np.nanpercentile(summ[c], [0.5, 99.5]) for c in cols}
+    quad = (summ["quadrant"].astype(str).values if "quadrant" in summ
+            else np.full(len(summ), "?"))
+    lut = np.array([to_rgb(c) for c in QUAD_COLORS.values()] + [to_rgb("0.5")])
+    qrgb = lut[pd.Index(list(QUAD_COLORS)).get_indexer(quad)]
     n = len(cols)
     fig, ax = plt.subplots(n, n, figsize=(2.3 * n, 2.3 * n), squeeze=False)
     for i, cy in enumerate(cols):
@@ -2874,16 +2885,19 @@ def plot_pixel_matrix(summ, stat, out, plt):
             a = ax[i][j]
             xv, yv = summ[cx].values.astype(float), summ[cy].values.astype(float)
             if i == j:
-                v = xv[np.isfinite(xv) & (xv >= lim[cx][0]) & (xv <= lim[cx][1])]
-                a.hist(v, bins=40, color="0.4")
+                inr = np.isfinite(xv) & (xv >= lim[cx][0]) & (xv <= lim[cx][1])
+                bins = np.linspace(lim[cx][0], lim[cx][1], 41) if lim[cx][1] > lim[cx][0]                     else 40
+                for q, c in QUAD_COLORS.items():
+                    a.hist(xv[inr & (quad == q)], bins=bins, histtype="step", color=c)
             else:
                 m = (np.isfinite(xv) & np.isfinite(yv) & (xv >= lim[cx][0])
                      & (xv <= lim[cx][1]) & (yv >= lim[cy][0]) & (yv <= lim[cy][1]))
                 if len(xv) > 3000:          # a scatter of 100 000 markers per panel is slow
-                    point_image(a, xv[m], yv[m], np.zeros((m.sum(), 3)) + 0.15,
-                                alpha=0.35, bins=(120, 120))
+                    point_image(a, xv[m], yv[m], qrgb[m], alpha=0.35, bins=(120, 120))
                 else:
-                    a.scatter(xv[m], yv[m], s=3, alpha=0.5, color="k", lw=0)
+                    for q, c in QUAD_COLORS.items():
+                        k = m & (quad == q)
+                        a.scatter(xv[k], yv[k], s=3, alpha=0.6, color=c, lw=0)
             a.tick_params(labelsize=6)
             a.xaxis.get_offset_text().set_fontsize(6)
             a.yaxis.get_offset_text().set_fontsize(6)
@@ -2895,8 +2909,11 @@ def plot_pixel_matrix(summ, stat, out, plt):
                 a.set_ylabel(cy, fontsize=8)
             elif i != j:
                 a.set_yticklabels([])
-    fig.suptitle(f"Per-pixel quantities, {stat}s, {len(summ)} pixels -- each against each; "
-                 f"axes 0.5-99.5 % of each quantity", fontsize=10)
+    fig.suptitle(f"Per-pixel quantities, {stat}s, {len(summ)} pixels -- each against each, "
+                 f"coloured by quadrant; axes 0.5-99.5 % of each quantity", fontsize=10)
+    fig.legend([Line2D([], [], ls="", marker="o", color=c) for c in QUAD_COLORS.values()],
+               [f"{q} ({(quad == q).sum()})" for q in QUAD_COLORS], loc="upper right",
+               ncol=4, fontsize=9, frameon=False)
     fig.tight_layout(rect=(0, 0, 1, 0.98))
     fig.savefig(out, dpi=150)
     plt.close(fig)
