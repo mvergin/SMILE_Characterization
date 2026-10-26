@@ -133,13 +133,14 @@ def build_config(args: argparse.Namespace, log=None) -> IQEConfig:
     return IQEConfig.from_dict(data)
 
 
-ANALYZER = Path(__file__).resolve().parent.parent / "analysis" / "analyze_array.py"
-CAL_PLOTTER = ANALYZER.with_name("plot_calibration.py")
+ANALYZER = Path(__file__).resolve().parent.parent / "analysis" / "analyze.py"
 
 
 def analyze_run_dir(run_dir: Path, log, script: Path = ANALYZER) -> int:
-    """Run an analysis script on a finished run, in its own process: analyze_array.py
-    after a sweep or fast scan, plot_calibration.py after --calibrate.
+    """Run analysis/analyze.py on a finished run, in its own process. It picks the tools
+    from what the run holds (analyze_array.py after a sweep or fast scan,
+    plot_calibration.py after --calibrate) and records them in ANALYSIS_STATE.json, so a
+    later `analyze.py results` skips this run.
 
     A subprocess, not an import: an exception or a hang in the analysis cannot touch the
     measurement that just finished, and its output goes to ANALYSIS_LOG.txt beside the
@@ -152,20 +153,22 @@ def analyze_run_dir(run_dir: Path, log, script: Path = ANALYZER) -> int:
     if not script.exists():
         log(f"analysis skipped: {script} not found (measurement-only install)")
         return -1
-    if script == ANALYZER and importlib.util.find_spec("scipy") is None:
+    if importlib.util.find_spec("scipy") is None:
         log("analysis skipped: scipy is not installed. Run `uv sync --extra analysis` once, "
-            f'then: python analysis/analyze_array.py "{run_dir}"')
+            f'then: python analysis/analyze.py "{run_dir}"')
         return -1
-    product = "REPORT.md" if script == ANALYZER else "calibration_traces.png"
-    log(f"analysing {run_dir.name} with {script.name}"
-        + (" -- a full array takes 10-20 min" if script == ANALYZER else "")
-        + "; output in ANALYSIS_LOG.txt")
-    with open(run_dir / "ANALYSIS_LOG.txt", "w", encoding="utf-8") as f:
-        rc = subprocess.run([sys.executable, str(script), str(run_dir)],
-                            stdout=f, stderr=subprocess.STDOUT).returncode
-    log(f"analysis {'done' if rc == 0 else f'FAILED (exit {rc})'}: "
-        + (f"{run_dir / product}" if rc == 0 else f"see {run_dir / 'ANALYSIS_LOG.txt'}"))
-    return rc
+    log(f"analysing {run_dir.name} with {script.name} -- a full array takes 10-20 min; "
+        "output in ANALYSIS_LOG.txt")
+    # analyze.py writes ANALYSIS_LOG.txt itself. Its console copy is not needed here, but
+    # stderr is kept: a failure before it opens the log would otherwise leave no trace.
+    p = subprocess.run([sys.executable, str(script), str(run_dir)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                       text=True, encoding="utf-8", errors="replace")
+    if p.stderr.strip():
+        log(p.stderr.strip()[-2000:])
+    log(f"analysis {'done' if p.returncode == 0 else f'FAILED (exit {p.returncode})'}: "
+        f"see {run_dir / 'ANALYSIS_LOG.txt'}")
+    return p.returncode
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -297,7 +300,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             log("interrupted - hardware parked")
             return 130
         if cfg.analyze_after and record:
-            analyze_run_dir(Path(record).parent, log, CAL_PLOTTER)
+            analyze_run_dir(Path(record).parent, log)
         return 0
     try:
         result = run_iqe_measurement(cfg, simulate=args.simulate,

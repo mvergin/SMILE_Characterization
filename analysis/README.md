@@ -32,6 +32,34 @@ drivers, no PyVISA, no FPGA libraries.
 
 ## Tools
 
+### `analyze.py` — point it at a folder
+
+```bash
+python analysis/analyze.py results                 # every run underneath
+python analysis/analyze.py "results/<run>"         # one run
+python analysis/analyze.py results --dry-run       # what would run, and why
+python analysis/analyze.py results --force         # redo everything
+python analysis/analyze.py results --jobs 4        # fit processes for analyze_array
+```
+
+It picks the tools from what each run folder holds:
+
+| folder holds | tool |
+|---|---|
+| `FastScan/` | `analyze_array.py` |
+| `calibration_traces.npz` | `plot_calibration.py` |
+| `traces.npz`, `switchmatrix.csv` or `isrc.csv` | `plot_transients.py` |
+
+A tool runs again only if its source file or the run's input files changed since its
+last clean finish. `ANALYSIS_STATE.json` in the run folder records the source hash
+(SHA-256), the input fingerprint (path, size, mtime), the exit code and the time.
+The output goes to the console and to `ANALYSIS_LOG.txt`. Each tool runs in its own
+process, one after the other, so one run's crash or memory leak does not affect the
+next. A finished `measure_iqe` run calls this script on itself.
+
+Folders with only `cluster.csv`, `optfloor.csv` or `leakmatrix.csv` have no plotter
+and are not listed.
+
 ### `analyze_array.py` — the main report
 
 Loads a run directory, enriches it (EQE, current density, leakage, reliability
@@ -50,6 +78,13 @@ python analyze_array.py "<run_dir>" --area 100 --wavelength 440
 | `--area` | pixel area in µm² (default from the run's config) |
 | `--thickness` | active region thickness in nm |
 | `--wavelength` | emission wavelength in nm, for the photon energy |
+| `--jobs` | processes for the per-pixel ABC fits (default: CPU count − 1; 1 = none) |
+
+The per-pixel fits are cached in `REPORT_assets/IQE_EQE/abc_fit_cache.pkl`. The key
+for each pixel is a hash of the fit source (`fit_abc` and its helpers) and that pixel's
+exact J and EQE arrays. A plot or report change reuses every fit. A gate or `enrich`
+change refits only the pixels whose reliable points it moved. A change to the fit code
+refits all of them.
 
 ### `calc_iqe_eqe.py` — single-curve ABC fit
 

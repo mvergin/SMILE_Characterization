@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 import analyze_array as aa
@@ -272,6 +273,64 @@ def test_a_fast_scan_at_several_biases_is_split_not_pooled():
         for v in (v0, -2.6):
             assert (run / "REPORT_assets" / f"fastscan_maps_{aa._bias_tag(v)}.png").exists(), v
         assert "Optical power, current and IQE at every fast-scan bias" in report
+
+
+def test_analyze_finds_runs_and_knows_when_they_are_stale():
+    import shutil
+    import tempfile
+
+    import analyze
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run = Path(tmp) / "261001-0000_X_ROI_(0, 0, 3, 3)"
+        shutil.copytree(FIXTURE, run)
+        assert analyze.find_runs(Path(tmp)) == [run]
+        assert analyze.find_runs(run) == [run]
+        h = analyze.inputs_hash(run)
+        # what the tools write is not input
+        (run / "REPORT_assets").mkdir(exist_ok=True)
+        (run / "REPORT_assets" / "x.png").write_bytes(b"0")
+        (run / "REPORT.md").write_text("r")
+        (run / analyze.STATE).write_text("{}")
+        (run / analyze.LOG).write_text("l")
+        assert analyze.inputs_hash(run) == h
+        agg = next((run / "FastScan").glob("*aggregated*.csv"))
+        agg.write_text(agg.read_text() + "\n")
+        assert analyze.inputs_hash(run) != h
+    ok = dict(code="c", inputs="i", exit=0)
+    assert analyze.why_stale("t", ok, "c", "i") is None
+    assert analyze.why_stale("t", {}, "c", "i") == "never run"
+    assert analyze.why_stale("t", ok, "c2", "i") == "t changed"
+    assert analyze.why_stale("t", ok, "c", "i2") == "input files changed"
+    assert "failed" in analyze.why_stale("t", dict(ok, exit=1), "c", "i")
+
+
+def test_pixel_fits_are_cached_and_parallel_fits_match():
+    import tempfile
+
+    J = np.logspace(-1, 2, 12)
+    rows = []
+    for k, beta in enumerate((2.0, 4.0, 8.0)):
+        e = aa._abc_eqe_norm(J, beta, 1.0, 0.05)
+        rows += [dict(X=k, Y=0, J_LED=j, EQE_LED=v, RELIABLE=True) for j, v in zip(J, e)]
+    groups = list(pd.DataFrame(rows).groupby(["X", "Y"]))
+    msgs = []
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = Path(tmp) / "abc_fit_cache.pkl"
+        jobs, pmin = aa.FIT_JOBS, aa.FIT_PARALLEL_MIN
+        try:
+            aa.FIT_JOBS, aa.FIT_PARALLEL_MIN = 2, 1
+            par = aa.fit_pixels(groups, cache, msgs.append)
+            aa.FIT_JOBS = 1
+            again = aa.fit_pixels(groups, cache, msgs.append)
+        finally:
+            aa.FIT_JOBS, aa.FIT_PARALLEL_MIN = jobs, pmin
+    assert "0 cached, 3 to fit in 2 processes" in msgs[0], msgs
+    assert "3 cached, 0 to fit" in msgs[1], msgs
+    for xy, f in par.items():
+        assert abs(f["beta"] - again[xy]["beta"]) == 0
+        serial = aa.fit_abc(*[g for (k, g) in groups if k == xy][0][["J_LED", "EQE_LED"]].T.values)
+        assert abs(f["peak_IQE"] - serial["peak_IQE"]) < 1e-12, (xy, f["peak_IQE"])
 
 
 if __name__ == "__main__":

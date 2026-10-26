@@ -39,8 +39,13 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
+import inspect
 import json
+import os
+import pickle
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -388,6 +393,67 @@ def _data_peak_J(J, e):
     k = max(3, J.size // 8)  # small rolling median smooth
     es = pd.Series(e).rolling(k, center=True, min_periods=1).median().values
     return float(J[int(np.argmax(es))])
+
+
+FIT_JOBS = max(1, (os.cpu_count() or 2) - 1)   # processes for the per-pixel fits
+FIT_PARALLEL_MIN = 64      # below this many fits, starting the processes costs more
+
+
+def _fit_code_hash():
+    """The source of everything fit_abc's result depends on. Change any of it and every
+    cached fit is stale; change anything else (plots, gates) and none is."""
+    src = "".join(inspect.getsource(f) for f in (fit_abc, _abc_eqe_norm, _solve_u, _data_peak_J))
+    return hashlib.sha256(f"{src}|{MIN_POINTS_FOR_FIT}".encode()).hexdigest()
+
+
+def _fit_one(args):
+    return fit_abc(*args)
+
+
+def fit_pixels(groups, cache_path, log):
+    """fit_abc on every pixel's reliable points, as {(x, y): fit}.
+
+    A pixel is refitted only when its input or the fit code changed: the key is a hash of
+    the fit source and the exact J and EQE arrays. Gate or enrich changes that alter the
+    reliable points therefore refit those pixels alone. The misses run in FIT_JOBS
+    processes; each fit is ~0.2 s of single-threaded scipy."""
+    code = _fit_code_hash()
+    try:
+        with open(cache_path, "rb") as fh:
+            cache = pickle.load(fh)
+    except Exception:          # missing, truncated or from an incompatible version
+        cache = {}
+    keys, todo = {}, []
+    for (x, y), g in groups:
+        r = g[g["RELIABLE"]]
+        J = np.ascontiguousarray(r["J_LED"].values, float)
+        E = np.ascontiguousarray(r["EQE_LED"].values, float)
+        k = hashlib.sha256(code.encode() + J.tobytes() + b"|" + E.tobytes()).hexdigest()
+        keys[(x, y)] = k
+        if k not in cache:
+            todo.append((k, J, E))
+    todo = list({k: (k, J, E) for k, J, E in todo}.values())
+    log(f"    per-pixel ABC fits: {len(keys) - len(todo)} cached, {len(todo)} to fit"
+        + (f" in {FIT_JOBS} processes" if FIT_JOBS > 1 and len(todo) >= FIT_PARALLEL_MIN
+           else ""))
+    if todo:
+        args = [(J, E) for _, J, E in todo]
+        if FIT_JOBS > 1 and len(todo) >= FIT_PARALLEL_MIN:
+            from concurrent.futures import ProcessPoolExecutor
+
+            with ProcessPoolExecutor(FIT_JOBS) as ex:
+                fits = list(ex.map(_fit_one, args,
+                                   chunksize=max(1, len(args) // (FIT_JOBS * 8))))
+        else:
+            fits = [_fit_one(a) for a in args]
+        cache.update((k, f) for (k, _, _), f in zip(todo, fits))
+    live = set(keys.values())  # keep only this run's fits, so the file never grows stale
+    try:
+        with open(cache_path, "wb") as fh:
+            pickle.dump({k: v for k, v in cache.items() if k in live}, fh)
+    except OSError as e:
+        log(f"    (fit cache not written: {e})")
+    return {xy: cache[k] for xy, k in keys.items()}
 
 
 def classify_fit(f):
@@ -2789,12 +2855,10 @@ def analyse_sweep(sweep_dir, label, log):
         step = int(np.ceil(len(groups) / MAX_PIXEL_FITS))
         groups = groups[::step]
         log(f"    (fitting {len(groups)} of {n_px} pixels per-pixel — capped)")
-    pixel_fits = {}
+    pixel_fits = fit_pixels(groups, out / "abc_fit_cache.pkl", log)
     rows = []
     for (x, y), g in groups:
-        r = g[g["RELIABLE"]]
-        f = fit_abc(r["J_LED"].values, r["EQE_LED"].values)
-        pixel_fits[(x, y)] = f
+        f = pixel_fits[(x, y)]
         row = dict(X=int(x), Y=int(y),
                    POOL_K=int(g["POOL_K_EFF"].iloc[0]) if "POOL_K_EFF" in g else 1)
         clean, flag = classify_fit(f)
@@ -4268,6 +4332,7 @@ def analyse_run(run_dir, log):
 
 def main():
     global PIXEL_AREA_UM2, ACTIVE_THICKNESS_NM, WAVELENGTH_NM, RUN_TRUNCATION, RUN_DECIMATION
+    global FIT_JOBS
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -4281,8 +4346,12 @@ def main():
     ap.add_argument("--decimation", action="store_true",
                     help="refit on every k-th bias, ends kept: could fewer biases have "
                          "given the same peak IQE? (slow, off by default)")
+    ap.add_argument("--jobs", type=int, default=FIT_JOBS,
+                    help=f"processes for the per-pixel ABC fits (default {FIT_JOBS}, "
+                         "1 = none). Each one holds its own numpy and scipy, ~100 MB")
     args = ap.parse_args()
     RUN_TRUNCATION, RUN_DECIMATION = args.truncation, args.decimation
+    FIT_JOBS = max(1, args.jobs)
 
     PIXEL_AREA_UM2, ACTIVE_THICKNESS_NM, WAVELENGTH_NM = (
         args.area,
@@ -4305,8 +4374,10 @@ def main():
         except (AttributeError, ValueError):
             pass
 
-    def log(m):
-        print(m)
+    t_start = time.perf_counter()
+
+    def log(m):      # elapsed time first: where a 10-minute analysis spends it
+        print(f"[{time.perf_counter() - t_start:5.0f} s] {m}", flush=True)
 
     if args.all:
         runs = [p for p in root.rglob("FastScan") if p.is_dir()]
