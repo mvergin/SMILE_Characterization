@@ -97,8 +97,16 @@ refits all of them.
 | `forward_leakage_*`, `forward_leakage_v` | the reference current (pixel addressed, off) at the sweep bias nearest −1.0 V |
 
 `*` is `mean`, `median`, `std` (sample SD of the burst) and `mad` (1.4826 × MAD).
-`pixel_matrix_mean.png` and `pixel_matrix_median.png` plot every quantity against every
-other, one point per pixel coloured by `quadrant`, histograms per quadrant on the diagonal. Runs before 2026-10-24 saved no
+`pixel_summary_interpolated.csv` has the same columns at each pixel's FITTED peak
+(`j_at_peak` from the ABC fit) instead of its best sweep point. Each burst quantity is
+interpolated between the two reliable points that bracket it, log-log in J. `v_at_peak`
+replaces `v_at_eqe_max`, and `eqe_max_fit` is the model's own peak. Only clean fits
+with the peak inside the measured J range get values.
+
+`pixel_matrix_*.png` and `pixel_matrix_interpolated_*.png` plot every quantity against
+every other, one point per pixel coloured by `quadrant`, histograms per quadrant on the
+diagonal. Current and light are plotted per member: a pooled target (`pool_k` = K)
+emits ~K x one pixel. The CSVs keep the target totals. Runs before 2026-10-24 saved no
 reference samples, so their `forward_leakage` has only the median.
 
 ### `calc_iqe_eqe.py` — single-curve ABC fit

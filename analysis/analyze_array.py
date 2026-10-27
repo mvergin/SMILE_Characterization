@@ -2861,7 +2861,90 @@ def pixel_summary(df, df_fits):
     return out
 
 
-def plot_pixel_matrix(summ, stat, out, plt):
+def pixel_summary_interpolated(df, df_fits, summ):
+    """pixel_summary at each pixel's FITTED peak instead of its best sweep point.
+
+    The ABC fit puts the peak at J_at_peak, usually between two sweep biases. Every
+    burst quantity is interpolated there between the two reliable points that bracket
+    it in J: log|Q| linear in log J (I and P are near power laws locally), the bias
+    linear in log J. Removes the grid steps that make the measured table bimodal
+    (pixels peaking at -0.95 V or -1.05 V). Only clean fits whose peak lies inside the
+    measured J range get values, so nothing is extrapolated; the rest are NaN.
+
+    eqe_max_* comes from the interpolated corrected current and light, like the measured
+    table; eqe_max_fit is the model's own peak, eta x peak IQE. The std and MAD columns
+    are interpolated too -- an estimate, since no burst was taken at that point.
+    forward_voltage and forward_leakage do not depend on the peak: copied from summ.
+    """
+    key = ["X", "Y"]
+    need = {"X", "Y", "J_at_peak", "clean_fit", "eta_LEE", "peak_IQE_raw"}
+    if not len(df_fits) or not need <= set(df_fits.columns):
+        return None
+    f = df_fits[df_fits["clean_fit"] == True].set_index(key)  # noqa: E712
+    d = df[df["RELIABLE"]].copy() if "RELIABLE" in df else df.copy()
+    d = d[d["J_LED"].astype(float) > 0]
+    d["Jpk"] = f["J_at_peak"].reindex(pd.MultiIndex.from_frame(d[key])).values
+    d = d[np.isfinite(d["Jpk"])]
+    # the corrected current and light per statistic, as the measured table forms them
+    for st in ("mean", "median"):
+        suf = SUMMARY_STATS[st]
+        ri = pd.Series(_col(d, f"NVLED_CURR_REF_{suf}"), d.index).fillna(
+            pd.Series(_col(d, "NVLED_CURR_REF"), d.index)).abs().fillna(0)
+        rp = pd.Series(_col(d, f"PM400_POWER_REF_{suf}"), d.index).fillna(
+            pd.Series(_col(d, "PM400_POWER_REF"), d.index)).fillna(0)
+        d[f"_iled_{st}"] = (np.abs(_col(d, f"NVLED_CURR_{suf}")) - ri).clip(lower=0)
+        d[f"_pled_{st}"] = _col(d, f"PM400_POWER_{suf}") - rp
+    sd = pd.Series(_col(d, "NVLED_CURR_REF_SAMPSTD"), d.index).fillna(0)
+    md = pd.Series(_col(d, "NVLED_CURR_REF_MADSTD"), d.index).fillna(0)
+    d["_iled_std"] = np.hypot(_col(d, "NVLED_CURR_SAMPSTD"), sd)
+    d["_iled_mad"] = np.hypot(_col(d, "NVLED_CURR_MADSTD"), md)
+    lo_ = d[d["J_LED"] <= d["Jpk"]]
+    hi_ = d[d["J_LED"] > d["Jpk"]]
+    lo = d.loc[lo_["J_LED"].groupby([lo_["X"], lo_["Y"]]).idxmax().values].set_index(key)
+    hi = d.loc[hi_["J_LED"].groupby([hi_["X"], hi_["Y"]]).idxmin().values].set_index(key)
+    ix = lo.index.intersection(hi.index)
+    lo, hi = lo.loc[ix], hi.loc[ix]
+    jpk = f["J_at_peak"].reindex(ix).astype(float)
+    t = ((np.log(jpk) - np.log(lo["J_LED"].astype(float)))
+         / (np.log(hi["J_LED"].astype(float)) - np.log(lo["J_LED"].astype(float))))
+
+    def at(c, log=True):
+        a, b = lo[c].astype(float).abs(), hi[c].astype(float).abs()
+        if not log:
+            a, b = lo[c].astype(float), hi[c].astype(float)
+            return a + t * (b - a)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            v = np.exp(np.log(a) + t * (np.log(b) - np.log(a)))
+        return v.where((a > 0) & (b > 0), a + t * (b - a))   # log needs both positive
+
+    out = pd.DataFrame(index=ix)
+    out["v_at_peak"] = at("NVLED_V", log=False)
+    out["j_at_peak"] = jpk
+    for q, base in (("nvled_curr", "NVLED_CURR"), ("vled_curr", "VLED_CURR"),
+                    ("pm400_power", "PM400_POWER")):
+        for st, suf in SUMMARY_STATS.items():
+            c = f"{base}_{suf}"
+            out[f"{q}_{st}"] = at(c) if c in d.columns else np.nan
+    for st in ("mean", "median"):
+        out[f"eqe_max_{st}"] = compute_eqe(at(f"_pled_{st}").values,
+                                           at(f"_iled_{st}").values, WAVELENGTH_NM)
+    i_led, p_led = at("_iled_median"), at("_pled_median")
+    for st in ("std", "mad"):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rel_e = np.hypot(out[f"pm400_power_{st}"] / p_led, at(f"_iled_{st}") / i_led)
+        out[f"eqe_max_{st}"] = (out["eqe_max_median"] * rel_e).abs()
+    fx = f.reindex(ix)
+    out["eqe_max_fit"] = fx["eta_LEE"].astype(float) * fx["peak_IQE_raw"].astype(float)
+    out["iqe_max"] = fx["peak_IQE"] if "peak_IQE" in fx else np.nan
+    out["iqe_fit_r2"] = fx["R2"] if "R2" in fx else np.nan
+    out.index.names = ["pixel_x", "pixel_y"]
+    base = summ.set_index(["pixel_x", "pixel_y"])
+    keep = ["quadrant", "pool_k"] + [c for c in base.columns
+                                     if c.startswith(("forward_voltage", "forward_leakage"))]
+    return base[keep].join(out, how="left").reset_index()
+
+
+def plot_pixel_matrix(summ, stat, out, plt, what="Per-pixel quantities"):
     """Every per-pixel quantity against every other, one point per pixel, coloured by
     quadrant: the quadrant enables set the leakage (leak matrix, 261025-1950), so the
     quadrants are the first thing to tell apart. Histograms per quadrant on the
@@ -2869,6 +2952,15 @@ def plot_pixel_matrix(summ, stat, out, plt):
     not squash the rest; those few fall outside the panels."""
     from matplotlib.colors import to_rgb
     from matplotlib.lines import Line2D
+    # Current and light per member: a pooled target is K pixels lit at once, ~K x one
+    # pixel. Unscaled, the K=4 targets of 261022-0037 formed a second cloud at 4x.
+    k = summ["pool_k"].clip(lower=1).values if "pool_k" in summ else 1
+    summ = summ.copy()
+    per = []
+    for q in ("nvled_curr", "vled_curr", "pm400_power"):
+        if f"{q}_{stat}" in summ:
+            summ[f"{q}_{stat}"] = summ[f"{q}_{stat}"] / k
+            per.append(f"{q}_{stat}")
     cols = [c for c in (f"{q}_{stat}" if q != "iqe_max" else q for q in SUMMARY_PLOT)
             if c in summ.columns and summ[c].notna().sum() >= 3]
     if len(cols) < 2:
@@ -2902,14 +2994,14 @@ def plot_pixel_matrix(summ, stat, out, plt):
             a.xaxis.get_offset_text().set_fontsize(6)
             a.yaxis.get_offset_text().set_fontsize(6)
             if i == n - 1:
-                a.set_xlabel(cx, fontsize=8)
+                a.set_xlabel(cx + (" / member" if cx in per else ""), fontsize=8)
             else:
                 a.set_xticklabels([])
             if j == 0:
-                a.set_ylabel(cy, fontsize=8)
+                a.set_ylabel(cy + (" / member" if cy in per else ""), fontsize=8)
             elif i != j:
                 a.set_yticklabels([])
-    fig.suptitle(f"Per-pixel quantities, {stat}s, {len(summ)} pixels -- each against each, "
+    fig.suptitle(f"{what}, {stat}s, {len(summ)} pixels -- each against each, "
                  f"coloured by quadrant; axes 0.5-99.5 % of each quantity", fontsize=10)
     fig.legend([Line2D([], [], ls="", marker="o", color=c) for c in QUAD_COLORS.values()],
                [f"{q} ({(quad == q).sum()})" for q in QUAD_COLORS], loc="upper right",
@@ -3080,6 +3172,13 @@ def analyse_sweep(sweep_dir, label, log):
         summ.to_csv(out / "pixel_summary.csv", index=False)
         for stat in ("mean", "median"):
             _safe(plot_pixel_matrix, summ, stat, out / f"pixel_matrix_{stat}.png", plt)
+        summ_i = _safe(pixel_summary_interpolated, df, df_fits, summ)
+        if summ_i is not None and len(summ_i):
+            summ_i.to_csv(out / "pixel_summary_interpolated.csv", index=False)
+            for stat in ("mean", "median"):
+                _safe(plot_pixel_matrix, summ_i, stat,
+                      out / f"pixel_matrix_interpolated_{stat}.png", plt,
+                      "Per-pixel quantities at the FITTED peak (interpolated)")
 
     peaks = (
         _safe(

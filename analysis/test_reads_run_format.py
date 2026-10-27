@@ -328,6 +328,29 @@ def test_pixel_summary_on_the_fixture():
     assert ok.any() and set(s.loc[ok, "v_at_eqe_max"]) <= set(df["NVLED_V"].astype(float))
 
 
+def test_pixel_summary_interpolates_to_the_fitted_peak():
+    # two reliable points at J = 1 and 4 A/cm2; the fit puts the peak at J = 2: halfway
+    # in log J, so a power law I ~ J lands at 2 uA, and the bias halfway at -0.95 V
+    df = pd.DataFrame(dict(X=0, Y=0, NVLED_V=[-0.9, -1.0], J_LED=[1.0, 4.0], RELIABLE=True))
+    for base, v in (("NVLED_CURR", [-1e-6, -4e-6]), ("VLED_CURR", [1e-6, 4e-6]),
+                    ("PM400_POWER", [1e-9, 4e-9])):
+        for suf in ("MEAN", "MEDIAN", "SAMPSTD", "MADSTD"):
+            df[f"{base}_{suf}"] = v if suf in ("MEAN", "MEDIAN") else np.abs(v) * 1e-2
+    df["NVLED_CURR_REF"] = df["PM400_POWER_REF"] = 0.0
+    fits = pd.DataFrame(dict(X=[0, 1], Y=0, J_at_peak=[2.0, 2.0], clean_fit=[True, False],
+                             eta_LEE=1e-3, peak_IQE_raw=0.8, peak_IQE=[0.8, np.nan],
+                             R2=0.99))
+    summ = pd.DataFrame(dict(pixel_x=[0, 1], pixel_y=0, quadrant="TL", pool_k=1,
+                             forward_voltage_median=-0.88))
+    si = aa.pixel_summary_interpolated(df, fits, summ).set_index("pixel_x")
+    r = si.loc[0]
+    assert abs(r["nvled_curr_median"] - 2e-6) < 1e-15, r["nvled_curr_median"]
+    assert abs(r["pm400_power_mean"] - 2e-9) < 1e-18
+    assert abs(r["v_at_peak"] - (-0.95)) < 1e-12
+    assert abs(r["eqe_max_fit"] - 0.8e-3) < 1e-15 and r["forward_voltage_median"] == -0.88
+    assert np.isnan(si.loc[1, "v_at_peak"])          # not a clean fit: no values
+
+
 def test_forward_voltage_interpolates_in_log_j():
     V = np.array([0.0, -0.8, -0.9, -1.0] * 2)
     J = np.array([1e-4, 0.1, 10.0, 100.0,     # crosses 1 A/cm2 halfway (log) -0.8..-0.9
