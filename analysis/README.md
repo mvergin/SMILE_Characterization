@@ -49,6 +49,7 @@ It picks the tools from what each run folder holds:
 | `FastScan/` | `analyze_array.py` |
 | `calibration_traces.npz` | `plot_calibration.py` |
 | `traces.npz`, `switchmatrix.csv` or `isrc.csv` | `plot_transients.py` |
+| `leakmatrix.csv` | `plot_leakmatrix.py` |
 
 A tool runs again only if its source file or the run's input files changed since its
 last clean finish. `ANALYSIS_STATE.json` in the run folder records the source hash
@@ -57,8 +58,7 @@ The output goes to the console and to `ANALYSIS_LOG.txt`. Each tool runs in its 
 process, one after the other, so one run's crash or memory leak does not affect the
 next. A finished `measure_iqe` run calls this script on itself.
 
-Folders with only `cluster.csv`, `optfloor.csv` or `leakmatrix.csv` have no plotter
-and are not listed.
+Folders with only `cluster.csv` or `optfloor.csv` have no plotter and are not listed.
 
 ### `analyze_array.py` — the main report
 

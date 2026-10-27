@@ -11,6 +11,7 @@ what the folder holds and skips a run that is already up to date.
 | FastScan/                                    | analyze_array.py     |
 | calibration_traces.npz                       | plot_calibration.py  |
 | traces.npz, switchmatrix.csv or isrc.csv     | plot_transients.py   |
+| leakmatrix.csv                               | plot_leakmatrix.py   |
 
 A tool runs again only when its source or the run's input files changed since its last
 clean finish. ANALYSIS_STATE.json in the run folder records which source (SHA-256)
@@ -39,6 +40,7 @@ TOOLS = {   # tool: does this run folder need it
     "plot_calibration.py": lambda d: (d / "calibration_traces.npz").is_file(),
     "plot_transients.py": lambda d: any((d / f).is_file() for f in
                                         ("traces.npz", "switchmatrix.csv", "isrc.csv")),
+    "plot_leakmatrix.py": lambda d: (d / "leakmatrix.csv").is_file(),
 }
 # What the tools write. Everything else in a run folder is input.
 OUT_DIRS = {"REPORT_assets", "switch_sync", "switchmatrix", "IQE_EQE", "comparison"}
