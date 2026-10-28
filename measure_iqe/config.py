@@ -37,6 +37,39 @@ NAMED_ROIS: dict[str, tuple[int, int, int, int]] = {
 }
 
 
+def read_pixel_list(path, n: int = 0, order: str = "file",
+                    seed: int = 0) -> list[tuple[int, int]]:
+    """(x, y) of every pixel in a CSV with X/Y or pixel_x/pixel_y columns (any case).
+
+    Repeats count once, at their first row, so a sweep CSV with one row per bias gives
+    each pixel once. order "file" keeps the file's order, "random" shuffles with seed.
+    n > 0 keeps the first n after that.
+    """
+    import csv
+    import random
+
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        cols = {c.strip().lower(): c for c in (reader.fieldnames or [])}
+        for cx, cy in (("x", "y"), ("pixel_x", "pixel_y")):
+            if cx in cols and cy in cols:
+                break
+        else:
+            raise ValueError(f"pixel_list {path}: no X/Y or pixel_x/pixel_y columns, "
+                             f"found {list(cols.values())[:8]}")
+        pts = list(dict.fromkeys(
+            (int(float(r[cols[cx]])), int(float(r[cols[cy]])))
+            for r in reader if (r.get(cols[cx]) or "").strip()))
+    bad = [p for p in pts if not (0 <= p[0] <= 511 and 0 <= p[1] <= 511)]
+    if bad:
+        raise ValueError(f"pixel_list {path}: outside the 512x512 array: {bad[:4]}")
+    if not pts:
+        raise ValueError(f"pixel_list {path}: no pixels")
+    if order == "random":
+        random.Random(seed).shuffle(pts)
+    return pts[:n] if n else pts
+
+
 @dataclass
 class IQEConfig:
     """All acquisition parameters.  Every field has a working default."""
@@ -56,6 +89,14 @@ class IQEConfig:
 
     # ── ROI & pixel selection ───────────────────────────────────────────
     roi: tuple[int, int, int, int] | str = (32, 32, 63, 63)  # (x1,y1,x2,y2) or "FULL"/"TL"/"TR"/"BL"/"BR"
+    pixel_list: str = ""     # a CSV of targets instead of the ROI: any file with X/Y (or
+                             # pixel_x/pixel_y) columns, e.g. a pixelclassification
+                             # group or pixel_summary.csv. The fast scan visits only these
+                             # and every one is swept: no block selection, no alive cut
+                             # (the first-bias dead check still drops dark ones). "" = ROI.
+    pixel_list_n: int = 0    # take only this many from the list. 0 = all
+    pixel_list_order: str = "file"  # "file": top to bottom as listed; "random": shuffled
+    pixel_list_seed: int = 0  # the shuffle's seed, so a random pick can be repeated
     # Which alive pixels get the (expensive) full IQE sweep:
     #   "blocks"  — STRATIFIED: tile the ROI into BLOCK_SIZE×BLOCK_SIZE-pixel blocks and take
     #               PIXELS_PER_BLOCK from EACH block → equal per-block sampling for spatial
@@ -927,8 +968,23 @@ class IQEConfig:
             raise ValueError(f"unknown ROI {self.roi!r}; use (x1,y1,x2,y2) or one of {sorted(NAMED_ROIS)}")
         return NAMED_ROIS[key]
 
+    def pixel_targets(self) -> list[tuple[int, int]]:
+        """The pixel_list's (x, y), in the order and number the config asks for."""
+        return read_pixel_list(self.pixel_list, self.pixel_list_n, self.pixel_list_order,
+                               self.pixel_list_seed)
+
     def validate(self) -> IQEConfig:
         """Raise ``ValueError`` on a configuration that cannot be measured."""
+        if self.pixel_list:
+            if self.pixel_list_order not in ("file", "random"):
+                raise ValueError(f"pixel_list_order={self.pixel_list_order!r}; "
+                                 f"expected 'file' or 'random'")
+            if self.pixel_list_n < 0:
+                raise ValueError("pixel_list_n must be >= 0 (0 is all)")
+            if self.fastscan_pool or self.pool_groups:
+                raise ValueError("pixel_list with fastscan_pool or pool_groups: pooling "
+                                 "groups neighbours inside a block, and a list has no blocks")
+            self.pixel_targets()                 # the file exists and has X/Y columns
         x1, y1, x2, y2 = self.resolve_roi()
         if not all(0 <= v <= 511 for v in (x1, y1, x2, y2)):
             raise ValueError(f"roi {(x1, y1, x2, y2)} outside the 512x512 array")

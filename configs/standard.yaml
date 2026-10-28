@@ -41,6 +41,10 @@ analyze_after: true   # analyse the run directory when the run completes; needs 
 
 # ---- ROI & pixel selection ----
 roi: [32, 32, 63, 63]   # (x1,y1,x2,y2) or "FULL"/"TL"/"TR"/"BL"/"BR"
+pixel_list: ""   # CSV of targets (X/Y or pixel_x/pixel_y columns) instead of the ROI. "" = ROI
+pixel_list_n: 0   # take only this many from the list. 0 = all
+pixel_list_order: "file"   # "file": as listed, top to bottom; "random": shuffled
+pixel_list_seed: 0   # the shuffle seed
 sweep_select: "blocks"   # "blocks" | "spatial" | "stride"
 block_size: 8   # blocks mode: block edge in pixels (ROI → ~ROI/BLOCK_SIZE blocks/axis)
 pixels_per_block: 4   # blocks mode: alive pixels sampled per block

@@ -20,6 +20,10 @@ it. If a change breaks one side, the other side's test fails too.
 
 ## Layout
 
+A run from a `pixel_list` is named `<YYMMDD-HHMM>_<sample_name>_LIST-<file stem>/`
+instead. Its saved `roi` is the box around the listed pixels, and its FastScan files
+hold only those pixels, in list order (2026-10-28+).
+
 ```
 <YYMMDD-HHMM>_<sample_name>_ROI_(x1, y1, x2, y2)/
 ├── RUN_PROVENANCE.json                         what produced this run

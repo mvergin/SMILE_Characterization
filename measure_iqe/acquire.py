@@ -1563,12 +1563,19 @@ def measure_dead_iv(pm, smu, smile, dead: list[Row], alive: list[Row],
 
 
 def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
-                  run_dir: Path, cfg: IQEConfig, log: Logger) -> list[Row]:
+                  run_dir: Path, cfg: IQEConfig, log: Logger,
+                  pixels: list[tuple[int, int]] | None = None) -> list[Row]:
+    """Fast scan the ROI, or only ``pixels`` (a pixel_list), and pick the sweep targets.
+
+    With ``pixels`` every listed pixel is a target, in list order: the list IS the
+    selection, so neither the alive cut nor the block selection applies.
+    """
     volts = cfg.fastscan_v_list()
     _pool_members.clear()      # a fresh selection owns the pooled groups
-    npx = (x2 - x1 + 1) * (y2 - y1 + 1)
+    npx = len(pixels) if pixels else (x2 - x1 + 1) * (y2 - y1 + 1)
     log("=" * 56)
     log(f"FAST SCAN @ NVLED={', '.join(f'{v:g}' for v in volts)} V over {npx} pixels"
+        + (f" from {cfg.pixel_list}" if pixels else "")
         + (f" ({len(volts)} biases x {npx} = {len(volts) * npx} points)"
            if len(volts) > 1 else ""))
     # The fast scan is a DIFFERENT operating point from the sweep and needs its own
@@ -1596,8 +1603,8 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
         order, screen_rows = screen_fast_scan(pm, smu, smile, x1, y1, x2, y2,
                                               cfg, log, t0)
     else:
-        order = list(roi_pixels(x1, y1, x2, y2))
-    if cfg.fastscan_random_order:
+        order = list(pixels) if pixels else list(roi_pixels(x1, y1, x2, y2))
+    if cfg.fastscan_random_order and not pixels:     # a list keeps its own order
         np.random.default_rng(cfg.fastscan_order_seed).shuffle(order)
         log(f"  visiting {len(order)} pixels in randomized order (seed {cfg.fastscan_order_seed})")
     # Bias on the outside, pixels on the inside: the bias is set once per pass instead
@@ -1730,6 +1737,10 @@ def run_fast_scan(pm, smu, smile, x1: int, y1: int, x2: int, y2: int,
         measure_dead_iv(pm, smu, smile, dead, alive, run_dir, cfg, log)
     if cfg.fastscan_only:
         return alive
+    if pixels:
+        log(f"  pixel_list: all {len(sel_rows)} listed pixel(s) are sweep targets, in "
+            f"list order ({len(alive)} above the alive threshold)")
+        return sel_rows
     sel = select_sweep_pixels(alive, cfg, log)
     # Pooled groups come AFTER the rotation, deliberately: sweep_rotate exists to move a
     # different single pixel into slot 0 (section 17, open question 13), and a pooled
@@ -3445,6 +3456,8 @@ def estimate_targets(cfg: IQEConfig) -> int:
     Counted from the block grid instead of running the selection, which takes ~40 s on
     the full array. A dark block gives no target, so a mostly dark array gets fewer.
     """
+    if cfg.pixel_list:
+        return len(cfg.pixel_targets())
     x1, y1, x2, y2 = cfg.resolve_roi()
     npx = (abs(x2 - x1) + 1) * (abs(y2 - y1) + 1)
     if cfg.sweep_select == "blocks":
@@ -3608,13 +3621,15 @@ def make_run_dir(cfg: IQEConfig, base_dir: str | Path | None = None,
     root = Path(base_dir) if base_dir is not None else Path(cfg.base_dir)
     tail = f"_{suffix}" if suffix else ""
     name = ("SIMULATED_" if simulated else "") + cfg.sample_name
-    run_dir = root / f"{stamp}_{name}_ROI_({x1}, {y1}, {x2}, {y2}){tail}"
+    where = (f"LIST-{Path(cfg.pixel_list).stem}" if cfg.pixel_list
+             else f"ROI_({x1}, {y1}, {x2}, {y2})")
+    run_dir = root / f"{stamp}_{name}_{where}{tail}"
     # The stamp has minute resolution, so two runs started in the same minute with the
     # same sample and ROI would write into one directory and silently merge. Only the
     # resume path may reuse an existing directory, and it passes run_dir explicitly.
     if run_dir.exists() and any(run_dir.iterdir()):
         stamp2 = datetime.datetime.now().strftime("%y%m%d-%H%M%S")
-        run_dir = root / f"{stamp2}_{name}_ROI_({x1}, {y1}, {x2}, {y2}){tail}"
+        run_dir = root / f"{stamp2}_{name}_{where}{tail}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
@@ -3784,6 +3799,12 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
         # Resuming into an existing directory. Turn it on in the config rather than as a
         # separate argument, so --print-config and the saved settings both show it.
         cfg = dataclasses.replace(cfg, resume=True)
+    targets = cfg.pixel_targets() if cfg.pixel_list else None
+    if targets:
+        # The ROI becomes the box around the list, so the saved config and the
+        # analysis maps cover the pixels actually measured.
+        xs, ys = [p[0] for p in targets], [p[1] for p in targets]
+        cfg = dataclasses.replace(cfg, roi=(min(xs), min(ys), max(xs), max(ys)))
     x1, y1, x2, y2 = cfg.resolve_roi()
     out_dir = Path(run_dir) if run_dir is not None else make_run_dir(
         cfg, base_dir, suffix="FASTSCAN" if cfg.fastscan_only else None, simulated=simulate)
@@ -3820,9 +3841,11 @@ def run_iqe_measurement(config: IQEConfig | None = None, *, simulate: bool = Fal
         smu.enable_output("b", True)
         time.sleep(0.05)
 
-        selected = run_fast_scan(pm, smu, smile, x1, y1, x2, y2, out_dir, cfg, log)
+        selected = run_fast_scan(pm, smu, smile, x1, y1, x2, y2, out_dir, cfg, log,
+                                 pixels=targets)
         if cfg.fastscan_only:
-            n_points = (x2 - x1 + 1) * (y2 - y1 + 1) * len(cfg.fastscan_v_list())
+            n_points = ((len(targets) if targets else (x2 - x1 + 1) * (y2 - y1 + 1))
+                        * len(cfg.fastscan_v_list()))
             log(f"fastscan_only: {n_points} fast-scan points written, no sweep.")
         elif not selected:
             log("No alive pixels selected - nothing to sweep.")

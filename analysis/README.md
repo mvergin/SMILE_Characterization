@@ -117,7 +117,8 @@ current minus the quadrant's leakage (the median open pixel). Groups overlap, so
 `pixel_classes.csv` gives every pixel a `primary` group (the first match, in table order)
 and an `is_<group>` flag for each. `<group>.csv` lists every member, `summary.csv` the
 counts. `classes_IP.png` is current against light by group, `classes_pie.png` the primary
-groups.
+groups. Any of these CSVs works as a `pixel_list` for `measure_iqe` and for the
+`transistoriv` experiment.
 
 `pixel_summary_interpolated.csv` has the same columns at each pixel's FITTED peak
 (`j_at_peak` from the ABC fit) instead of its best sweep point. Each burst quantity is

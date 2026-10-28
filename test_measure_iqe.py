@@ -226,6 +226,35 @@ def _run(tmp: str, **over) -> "object":
     return run_iqe_measurement(cfg, simulate=True, base_dir=tmp, log=QUIET)
 
 
+def test_a_pixel_list_replaces_the_roi():
+    with tempfile.TemporaryDirectory() as tmp:
+        lst = Path(tmp) / "shorts.csv"
+        # pixel_x/pixel_y, a repeat, and an extra column: any group CSV must work
+        lst.write_text("pixel_x,pixel_y,P_W\n300,40,1\n5,6,1\n300,40,1\n7,200,1\n9,9,1\n")
+        from measure_iqe.config import read_pixel_list
+        assert read_pixel_list(lst) == [(300, 40), (5, 6), (7, 200), (9, 9)]
+        assert read_pixel_list(lst, n=2) == [(300, 40), (5, 6)]
+        rnd = read_pixel_list(lst, order="random", seed=3)
+        assert sorted(rnd) == sorted(read_pixel_list(lst)) and rnd == read_pixel_list(
+            lst, order="random", seed=3)
+        res = _run(tmp, pixel_list=str(lst), pixel_list_n=3)
+        assert "LIST-shorts" in res.run_dir.name, res.run_dir.name
+        assert res.n_pixels == 3, res.n_pixels
+        fs = list(csv.DictReader(next((res.run_dir / "FastScan").glob(
+            "*aggregated*.csv")).open()))
+        assert [(int(r["X"]), int(r["Y"])) for r in fs] == [(300, 40), (5, 6), (7, 200)]
+        saved = json.loads(next((res.run_dir / "NVLEDSweep" / "Sweep" / "raw_data").glob(
+            "*_config.json")).read_text())["settings"]
+        assert tuple(saved["roi"]) == (5, 6, 300, 200), saved["roi"]
+        bad = Path(tmp) / "bad.csv"
+        bad.write_text("a,b\n1,2\n")
+        try:
+            IQEConfig(**{**FAST, "pixel_list": str(bad)}).validate()
+            raise AssertionError("a list without X/Y columns was accepted")
+        except ValueError as e:
+            assert "no X/Y" in str(e)
+
+
 def test_voltage_sweep_writes_the_expected_files():
     with tempfile.TemporaryDirectory() as tmp:
         result = _run(tmp)

@@ -9,6 +9,10 @@
       7,
       7
     ],
+    "pixel_list": "",
+    "pixel_list_n": 0,
+    "pixel_list_order": "file",
+    "pixel_list_seed": 0,
     "sweep_select": "blocks",
     "block_size": 4,
     "pixels_per_block": 1,
@@ -174,22 +178,22 @@
     "smu_display_off": false
   },
   "provenance": {
-    "commit": "06fa2420bcb572c533939e947d8798d163540ceb",
-    "commit_short": "06fa242",
+    "commit": "c48d6879f9377444f4d338218a1c322d75fa29b8",
+    "commit_short": "c48d687",
     "branch": "main",
-    "committed": "2026-10-26T07:39:18+01:00",
-    "describe": "v0.2-191-g06fa242-dirty",
+    "committed": "2026-10-28T09:08:21+01:00",
+    "describe": "v0.2-202-gc48d687-dirty",
     "dirty": true,
     "changed": [
       "measure_iqe/acquire.py",
-      "measure_iqe/cli.py",
-      "measure_iqe/config.py"
+      "measure_iqe/config.py",
+      "test_measure_iqe.py"
     ],
     "untracked": [
       "CLAUDE.md"
     ],
-    "diff_sha256": "6863257e31ddf6f7",
-    "started": "2026-10-26T07:50:33+01:00",
+    "diff_sha256": "3570b94b5f55e47c",
+    "started": "2026-10-28T09:10:40+01:00",
     "host": "IHT-RE316",
     "python": "3.13.5",
     "platform": "Windows-11-10.0.26100-SP0"
