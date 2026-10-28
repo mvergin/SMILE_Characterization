@@ -50,6 +50,8 @@ It picks the tools from what each run folder holds:
 | `calibration_traces.npz` | `plot_calibration.py` |
 | `traces.npz`, `switchmatrix.csv` or `isrc.csv` | `plot_transients.py` |
 | `leakmatrix.csv` | `plot_leakmatrix.py` |
+| `transistoriv.csv` | `plot_transistoriv.py` |
+| `droop.csv` | `plot_droop.py` |
 
 A tool runs again only if its source file or the run's input files changed since its
 last clean finish. `ANALYSIS_STATE.json` in the run folder records the source hash
@@ -59,6 +61,18 @@ process, one after the other, so one run's crash or memory leak does not affect 
 next. A finished `measure_iqe` run calls this script on itself.
 
 Folders with only `cluster.csv` or `optfloor.csv` have no plotter and are not listed.
+
+### `plot_transistoriv.py`, `plot_droop.py` — the `_PIXELS_` experiments
+
+`plot_transistoriv.py` reads a `--what transistoriv` run: |I_B|(V) through shorted pixels
+at bitvals 0, 1, 2, 4, 8, 15. `transistoriv.png` has every curve per bitval with the
+median, the medians together, additivity (I15 against I1 + I2 + I4 + I8 − 3 I0), the
+spread across pixels, and the current per bitval over bitval 1 against 1:2:4:8:15.
+`transistoriv_summary.csv` has n, median, MAD, p10 and p90 per bitval and bias.
+
+`plot_droop.py` reads a `--what droop` run: total current and light with N pixels lit,
+against N × one pixel; per-pixel current and light over their N = 1 value; and P/I.
+One row per bias, the random and the growing-patch order as two lines.
 
 ### `analyze_array.py` — the main report
 

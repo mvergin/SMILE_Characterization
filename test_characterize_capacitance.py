@@ -673,3 +673,39 @@ if __name__ == "__main__":
             fn()
             print(f"  ok  {name}")
     print("all switch-deviation and cluster checks passed")
+
+
+def test_transistoriv_and_droop_run_end_to_end_on_the_sim():
+    """transistoriv sweeps every listed pixel at every bitval from 0 V down; droop lights
+    1..N alive pixels of a one-quadrant ROI in both orders; both land in _PIXELS_."""
+    import csv
+    import tempfile
+    from characterize_capacitance import main
+
+    with tempfile.TemporaryDirectory() as tmp:
+        lst = pathlib.Path(tmp) / "short.csv"
+        lst.write_text("X,Y,primary\n3,4,short\n300,40,short\n9,9,short\n")
+        assert main(["--simulate", "--what", "transistoriv", "--pixel-list", str(lst),
+                     "--list-n", "2", "--tiv-volts", "0", "-1", "-3.2",
+                     "--tiv-settle-s", "0", "--out", tmp]) == 0
+        run = next(pathlib.Path(tmp).glob("*_PIXELS_Transistoriv"))
+        rows = list(csv.DictReader((run / "transistoriv.csv").open()))
+        assert len(rows) == 2 * 6 * 3, len(rows)
+        assert [float(r["v"]) for r in rows[:3]] == [0.0, -1.0, -3.2]
+        assert {(r["pixel_x"], r["pixel_y"]) for r in rows} == {("3", "4"), ("300", "40")}
+
+        assert main(["--simulate", "--what", "droop", "--droop-roi", "0", "0", "3", "3",
+                     "--droop-volts", "-2", "--droop-settle-s", "0", "--droop-step", "2",
+                     "--out", tmp]) == 0
+        run = next(pathlib.Path(tmp).glob("*_PIXELS_Droop"))
+        rows = list(csv.DictReader((run / "droop.csv").open()))
+        for o in ("random", "patch"):
+            n = [int(r["n"]) for r in rows if r["order"] == o]
+            assert n[0] == 1 and n == sorted(n) and n[1] - n[0] == 2, (o, n)
+        assert (run / "FastScan").is_dir()
+        try:
+            main(["--simulate", "--what", "droop", "--droop-roi", "250", "0", "260", "3",
+                  "--out", tmp])
+            raise AssertionError("a droop ROI across two quadrants was accepted")
+        except SystemExit as e:
+            assert "one quadrant" in str(e)

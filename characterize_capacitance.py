@@ -66,6 +66,11 @@ Usage:
     python characterize_capacitance.py --what isrc --pixels 54,33 177,63 --isrc-seconds 300
     python characterize_capacitance.py --what optfloor          # 2 minutes, no pixels needed
     python characterize_capacitance.py --what cluster --highc --compliance 1e-5
+    python characterize_capacitance.py --what transistoriv --sample-name Array38         --pixel-list "results/<run>/REPORT_assets/pixelclassification/fastscan/short.csv"
+    python characterize_capacitance.py --what droop --sample-name Array38         --droop-roi 100 100 131 131 --droop-volts -3.2 -2.6 -2.0
+
+transistoriv and droop are not about capacitance: a run of only those is named
+<stamp>_<sample>_PIXELS_<Tests>.
 
 Writes one CSV per experiment, every row tagged with its pixel. It fits and plots
 nothing; point ``analysis/`` at the CSVs for that.
@@ -2442,11 +2447,187 @@ def exp_cluster(pm, smu, smile, cfg, args, log):
     return rows
 
 
+def _list_pixels(args, log, what):
+    """--pixel-list as (x, y), in the order and number asked for."""
+    from measure_iqe.config import read_pixel_list
+    if not args.pixel_list:
+        raise SystemExit(f"{what} needs --pixel-list (e.g. a pixelclassification CSV)")
+    pts = read_pixel_list(args.pixel_list, args.list_n, args.list_order, args.list_seed)
+    log(f"  {len(pts)} pixel(s) from {args.pixel_list} ({args.list_order} order"
+        + (f", first {args.list_n}" if args.list_n else "") + ")")
+    return pts
+
+
+def exp_transistoriv(pm, smu, smile, cfg, args, log):
+    """Drive-transistor IV through SHORTED pixels: I(V) for every bitval in --tiv-bitvals.
+
+    A shorted LED puts the whole NVLED voltage across the pixel's drive transistors,
+    so the pixel is a transistor test structure. The bitval picks which of the four
+    binary-weighted transistors conduct: 1, 2, 4, 8 alone, 15 all, 0 none (the
+    leakage the others sit on). Every sweep runs 0 V -> the most negative bias and
+    goes back to 0 V before the next bitval, so no frame is switched at full current.
+    No High-C: a short has no capacitive node to settle.
+    """
+    pixels = _list_pixels(args, log, "transistoriv")
+    volts = sorted(args.tiv_volts, reverse=True)            # 0 V first
+    if min(volts) < -cfg.nvled_v_limit:
+        raise SystemExit(f"--tiv-volts reaches {min(volts):g} V, past nvled_v_limit "
+                         f"{cfg.nvled_v_limit:g} V")
+    tcfg = dataclasses.replace(cfg, nvled_compliance=args.tiv_limit, highc_b=False,
+                               nvled_range_i=None)
+    m.configure_voltage_source_b(smu, tcfg, log)
+    m.set_nplc(smu, args.tiv_nplc)
+    log(f"  transistor IV: bitvals {args.tiv_bitvals}, {volts[0]:g} -> {volts[-1]:g} V in "
+        f"{len(volts)} points, limit {args.tiv_limit:g} A, NPLC {args.tiv_nplc:g}")
+    rows = []
+    try:
+        for k, (x, y) in enumerate(pixels, 1):
+            here = []
+            for bv in args.tiv_bitvals:
+                smu.set_voltage("b", 0.0)
+                smile.blank_frame()
+                smile.set_pixel(x, y, int(bv))
+                for v in volts:
+                    smu.set_voltage("b", float(v))
+                    time.sleep(args.tiv_settle_s)
+                    p, ps, iv, ivs, inv, invs, _, _ = m.acquire_point(
+                        pm, smu, args.tiv_n_smu, 1)
+                    here.append(dict(pixel_x=x, pixel_y=y, quadrant=_quadrant_of(x, y),
+                                     bitval=int(bv), v=float(v), i_b=inv, i_b_sem=invs,
+                                     i_a=iv, i_a_sem=ivs, p_w=p,
+                                     at_limit=int(abs(inv) >= 0.98 * args.tiv_limit)))
+            rows.extend(here)
+            top = {r["bitval"]: abs(r["i_b"]) for r in here if r["v"] == volts[-1]}
+            log(f"    [{k}/{len(pixels)}] ({x},{y}) at {volts[-1]:g} V: "
+                + ", ".join(f"b{b} {i * 1e6:.1f} uA" for b, i in top.items()))
+            write_csv(args.out_dir, "transistoriv", rows)      # a crash keeps this pixel
+    finally:
+        smu.set_voltage("b", 0.0)
+        smile.blank_frame()
+    return rows
+
+
+def _droop_counts(n_alive, args):
+    """How many pixels are lit at each step: 1, 1+step, ... up to --droop-max."""
+    top = min(n_alive, args.droop_max) if args.droop_max else n_alive
+    counts = list(range(1, top + 1, max(1, args.droop_step)))
+    if counts and counts[-1] != top:
+        counts.append(top)
+    return counts
+
+
+def exp_droop(pm, smu, smile, cfg, args, log):
+    """Total current and light as more and more pixels are lit at one bias.
+
+    A fast scan over --droop-roi finds the alive pixels (written as an ordinary
+    FastScan/ folder). Then, at every --droop-volts bias and in every --droop-orders
+    order, the first 1, 2, 3, ... of them are lit together and the current, light and
+    ch A current read. Linear in N while every pixel gets its full drive; the departure
+    is where the shared path -- the n-GaN sheet resistance -- starts to take the
+    voltage. "random" spreads the current over the ROI from the start; "patch" grows a
+    compact disc from the ROI centre, which crowds it. Both at every bias separate the
+    count from the crowding.
+
+    One quadrant only: the four quadrants share one frame's pixel data, so a frame can
+    light any set inside one quadrant but not different sets in two. Ch B and ch A run
+    with a --droop-limit limit and autoranged current; a series stops at the limit.
+    """
+    x1, y1, x2, y2 = args.droop_roi
+    quads = {_quadrant_of(x, y) for x in (x1, x2) for y in (y1, y2)}
+    if len(quads) != 1:
+        raise SystemExit(f"--droop-roi {args.droop_roi} spans {sorted(quads)}: one frame "
+                         f"lights one quadrant, so the ROI must stay inside one")
+    if min(args.droop_volts) < -cfg.nvled_v_limit:
+        raise SystemExit(f"--droop-volts reaches {min(args.droop_volts):g} V, past "
+                         f"nvled_v_limit {cfg.nvled_v_limit:g} V")
+    fcfg = dataclasses.replace(cfg, roi=(x1, y1, x2, y2), fastscan_only=True,
+                               dead_iv_pixels=0)
+    alive = m.run_fast_scan(pm, smu, smile, x1, y1, x2, y2, args.out_dir, fcfg, log)
+    pts = [(int(r["X"]), int(r["Y"])) for r in alive]
+    if not pts:
+        log("  droop: no alive pixels in the ROI")
+        return []
+    p1 = float(np.median([abs(r["PM400_POWER_MEAN"]) for r in alive]))
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    orders = {"random": [pts[i] for i in np.random.default_rng(args.droop_seed)
+                         .permutation(len(pts))],
+              "patch": sorted(pts, key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2)}
+    counts = _droop_counts(len(pts), args)
+    log(f"  droop: {len(pts)} alive in {args.droop_roi}; {len(counts)} steps x "
+        f"{len(args.droop_volts)} bias(es) x {len(args.droop_orders)} order(s), limit "
+        f"{args.droop_limit:g} A")
+    # Both channels carry the whole array current: 1 A limits, autoranged reading.
+    for ch, rng in (("b", args.droop_limit), ("a", args.droop_limit)):
+        smu.configure_channel(ch, args.droop_limit, args.droop_nplc, False,
+                              zero_delays=False, range_i=rng)
+        if hasattr(smu, "inst"):
+            smu.inst.write(f"smu{ch}.measure.autorangei = smu{ch}.AUTORANGE_ON")
+    ladder = m.acquire.pm_ladder(pm, cfg, log) if cfg.pm_autorange else None
+    rows = []
+    try:
+        for v in args.droop_volts:
+            for oname in args.droop_orders:
+                order = orders[oname]
+                smile.blank_frame()
+                smu.set_voltage("b", float(v))
+                time.sleep(args.droop_settle_s)
+                rng = None
+                log(f"    {v:+.3f} V, {oname}:")
+                for n in counts:
+                    smile.set_pixels(order[:n], 15)
+                    time.sleep(args.droop_settle_s)
+                    if ladder:                 # range for N x the last per-pixel power
+                        per = (abs(rows[-1]["p_w"]) / rows[-1]["n"]
+                               if rows and rows[-1]["v"] == v and rows[-1]["order"] == oname
+                               else p1)
+                        want = m.acquire.pick_pm_range(n * per, cfg, ladder)
+                        if rng is None or want > rng:
+                            rng = want
+                            if m.acquire.set_pm_range(pm, rng)[1]:
+                                m.acquire.flush_pm_after_range(pm, smu, 1, 1, cfg)
+                    p, ps, ia, ias, ib, ibs, _, _ = m.acquire_point(
+                        pm, smu, args.droop_n_smu, args.droop_n_pm)
+                    while ladder and m.acquire.pm_over(p, rng, cfg):
+                        up = m.acquire.pm_range_up(pm, smu, rng, 1, 1, cfg, log)
+                        if up == rng:
+                            break
+                        rng = up
+                        p, ps, ia, ias, ib, ibs, _, _ = m.acquire_point(
+                            pm, smu, args.droop_n_smu, args.droop_n_pm)
+                    lim = abs(ib) >= 0.98 * args.droop_limit
+                    rows.append(dict(v=float(v), order=oname, n=n,
+                                     x_added=order[n - 1][0], y_added=order[n - 1][1],
+                                     i_b=ib, i_b_sem=ibs, i_a=ia, i_a_sem=ias, p_w=p,
+                                     p_w_sem=ps, pm_range_w=rng if rng else float("nan"),
+                                     at_limit=int(lim), quadrant=next(iter(quads))))
+                    if n in (1, 2, 5, 10) or n % 100 == 0 or n == counts[-1] or lim:
+                        log(f"      N={n:>6}: I {abs(ib) * 1e3:9.4f} mA "
+                            f"({abs(ib) / n * 1e6:7.2f} uA/px), P {abs(p) * 1e9:10.2f} nW "
+                            f"({abs(p) / n * 1e9:7.3f} nW/px)"
+                            + ("  << AT THE LIMIT, series stopped" if lim else ""))
+                    if lim:
+                        break
+                smile.blank_frame()
+                write_csv(args.out_dir, "droop", rows)
+    finally:
+        smile.blank_frame()
+        smu.set_voltage("b", 0.0)
+        for ch, keep in (("b", cfg.fastscan_limit_a), ("a", cfg.vled_compliance)):
+            rng = (cfg.vled_range_i if ch == "a"
+                   else m.acquire.range_for_limit(cfg.fastscan_limit_a))
+            smu.configure_channel(ch, keep, cfg.sweep_nplc, False, zero_delays=True,
+                                  range_i=rng)
+    return rows
+
+
 PER_PIXEL = {"step": exp_step, "cap": exp_cap, "leak": exp_leak, "isrc": exp_isrc,
              "stepdir": exp_stepdir, "switch": exp_switch, "decay": exp_decay,
              "leakmatrix": exp_leakmatrix}
 ARRAY_WIDE = {"optfloor": exp_optfloor, "cluster": exp_cluster,
-              "switchmatrix": exp_switchmatrix}
+              "switchmatrix": exp_switchmatrix, "transistoriv": exp_transistoriv,
+              "droop": exp_droop}
+# Experiments that are not about capacitance: a run of only these is named _PIXELS_.
+PIXEL_TESTS = {"transistoriv", "droop"}
 ALL = [*PER_PIXEL, *ARRAY_WIDE]
 
 
@@ -2534,9 +2715,29 @@ def estimate_seconds(what, cfg, args, n_pixels):
         # plus one acquisition per probe time, for every lit state
         total += ((len(args.cluster_k) + max(args.cluster_k))
                   * max(1, len([t for t in args.cluster_probe_s if t > 0])) * per_rep)
-    if not args.pixels:
+    if "transistoriv" in what:
+        n_list = args.list_n or _count_list(args)
+        per_pt = args.tiv_settle_s + args.tiv_n_smu * 2 * (args.tiv_nplc / 50.0 + 3e-4)
+        total += n_list * len(args.tiv_bitvals) * len(args.tiv_volts) * per_pt
+    if "droop" in what:
+        x1, y1, x2, y2 = args.droop_roi or (0, 0, 0, 0)
+        npx = (abs(x2 - x1) + 1) * (abs(y2 - y1) + 1)
+        n_steps = len(_droop_counts(npx, args))          # if every pixel were alive
+        per_step = (args.droop_settle_s + args.droop_n_smu * 2 * (args.droop_nplc / 50.0)
+                    + 0.01)
+        total += npx * 0.05 + (len(args.droop_volts) * len(args.droop_orders) * n_steps
+                               * per_step)
+    if not args.pixels and set(what) - PIXEL_TESTS - set(ARRAY_WIDE):
         total += len(args.quadrants) * args.quadrant_window ** 2 * 0.21
     return total
+
+
+def _count_list(args):
+    from measure_iqe.config import read_pixel_list
+    try:
+        return len(read_pixel_list(args.pixel_list)) if args.pixel_list else 0
+    except (OSError, ValueError):
+        return 0
 
 
 def build_parser():
@@ -2864,6 +3065,49 @@ def build_parser():
                     help="cluster: PM400 readings per acquisition")
     ap.add_argument("--cluster-n-smu", type=int, default=16,
                     help="cluster: SMU readings per acquisition")
+    ap.add_argument("--pixel-list", default=None, metavar="CSV",
+                    help="transistoriv: the pixels to measure, any CSV with X/Y or "
+                         "pixel_x/pixel_y columns, e.g. REPORT_assets/pixelclassification/"
+                         "fastscan/short.csv")
+    ap.add_argument("--list-n", type=int, default=0,
+                    help="take only this many pixels from --pixel-list (0 = all)")
+    ap.add_argument("--list-order", choices=("file", "random"), default="file",
+                    help="file: top to bottom as listed; random: shuffled with --list-seed")
+    ap.add_argument("--list-seed", type=int, default=0)
+    ap.add_argument("--tiv-bitvals", nargs="+", type=int, default=[0, 1, 2, 4, 8, 15],
+                    help="transistoriv: bitvals to sweep. 1, 2, 4, 8 are the four drive "
+                         "transistors alone, 15 all of them, 0 none (the leakage)")
+    ap.add_argument("--tiv-volts", nargs="+", type=float,
+                    default=[round(-0.1 * k, 2) for k in range(33)],
+                    help="transistoriv: biases, swept from 0 V down (default 0 to -3.2 V "
+                         "in 0.1 V)")
+    ap.add_argument("--tiv-limit", type=float, default=1e-3,
+                    help="transistoriv: ch B limit (A). One pixel's drivers give ~120 uA")
+    ap.add_argument("--tiv-nplc", type=float, default=1.0)
+    ap.add_argument("--tiv-n-smu", type=int, default=2, help="transistoriv: SMU reads per point")
+    ap.add_argument("--tiv-settle-s", type=float, default=0.02,
+                    help="transistoriv: wait after each bias step")
+    ap.add_argument("--droop-roi", nargs=4, type=int, default=None, metavar=("X1", "Y1", "X2", "Y2"),
+                    help="droop: the ROI whose alive pixels are lit 1, 2, 3, ... at once. "
+                         "Must stay inside one quadrant")
+    ap.add_argument("--droop-volts", nargs="+", type=float, default=[-3.2],
+                    help="droop: biases (V), one full series each")
+    ap.add_argument("--droop-orders", nargs="+", choices=("random", "patch"),
+                    default=["random", "patch"],
+                    help="droop: random spreads the lit pixels over the ROI; patch grows "
+                         "a disc from the ROI centre")
+    ap.add_argument("--droop-limit", type=float, default=1.0,
+                    help="droop: ch A and ch B current limit (A); a series stops there")
+    ap.add_argument("--droop-step", type=int, default=1,
+                    help="droop: add this many pixels per step (1 = every count)")
+    ap.add_argument("--droop-max", type=int, default=0,
+                    help="droop: stop at this many lit pixels (0 = all alive)")
+    ap.add_argument("--droop-settle-s", type=float, default=0.1,
+                    help="droop: wait after each frame change")
+    ap.add_argument("--droop-nplc", type=float, default=1.0)
+    ap.add_argument("--droop-n-smu", type=int, default=2)
+    ap.add_argument("--droop-n-pm", type=int, default=3)
+    ap.add_argument("--droop-seed", type=int, default=0, help="droop: the random order's seed")
     return ap
 
 
@@ -2902,9 +3146,11 @@ def main(argv=None):
         slug = "SIMULATED_" + slug
     # The experiments that ran, after CAPACITANCE: <stamp>_<sample>_CAPACITANCE_Switch,
     # ..._CAPACITANCE_Cap_Step. The folder says what is inside without opening it.
-    out_dir = root / (f"{datetime.datetime.now():%y%m%d-%H%M}_{slug}_CAPACITANCE_"
+    kind = "PIXELS" if set(what) <= PIXEL_TESTS else "CAPACITANCE"
+    out_dir = root / (f"{datetime.datetime.now():%y%m%d-%H%M}_{slug}_{kind}_"
                       + "_".join(w.capitalize() for w in what))
     out_dir.mkdir(parents=True, exist_ok=True)
+    args.out_dir = out_dir           # experiments that flush as they go write here
     log(f"Output: {out_dir}")
     (out_dir / "run_config.json").write_text(
         json.dumps({"config": cfg.to_dict(),
