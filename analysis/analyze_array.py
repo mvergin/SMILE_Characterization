@@ -3853,6 +3853,180 @@ def _quadrant_col(df):
     return q.map({0: "TL", 1: "TR", 2: "BL", 3: "BR"})
 
 
+# ---- fast-scan pixel classes --------------------------------------------------------
+I_SHORT_A = 100e-6     # dark and above this: a short. One pixel's drivers give ~120 uA.
+I_MAX_A = 120e-6       # above this a pixel draws more than its own drivers can deliver
+I_OPEN_A = 1e-6        # dark and below this: open. Leakage alone is 0.12-0.5 uA.
+TYPICAL_MAD = 1.0      # typical: optical power within this many MAD of the median
+NEIGHBOUR_X = 1.5      # neighbour lit: this many times the median power, typical EQE.
+# One MAD above the median would hold ~20 % of the lit pixels of 261022-0037 (median
+# 38.9 nW, MAD 7.4 nW); a pixel lighting a second LED emits ~2x.
+EQE_MAD = 2.0          # "comparable EQE": within this many MAD of the median P/I
+# Defect groups are multiples of the median, not MADs: a MAD band is the normal spread.
+# 261022-0037, lit pixels: P is a bell from 0.7 to 1.4x the median plus a FLAT tail from
+# 0 to ~0.6x (17 393 pixels below 0.5x) whose P/I median is 0.98x typical -- dim but
+# efficient, the high-resistance-bond signature. P/I is a bell from 0.75 to 1.2x with a
+# thin tail below 0.6x.
+HIGHR_X = 0.5          # high resistance: lit, below this times the median power
+LOW_EQE_X = 0.6        # low EQE: P/I below this times the median
+FLOOR_MAD = 5.0        # noise floor: median + this many MAD of the clearly dark pixels
+PIXEL_CLASSES = {      # name: (colour, rule). Priority order: first match is primary.
+    "short": ("tab:red", "dark, I > 100 uA"),
+    "open": ("0.25", "dark, I < 1 uA"),
+    "dark_conducting": ("tab:brown", "dark, 1 uA <= I <= 100 uA"),
+    "overcurrent": ("tab:pink", "I > 120 uA, lit or not: more than one pixel's drivers"),
+    "low_eqe": ("tab:purple", "lit, P/I < 0.6x median: current without light"),
+    "neighbour_on": ("tab:orange", "P >= 1.5x median with P/I within 2 MAD"),
+    "high_resistance": ("tab:cyan", "lit, P < 0.5x median with P/I within 2 MAD"),
+    "typical": ("tab:green", "P within median +- 1 MAD"),
+    "other": ("tab:olive", "lit, none of the above: the normal spread outside 1 MAD"),
+}
+
+
+def classify_pixels(fs):
+    """Fast-scan pixel classes, one row per pixel: a primary class (the first rule that
+    matches, in PIXEL_CLASSES order) and an is_<class> flag for every rule that matches.
+    Classes overlap -- most shorts also draw more than 120 uA -- so the flags keep every
+    membership and the primary class makes the pie add up to 100 %.
+
+    Medians and MADs are per quadrant: the EQE proxy P/I differs by quadrant (light
+    collection, 261022-0037), so one array-wide median would put whole quadrants into
+    the high or low groups. "Dark" is below a noise floor measured in the same scan:
+    median + FLOOR_MAD x MAD of the pixels under 1 % of the lit median.
+    """
+    d = pd.DataFrame({"X": fs["X"].astype(int).values, "Y": fs["Y"].astype(int).values,
+                      "quadrant": _quadrant_col(fs).values,
+                      "I_A": fs["NVLED_CURR_MEAN"].astype(float).abs().values,
+                      "P_W": fs["PM400_POWER_MEAN"].astype(float).abs().values})
+    p_lit = float(np.nanpercentile(d["P_W"], FASTSCAN_ALIVE_PCTL))
+    alive = d["P_W"] >= DEAD_THRESHOLD_FRAC * p_lit
+    dk = d.loc[d["P_W"] < 0.01 * d.loc[alive, "P_W"].median(), "P_W"]
+    floor = (float(dk.median() + FLOOR_MAD * 1.4826 * (dk - dk.median()).abs().median())
+             if len(dk) >= 10 else 0.01 * p_lit)
+    # P/I on the LED current: the quadrant's leakage taken out. An open pixel draws
+    # exactly that leakage (0.12-0.2 uA per quadrant in 261022-0037), so the median open
+    # pixel of the quadrant is its leakage. Without it the dimmest lit pixels, where the
+    # leakage is half the current, all read as low EQE.
+    opn = d[(d["P_W"] <= floor) & (d["I_A"] < I_OPEN_A)]
+    leak = opn.groupby("quadrant")["I_A"].median()
+    d["I_leak_A"] = d["quadrant"].map(leak).fillna(opn["I_A"].median() if len(opn) else 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        d["eqe_proxy_W_per_A"] = d["P_W"] / (d["I_A"] - d["I_leak_A"]).clip(lower=1e-9)
+    # per-quadrant centre and spread of the alive population; global for a thin quadrant
+    ref = d[alive]
+    glob_ = {c: (ref[c].median(), 1.4826 * (ref[c] - ref[c].median()).abs().median())
+             for c in ("P_W", "eqe_proxy_W_per_A")}
+    for c in ("P_W", "eqe_proxy_W_per_A"):
+        med = d["quadrant"].map(ref.groupby("quadrant")[c].median())
+        mad = d["quadrant"].map(ref.groupby("quadrant")[c].apply(
+            lambda s: 1.4826 * (s - s.median()).abs().median()))
+        thin = d["quadrant"].map(ref.groupby("quadrant").size()).fillna(0) < 20
+        d[f"{c}_med"] = med.where(~thin, glob_[c][0]).fillna(glob_[c][0])
+        d[f"{c}_mad"] = mad.where(~thin, glob_[c][1]).fillna(glob_[c][1])
+    P, I, E = d["P_W"], d["I_A"], d["eqe_proxy_W_per_A"]
+    pm, pmad, em, emad = (d["P_W_med"], d["P_W_mad"], d["eqe_proxy_W_per_A_med"],
+                          d["eqe_proxy_W_per_A_mad"])
+    dark, lit = P <= floor, P > floor
+    eqe_ok = (E - em).abs() <= EQE_MAD * emad
+    rules = {
+        "short": dark & (I > I_SHORT_A),
+        "open": dark & (I < I_OPEN_A),
+        "dark_conducting": dark & (I >= I_OPEN_A) & (I <= I_SHORT_A),
+        "overcurrent": I > I_MAX_A,
+        "low_eqe": lit & (E < LOW_EQE_X * em),
+        "neighbour_on": (P >= NEIGHBOUR_X * pm) & eqe_ok,
+        "high_resistance": lit & (P < HIGHR_X * pm) & eqe_ok,
+        "typical": (P - pm).abs() <= TYPICAL_MAD * pmad,
+    }
+    d["primary"] = "other"
+    for name in reversed(list(rules)):          # the first rule in order wins
+        d.loc[rules[name], "primary"] = name
+    for name, m in rules.items():
+        d[f"is_{name}"] = m.astype(bool)
+    d["is_other"] = d["primary"] == "other"
+    d.attrs.update(floor_W=floor, p_lit_W=p_lit,
+                   v=float(fs["NVLED_V"].iloc[0]) if "NVLED_V" in fs else float("nan"))
+    return d
+
+
+def write_pixel_classes(fs, out_dir, plt, log):
+    """REPORT_assets/pixelclassification/fastscan: pixel_classes.csv (every pixel, its
+    primary class and every flag), one <class>.csv per class with every member (a pixel
+    can be in several), summary.csv with the counts and rules, and two plots."""
+    d = classify_pixels(fs)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cols = ["X", "Y", "quadrant", "I_A", "I_leak_A", "P_W", "eqe_proxy_W_per_A",
+            "primary"] + [
+        f"is_{c}" for c in PIXEL_CLASSES]
+    d[cols].to_csv(out_dir / "pixel_classes.csv", index=False)
+    rows = []
+    for name, (_, rule) in PIXEL_CLASSES.items():
+        m = d[f"is_{name}"]
+        d.loc[m, cols].to_csv(out_dir / f"{name}.csv", index=False)
+        rows.append(dict(cls=name, n_primary=int((d["primary"] == name).sum()),
+                         n_member=int(m.sum()), rule=rule))
+    summ = pd.DataFrame(rows)
+    summ["pct_primary"] = (100 * summ["n_primary"] / len(d)).round(3)
+    summ.to_csv(out_dir / "summary.csv", index=False)
+    v, floor = d.attrs["v"], d.attrs["floor_W"]
+    log(f"  pixel classes @ {v:+.3f} V (floor {floor * 1e9:.3g} nW): "
+        + ", ".join(f"{r.cls} {r.n_primary}" for r in summ.itertuples() if r.n_primary))
+
+    # 1. current vs light, each class its own colour; linear and log-log
+    from matplotlib.lines import Line2D
+    fig, ax = plt.subplots(1, 2, figsize=(15, 6))
+    pfloor = floor / 10 if floor > 0 else 1e-12
+    for a, log_ in ((ax[0], False), (ax[1], True)):
+        x = np.log10(d["I_A"].clip(lower=1e-12)) if log_ else d["I_A"] * 1e6
+        y = (np.log10(d["P_W"].clip(lower=pfloor)) if log_ else d["P_W"] * 1e9)
+        big = [c for c in PIXEL_CLASSES if (d["primary"] == c).sum() > 5000]
+        mb = d["primary"].isin(big).values
+        from matplotlib.colors import to_rgb
+        rgb = np.array([to_rgb(PIXEL_CLASSES[c][0]) for c in d["primary"]])
+        point_image(a, x.values[mb], y.values[mb], rgb[mb], alpha=0.35)
+        for c in PIXEL_CLASSES:           # the small groups on top, as markers
+            if c in big:
+                continue
+            m = (d["primary"] == c).values
+            if m.any():
+                a.scatter(x.values[m], y.values[m], s=6, color=PIXEL_CLASSES[c][0], lw=0)
+        # every point inside, not just the image's: the shorts sit far right of it
+        for lim, v_ in ((a.set_xlim, x), (a.set_ylim, y)):
+            lo, hi = float(np.nanmin(v_)), float(np.nanmax(v_))
+            pad = 0.04 * (hi - lo or 1.0)
+            lim(lo - pad, hi + pad)
+        a.set_xlabel("log10 |I_NVLED| (A)" if log_ else "|I_NVLED| (uA)")
+        a.set_ylabel(f"log10 P (W), clipped at {pfloor:.2g} W" if log_ else "P (nW)")
+        a.grid(alpha=0.3)
+    ax[0].axvline(I_SHORT_A * 1e6, color="tab:red", ls=":", lw=0.8)
+    ax[0].axvline(I_MAX_A * 1e6, color="tab:pink", ls=":", lw=0.8)
+    ax[1].axhline(np.log10(max(floor, pfloor)), color="0.4", ls=":", lw=0.8)
+    n = d["primary"].value_counts()
+    ax[1].legend([Line2D([], [], ls="", marker="o", color=PIXEL_CLASSES[c][0])
+                  for c in PIXEL_CLASSES if n.get(c, 0)],
+                 [f"{c} ({n.get(c, 0)})" for c in PIXEL_CLASSES if n.get(c, 0)],
+                 fontsize=8, loc="upper left")
+    fig.suptitle(f"Fast-scan pixel classes @ {v:+.3f} V, {len(d)} pixels (primary class; "
+                 f"dotted: 100 and 120 uA, noise floor {floor * 1e9:.3g} nW)", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out_dir / "classes_IP.png", dpi=150)
+    plt.close(fig)
+
+    # 2. pie of the primary classes
+    s = summ[summ["n_primary"] > 0]
+    fig, ax = plt.subplots(figsize=(8, 6.5))
+    ax.pie(s["n_primary"], colors=[PIXEL_CLASSES[c][0] for c in s["cls"]],
+           startangle=90, counterclock=False,
+           wedgeprops=dict(linewidth=0.8, edgecolor="white"))
+    ax.legend([f"{r.cls}: {r.n_primary} ({r.pct_primary:.2f} %)" for r in s.itertuples()],
+              loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=9)
+    ax.set_title(f"Fast-scan pixel classes @ {v:+.3f} V -- {len(d)} pixels, primary class",
+                 fontsize=10)
+    fig.savefig(out_dir / "classes_pie.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return d
+
+
 def plot_settling_traces(sweep_dir, out, plt):
     """The dwell transients the sweep records in settling_traces.npz, one curve a bias.
 
@@ -4510,6 +4684,10 @@ def analyse_run(run_dir, log):
         except Exception as e:
             log(f"  (skipped the per-bias fast-scan comparison: {e})")
     cls = classify_fastscan(fs)
+    try:
+        write_pixel_classes(fs, out / "pixelclassification" / "fastscan", plt, log)
+    except Exception as e:
+        log(f"  (skipped the pixel classes: {e})")
     plot_fastscan_overview(fs, cls, out / "fastscan_overview.png", plt)
     for fsv in [fs, *fs_extra.values()]:
         try:

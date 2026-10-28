@@ -361,6 +361,28 @@ def test_forward_voltage_interpolates_in_log_j():
     assert (1, 0) not in vf.index
 
 
+def test_pixel_classes_one_of_each():
+    rng = np.random.default_rng(0)
+    n = 400                                    # typical: 40 nW at 24 uA, 5 % spread
+    P = list(40e-9 * (1 + 0.05 * rng.standard_normal(n)))
+    I = list(24e-6 * (1 + 0.05 * rng.standard_normal(n)))
+    P += [1e-12] * 40; I += [0.2e-6] * 40      # open: the leakage only
+    special = {"short": (1e-12, 125e-6), "dark_conducting": (1e-12, 30e-6),
+               "low_eqe": (10e-9, 24e-6), "neighbour_on": (80e-9, 48e-6),
+               "high_resistance": (8e-9, 4.8e-6)}
+    for p, i in special.values():
+        P.append(p); I.append(i)
+    fs = pd.DataFrame(dict(X=np.arange(len(P)) % 256, Y=np.arange(len(P)) // 256,
+                           NVLED_V=-1.35, PM400_POWER_MEAN=P, NVLED_CURR_MEAN=-np.array(I)))
+    d = aa.classify_pixels(fs)
+    got = d["primary"].values
+    for k, name in enumerate(special):
+        assert got[n + 40 + k] == name, (name, got[n + 40 + k])
+    assert (got[n:n + 40] == "open").all()
+    assert d.iloc[n + 40]["is_overcurrent"]    # the short also draws > 120 uA
+    assert (got[:n] == "typical").mean() > 0.5
+
+
 def test_block_stats_match_the_per_block_loop():
     rng = np.random.default_rng(1)
     X = rng.integers(3, 70, 400)

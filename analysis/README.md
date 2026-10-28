@@ -97,6 +97,28 @@ refits all of them.
 | `forward_leakage_*`, `forward_leakage_v` | the reference current (pixel addressed, off) at the sweep bias nearest −1.0 V |
 
 `*` is `mean`, `median`, `std` (sample SD of the burst) and `mad` (1.4826 × MAD).
+`REPORT_assets/pixelclassification/fastscan/` sorts every fast-scan pixel (first bias)
+into groups:
+
+| group | rule |
+|---|---|
+| `short` | dark, I > 100 µA |
+| `open` | dark, I < 1 µA (leakage only) |
+| `dark_conducting` | dark, 1–100 µA |
+| `overcurrent` | I > 120 µA, lit or not: more than one pixel's drivers deliver |
+| `low_eqe` | lit, P/I < 0.6 × median |
+| `neighbour_on` | P ≥ 1.5 × median, P/I within 2 MAD |
+| `high_resistance` | lit, P < 0.5 × median, P/I within 2 MAD |
+| `typical` | P within median ± 1 MAD |
+| `other` | lit, none of the above |
+
+"Dark" is below a noise floor from the same scan. Medians are per quadrant. P/I uses the
+current minus the quadrant's leakage (the median open pixel). Groups overlap, so
+`pixel_classes.csv` gives every pixel a `primary` group (the first match, in table order)
+and an `is_<group>` flag for each. `<group>.csv` lists every member, `summary.csv` the
+counts. `classes_IP.png` is current against light by group, `classes_pie.png` the primary
+groups.
+
 `pixel_summary_interpolated.csv` has the same columns at each pixel's FITTED peak
 (`j_at_peak` from the ABC fit) instead of its best sweep point. Each burst quantity is
 interpolated between the two reliable points that bracket it, log-log in J. `v_at_peak`
