@@ -2473,16 +2473,25 @@ def exp_transistoriv(pm, smu, smile, cfg, args, log):
     if min(volts) < -cfg.nvled_v_limit:
         raise SystemExit(f"--tiv-volts reaches {min(volts):g} V, past nvled_v_limit "
                          f"{cfg.nvled_v_limit:g} V")
+    # Autozero ONCE per pixel, not AUTO: AUTO takes a reference and a zero reading with
+    # every measurement, ~3x the integration, and a uA current through a short does not
+    # drift over one pixel's 200 points. ch B only by default: in a short ch A carries
+    # the same current, and reading it doubled the time.
     tcfg = dataclasses.replace(cfg, nvled_compliance=args.tiv_limit, highc_b=False,
-                               nvled_range_i=None)
+                               nvled_range_i=None, sweep_autozero=args.tiv_autozero)
     m.configure_voltage_source_b(smu, tcfg, log)
     m.set_nplc(smu, args.tiv_nplc)
     log(f"  transistor IV: bitvals {args.tiv_bitvals}, {volts[0]:g} -> {volts[-1]:g} V in "
-        f"{len(volts)} points, limit {args.tiv_limit:g} A, NPLC {args.tiv_nplc:g}")
+        f"{len(volts)} points, limit {args.tiv_limit:g} A, NPLC {args.tiv_nplc:g}, "
+        f"autozero {args.tiv_autozero}, {'ch A and B' if args.tiv_channels == 2 else 'ch B'}"
+        f", PM400 read at every point")
     rows = []
     try:
         for k, (x, y) in enumerate(pixels, 1):
             here = []
+            t_px = time.perf_counter()
+            if args.tiv_autozero == "ONCE" and hasattr(smu, "inst"):
+                smu.inst.write("smub.measure.autozero = smub.AUTOZERO_ONCE")
             for bv in args.tiv_bitvals:
                 smu.set_voltage("b", 0.0)
                 smile.blank_frame()
@@ -2491,14 +2500,15 @@ def exp_transistoriv(pm, smu, smile, cfg, args, log):
                     smu.set_voltage("b", float(v))
                     time.sleep(args.tiv_settle_s)
                     p, ps, iv, ivs, inv, invs, _, _ = m.acquire_point(
-                        pm, smu, args.tiv_n_smu, 1)
+                        pm, smu, args.tiv_n_smu, 1, channels=args.tiv_channels)
                     here.append(dict(pixel_x=x, pixel_y=y, quadrant=_quadrant_of(x, y),
                                      bitval=int(bv), v=float(v), i_b=inv, i_b_sem=invs,
                                      i_a=iv, i_a_sem=ivs, p_w=p,
                                      at_limit=int(abs(inv) >= 0.98 * args.tiv_limit)))
             rows.extend(here)
             top = {r["bitval"]: abs(r["i_b"]) for r in here if r["v"] == volts[-1]}
-            log(f"    [{k}/{len(pixels)}] ({x},{y}) at {volts[-1]:g} V: "
+            log(f"    [{k}/{len(pixels)}] ({x},{y}) {time.perf_counter() - t_px:.1f} s, "
+                f"at {volts[-1]:g} V: "
                 + ", ".join(f"b{b} {i * 1e6:.1f} uA" for b, i in top.items()))
             write_csv(args.out_dir, "transistoriv", rows)      # a crash keeps this pixel
     finally:
@@ -2717,7 +2727,10 @@ def estimate_seconds(what, cfg, args, n_pixels):
                   * max(1, len([t for t in args.cluster_probe_s if t > 0])) * per_rep)
     if "transistoriv" in what:
         n_list = args.list_n or _count_list(args)
-        per_pt = args.tiv_settle_s + args.tiv_n_smu * 2 * (args.tiv_nplc / 50.0 + 3e-4)
+        az = 3 if args.tiv_autozero == "AUTO" else 1
+        # + ~30 ms of USB round trips per point: the bias write, the burst, the read-back
+        per_pt = (args.tiv_settle_s + 0.03 + args.tiv_n_smu * args.tiv_channels
+                  * az * (args.tiv_nplc / 50.0 + 3e-4))
         total += n_list * len(args.tiv_bitvals) * len(args.tiv_volts) * per_pt
     if "droop" in what:
         x1, y1, x2, y2 = args.droop_roi or (0, 0, 0, 0)
@@ -3087,6 +3100,12 @@ def build_parser():
     ap.add_argument("--tiv-n-smu", type=int, default=2, help="transistoriv: SMU reads per point")
     ap.add_argument("--tiv-settle-s", type=float, default=0.02,
                     help="transistoriv: wait after each bias step")
+    ap.add_argument("--tiv-channels", type=int, choices=(1, 2), default=1,
+                    help="transistoriv: 1 reads ch B only (in a short ch A carries the "
+                         "same current), 2 reads ch A too: twice the time")
+    ap.add_argument("--tiv-autozero", choices=("ONCE", "AUTO", "OFF"), default="ONCE",
+                    help="transistoriv: ONCE zeroes at the start of every pixel. AUTO "
+                         "zeroes with every reading, ~3x the time")
     ap.add_argument("--droop-roi", nargs=4, type=int, default=None, metavar=("X1", "Y1", "X2", "Y2"),
                     help="droop: the ROI whose alive pixels are lit 1, 2, 3, ... at once. "
                          "Must stay inside one quadrant")
@@ -3180,8 +3199,11 @@ def main(argv=None):
             f"deliberately reproducing the artifact.")
     n_px = len(args.pixels) if args.pixels else args.per_quadrant * len(args.quadrants)
     est = estimate_seconds(what, cfg, args, n_px)
-    log(f"estimated {est/60:.0f} min for {', '.join(what)} on "
-        f"{n_px} pixel(s){'' if args.pixels else ' (plus the selection scan)'}")
+    if set(what) <= PIXEL_TESTS:      # their pixels come from --pixel-list / --droop-roi
+        log(f"estimated {est/60:.0f} min for {', '.join(what)}")
+    else:
+        log(f"estimated {est/60:.0f} min for {', '.join(what)} on "
+            f"{n_px} pixel(s){'' if args.pixels else ' (plus the selection scan)'}")
     pm, smu, smile = m.connect(cfg, log, simulate=args.simulate)
     collected: dict[str, list[dict]] = {name: [] for name in what}
     # try/finally alone does not park on Ctrl-Break (the console's Stop button), a closed
