@@ -20,18 +20,25 @@ from pathlib import Path
 import pandas as pd
 
 
+OLD_NAMES = {"v": "NVLED_V", "order": "ORDER", "n": "N_LIT", "i_b": "NVLED_CURR_MEAN",
+             "i_a": "VLED_CURR_MEAN", "p_w": "PM400_POWER_MEAN", "x_added": "X_ADDED",
+             "y_added": "Y_ADDED", "quadrant": "QUADRANT"}
+
+
 def main(run: Path) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    d = pd.read_csv(run / "droop.csv")
-    d["I"], d["P"] = d["i_b"].abs(), d["p_w"].abs()
-    volts = sorted(d["v"].unique())
+    # the RUN_FORMAT names, or the lowercase ones of the first runs (2026-10-28)
+    d = pd.read_csv(run / "droop.csv").rename(columns=OLD_NAMES)
+    cur = "NVLED_CURR_MEDIAN" if "NVLED_CURR_MEDIAN" in d else "NVLED_CURR_MEAN"
+    d["I"], d["P"], d["n"] = d[cur].abs(), d["PM400_POWER_MEAN"].abs(), d["N_LIT"]
+    volts = sorted(d["NVLED_V"].unique())
     style = {"random": "-", "patch": "--"}
     fig, ax = plt.subplots(len(volts), 4, figsize=(19, 4.2 * len(volts)), squeeze=False)
     for row, v in zip(ax, volts):
-        for o, g in d[d["v"] == v].groupby("order"):
+        for o, g in d[d["NVLED_V"] == v].groupby("ORDER"):
             g = g.sort_values("n")
             i1, p1 = g["I"].iloc[0] / g["n"].iloc[0], g["P"].iloc[0] / g["n"].iloc[0]
             ls = style.get(o, ":")

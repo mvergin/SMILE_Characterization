@@ -691,8 +691,12 @@ def test_transistoriv_and_droop_run_end_to_end_on_the_sim():
         run = next(pathlib.Path(tmp).glob("*_PIXELS_Transistoriv"))
         rows = list(csv.DictReader((run / "transistoriv.csv").open()))
         assert len(rows) == 2 * 6 * 3, len(rows)
-        assert [float(r["v"]) for r in rows[:3]] == [0.0, -1.0, -3.2]
-        assert {(r["pixel_x"], r["pixel_y"]) for r in rows} == {("3", "4"), ("300", "40")}
+        assert [float(r["NVLED_V"]) for r in rows[:3]] == [0.0, -1.0, -3.2]
+        assert {(r["X"], r["Y"]) for r in rows} == {("3", "4"), ("300", "40")}
+        # RUN_FORMAT names, full burst stats, and no ch A columns when ch A is not read
+        assert {"BITVAL", "NVLED_CURR_MEDIAN", "PM400_POWER_MEAN",
+                "NVLED_AT_COMPLIANCE"} <= set(rows[0]), list(rows[0])
+        assert not any(k.startswith("VLED_CURR") for k in rows[0]), list(rows[0])
 
         assert main(["--simulate", "--what", "droop", "--droop-roi", "0", "0", "3", "3",
                      "--droop-volts", "-2", "--droop-settle-s", "0", "--droop-step", "2",
@@ -700,7 +704,7 @@ def test_transistoriv_and_droop_run_end_to_end_on_the_sim():
         run = next(pathlib.Path(tmp).glob("*_PIXELS_Droop"))
         rows = list(csv.DictReader((run / "droop.csv").open()))
         for o in ("random", "patch"):
-            n = [int(r["n"]) for r in rows if r["order"] == o]
+            n = [int(r["N_LIT"]) for r in rows if r["ORDER"] == o]
             assert n[0] == 1 and n == sorted(n) and n[1] - n[0] == 2, (o, n)
         assert (run / "FastScan").is_dir()
         try:

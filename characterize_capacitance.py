@@ -2499,14 +2499,19 @@ def exp_transistoriv(pm, smu, smile, cfg, args, log):
                 for v in volts:
                     smu.set_voltage("b", float(v))
                     time.sleep(args.tiv_settle_s)
-                    p, ps, iv, ivs, inv, invs, _, _ = m.acquire_point(
-                        pm, smu, args.tiv_n_smu, 1, channels=args.tiv_channels)
-                    here.append(dict(pixel_x=x, pixel_y=y, quadrant=_quadrant_of(x, y),
-                                     bitval=int(bv), v=float(v), i_b=inv, i_b_sem=invs,
-                                     i_a=iv, i_a_sem=ivs, p_w=p,
-                                     at_limit=int(abs(inv) >= 0.98 * args.tiv_limit)))
+                    pt, raw = m.acquire_point(pm, smu, args.tiv_n_smu, 1, return_raw=True,
+                                              channels=args.tiv_channels)
+                    here.append(dict(
+                        X=x, Y=y, QUADRANT=_quadrant_of(x, y), BITVAL=int(bv),
+                        NVLED_V=float(v), **m.stat_columns("NVLED_CURR", raw["nvled"]),
+                        **(m.stat_columns("VLED_CURR", raw["vled"])
+                           if args.tiv_channels == 2 else {}),
+                        **m.stat_columns("PM400_POWER", raw["pm"]),
+                        NVLED_LIMIT_A=args.tiv_limit,
+                        NVLED_AT_COMPLIANCE=int(abs(pt[4]) >= 0.98 * args.tiv_limit)))
             rows.extend(here)
-            top = {r["bitval"]: abs(r["i_b"]) for r in here if r["v"] == volts[-1]}
+            top = {r["BITVAL"]: abs(r["NVLED_CURR_MEDIAN"]) for r in here
+                   if r["NVLED_V"] == volts[-1]}
             log(f"    [{k}/{len(pixels)}] ({x},{y}) {time.perf_counter() - t_px:.1f} s, "
                 f"at {volts[-1]:g} V: "
                 + ", ".join(f"b{b} {i * 1e6:.1f} uA" for b, i in top.items()))
@@ -2587,29 +2592,34 @@ def exp_droop(pm, smu, smile, cfg, args, log):
                     smile.set_pixels(order[:n], 15)
                     time.sleep(args.droop_settle_s)
                     if ladder:                 # range for N x the last per-pixel power
-                        per = (abs(rows[-1]["p_w"]) / rows[-1]["n"]
-                               if rows and rows[-1]["v"] == v and rows[-1]["order"] == oname
+                        last = rows[-1] if rows else {}
+                        per = (abs(last["PM400_POWER_MEAN"]) / last["N_LIT"]
+                               if last.get("NVLED_V") == v and last.get("ORDER") == oname
                                else p1)
                         want = m.acquire.pick_pm_range(n * per, cfg, ladder)
                         if rng is None or want > rng:
                             rng = want
                             if m.acquire.set_pm_range(pm, rng)[1]:
                                 m.acquire.flush_pm_after_range(pm, smu, 1, 1, cfg)
-                    p, ps, ia, ias, ib, ibs, _, _ = m.acquire_point(
-                        pm, smu, args.droop_n_smu, args.droop_n_pm)
-                    while ladder and m.acquire.pm_over(p, rng, cfg):
+                    pt, raw = m.acquire_point(pm, smu, args.droop_n_smu, args.droop_n_pm,
+                                              return_raw=True)
+                    while ladder and m.acquire.pm_over(pt[0], rng, cfg):
                         up = m.acquire.pm_range_up(pm, smu, rng, 1, 1, cfg, log)
                         if up == rng:
                             break
                         rng = up
-                        p, ps, ia, ias, ib, ibs, _, _ = m.acquire_point(
-                            pm, smu, args.droop_n_smu, args.droop_n_pm)
+                        pt, raw = m.acquire_point(pm, smu, args.droop_n_smu,
+                                                  args.droop_n_pm, return_raw=True)
+                    p, ib = pt[0], pt[4]
                     lim = abs(ib) >= 0.98 * args.droop_limit
-                    rows.append(dict(v=float(v), order=oname, n=n,
-                                     x_added=order[n - 1][0], y_added=order[n - 1][1],
-                                     i_b=ib, i_b_sem=ibs, i_a=ia, i_a_sem=ias, p_w=p,
-                                     p_w_sem=ps, pm_range_w=rng if rng else float("nan"),
-                                     at_limit=int(lim), quadrant=next(iter(quads))))
+                    rows.append(dict(
+                        NVLED_V=float(v), ORDER=oname, N_LIT=n, QUADRANT=next(iter(quads)),
+                        X_ADDED=order[n - 1][0], Y_ADDED=order[n - 1][1],
+                        **m.stat_columns("NVLED_CURR", raw["nvled"]),
+                        **m.stat_columns("VLED_CURR", raw["vled"]),
+                        **m.stat_columns("PM400_POWER", raw["pm"]),
+                        PM_RANGE_W=rng if rng else float("nan"),
+                        NVLED_LIMIT_A=args.droop_limit, NVLED_AT_COMPLIANCE=int(lim)))
                     if n in (1, 2, 5, 10) or n % 100 == 0 or n == counts[-1] or lim:
                         log(f"      N={n:>6}: I {abs(ib) * 1e3:9.4f} mA "
                             f"({abs(ib) / n * 1e6:7.2f} uA/px), P {abs(p) * 1e9:10.2f} nW "
