@@ -111,15 +111,15 @@ refits all of them.
 | `forward_leakage_*`, `forward_leakage_v` | the reference current (pixel addressed, off) at the sweep bias nearest −1.0 V |
 
 `*` is `mean`, `median`, `std` (sample SD of the burst) and `mad` (1.4826 × MAD).
-`REPORT_assets/pixelclassification/fastscan/` sorts every fast-scan pixel (first bias)
-into groups:
+`REPORT_assets/pixelclassification/fastscan/<bias>/` (e.g. `m1p35V`) sorts every fast-scan
+pixel into groups, separately at every fast-scan bias:
 
 | group | rule |
 |---|---|
 | `short` | dark, I > 100 µA |
 | `open` | dark, I < 1 µA (leakage only) |
 | `dark_conducting` | dark, 1–100 µA |
-| `overcurrent` | I > 120 µA, lit or not: more than one pixel's drivers deliver |
+| `overcurrent` | I > max(120 µA, 1.2 × the shorts' median current at that bias), lit or not |
 | `low_eqe` | lit, P/I < 0.6 × median |
 | `neighbour_on` | P ≥ 1.5 × median, P/I within 2 MAD |
 | `high_resistance` | lit, P < 0.5 × median, P/I within 2 MAD |
@@ -131,7 +131,8 @@ current minus the quadrant's leakage (the median open pixel). Groups overlap, so
 `pixel_classes.csv` gives every pixel a `primary` group (the first match, in table order)
 and an `is_<group>` flag for each. `<group>.csv` lists every member, `summary.csv` the
 counts. `classes_IP.png` is current against light by group, `classes_pie.png` the primary
-groups. Any of these CSVs works as a `pixel_list` for `measure_iqe` and for the
+groups. With several biases, `class_transitions_<first>_to_<other>.csv` counts how
+the pixels' primary group at the first bias maps to the group at each other bias. Any of these CSVs works as a `pixel_list` for `measure_iqe` and for the
 `transistoriv` experiment.
 
 `pixel_summary_interpolated.csv` has the same columns at each pixel's FITTED peak

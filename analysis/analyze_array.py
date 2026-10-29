@@ -3855,7 +3855,11 @@ def _quadrant_col(df):
 
 # ---- fast-scan pixel classes --------------------------------------------------------
 I_SHORT_A = 100e-6     # dark and above this: a short. One pixel's drivers give ~120 uA.
-I_MAX_A = 120e-6       # above this a pixel draws more than its own drivers can deliver
+I_MAX_A = 120e-6       # overcurrent floor: above max(this, SHORT_X x the shorts' median
+SHORT_X = 1.2          # current at the same bias) a pixel draws more than its drivers
+# deliver. A short IS the drivers with no LED, so its current is what they give at that
+# bias: 112-128 uA at -1.35 V in 261022-0037. A fixed 120 uA would flag healthy pixels
+# at -2.6 V and beyond, where the median pixel itself draws ~117 uA.
 I_OPEN_A = 1e-6        # dark and below this: open. Leakage alone is 0.12-0.5 uA.
 TYPICAL_MAD = 1.0      # typical: optical power within this many MAD of the median
 NEIGHBOUR_X = 1.5      # neighbour lit: this many times the median power, typical EQE.
@@ -3874,7 +3878,7 @@ PIXEL_CLASSES = {      # name: (colour, rule). Priority order: first match is pr
     "short": ("tab:red", "dark, I > 100 uA"),
     "open": ("0.25", "dark, I < 1 uA"),
     "dark_conducting": ("tab:brown", "dark, 1 uA <= I <= 100 uA"),
-    "overcurrent": ("tab:pink", "I > 120 uA, lit or not: more than one pixel's drivers"),
+    "overcurrent": ("tab:pink", "I > max(120 uA, 1.2x the shorts' median), lit or not"),
     "low_eqe": ("tab:purple", "lit, P/I < 0.6x median: current without light"),
     "neighbour_on": ("tab:orange", "P >= 1.5x median with P/I within 2 MAD"),
     "high_resistance": ("tab:cyan", "lit, P < 0.5x median with P/I within 2 MAD"),
@@ -3928,11 +3932,14 @@ def classify_pixels(fs):
                           d["eqe_proxy_W_per_A_mad"])
     dark, lit = P <= floor, P > floor
     eqe_ok = (E - em).abs() <= EQE_MAD * emad
+    shorts = dark & (I > I_SHORT_A)
+    i_max = max(I_MAX_A, SHORT_X * float(I[shorts].median())) if shorts.sum() >= 10 \
+        else I_MAX_A
     rules = {
-        "short": dark & (I > I_SHORT_A),
+        "short": shorts,
         "open": dark & (I < I_OPEN_A),
         "dark_conducting": dark & (I >= I_OPEN_A) & (I <= I_SHORT_A),
-        "overcurrent": I > I_MAX_A,
+        "overcurrent": I > i_max,
         "low_eqe": lit & (E < LOW_EQE_X * em),
         "neighbour_on": (P >= NEIGHBOUR_X * pm) & eqe_ok,
         "high_resistance": lit & (P < HIGHR_X * pm) & eqe_ok,
@@ -3944,15 +3951,33 @@ def classify_pixels(fs):
     for name, m in rules.items():
         d[f"is_{name}"] = m.astype(bool)
     d["is_other"] = d["primary"] == "other"
-    d.attrs.update(floor_W=floor, p_lit_W=p_lit,
+    d.attrs.update(floor_W=floor, p_lit_W=p_lit, i_max_A=i_max,
                    v=float(fs["NVLED_V"].iloc[0]) if "NVLED_V" in fs else float("nan"))
     return d
 
 
+def write_pixel_classes_all(by_bias, base, plt, log):
+    """Classes at every fast-scan bias, each in base/<bias tag>/, and with several
+    biases class_transitions_<tag>.csv in base: the primary class at the first bias
+    against the class at each other one (rows: first bias, columns: the other)."""
+    first = None
+    for v, fsv in by_bias.items():
+        d = write_pixel_classes(fsv, base / _bias_tag(v), plt, log)
+        if first is None:
+            first = (v, d.set_index(["X", "Y"])["primary"])
+            continue
+        both = pd.concat([first[1].rename(f"{first[0]:+.3f} V"),
+                          d.set_index(["X", "Y"])["primary"].rename(f"{v:+.3f} V")],
+                         axis=1, join="inner")
+        pd.crosstab(both.iloc[:, 0], both.iloc[:, 1], margins=True).to_csv(
+            base / f"class_transitions_{_bias_tag(first[0])}_to_{_bias_tag(v)}.csv")
+
+
 def write_pixel_classes(fs, out_dir, plt, log):
-    """REPORT_assets/pixelclassification/fastscan: pixel_classes.csv (every pixel, its
-    primary class and every flag), one <class>.csv per class with every member (a pixel
-    can be in several), summary.csv with the counts and rules, and two plots."""
+    """REPORT_assets/pixelclassification/fastscan/<bias>: pixel_classes.csv (every
+    pixel, its primary class and every flag), one <class>.csv per class with every
+    member (a pixel can be in several), summary.csv with the counts and rules, and two
+    plots."""
     d = classify_pixels(fs)
     out_dir.mkdir(parents=True, exist_ok=True)
     cols = ["X", "Y", "quadrant", "I_A", "I_leak_A", "P_W", "eqe_proxy_W_per_A",
@@ -3969,7 +3994,8 @@ def write_pixel_classes(fs, out_dir, plt, log):
     summ["pct_primary"] = (100 * summ["n_primary"] / len(d)).round(3)
     summ.to_csv(out_dir / "summary.csv", index=False)
     v, floor = d.attrs["v"], d.attrs["floor_W"]
-    log(f"  pixel classes @ {v:+.3f} V (floor {floor * 1e9:.3g} nW): "
+    log(f"  pixel classes @ {v:+.3f} V (floor {floor * 1e9:.3g} nW, overcurrent above "
+        f"{d.attrs['i_max_A'] * 1e6:.0f} uA): "
         + ", ".join(f"{r.cls} {r.n_primary}" for r in summ.itertuples() if r.n_primary))
 
     # 1. current vs light, each class its own colour; linear and log-log
@@ -3999,7 +4025,7 @@ def write_pixel_classes(fs, out_dir, plt, log):
         a.set_ylabel(f"log10 P (W), clipped at {pfloor:.2g} W" if log_ else "P (nW)")
         a.grid(alpha=0.3)
     ax[0].axvline(I_SHORT_A * 1e6, color="tab:red", ls=":", lw=0.8)
-    ax[0].axvline(I_MAX_A * 1e6, color="tab:pink", ls=":", lw=0.8)
+    ax[0].axvline(d.attrs["i_max_A"] * 1e6, color="tab:pink", ls=":", lw=0.8)
     ax[1].axhline(np.log10(max(floor, pfloor)), color="0.4", ls=":", lw=0.8)
     n = d["primary"].value_counts()
     ax[1].legend([Line2D([], [], ls="", marker="o", color=PIXEL_CLASSES[c][0])
@@ -4007,7 +4033,8 @@ def write_pixel_classes(fs, out_dir, plt, log):
                  [f"{c} ({n.get(c, 0)})" for c in PIXEL_CLASSES if n.get(c, 0)],
                  fontsize=8, loc="upper left")
     fig.suptitle(f"Fast-scan pixel classes @ {v:+.3f} V, {len(d)} pixels (primary class; "
-                 f"dotted: 100 and 120 uA, noise floor {floor * 1e9:.3g} nW)", fontsize=10)
+                 f"dotted: 100 and {d.attrs['i_max_A'] * 1e6:.0f} uA, noise floor "
+                 f"{floor * 1e9:.3g} nW)", fontsize=10)
     fig.tight_layout()
     fig.savefig(out_dir / "classes_IP.png", dpi=150)
     plt.close(fig)
@@ -4685,7 +4712,8 @@ def analyse_run(run_dir, log):
             log(f"  (skipped the per-bias fast-scan comparison: {e})")
     cls = classify_fastscan(fs)
     try:
-        write_pixel_classes(fs, out / "pixelclassification" / "fastscan", plt, log)
+        write_pixel_classes_all({float(fs["NVLED_V"].iloc[0]): fs, **fs_extra},
+                                out / "pixelclassification" / "fastscan", plt, log)
     except Exception as e:
         log(f"  (skipped the pixel classes: {e})")
     plot_fastscan_overview(fs, cls, out / "fastscan_overview.png", plt)
