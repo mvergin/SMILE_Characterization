@@ -63,11 +63,10 @@ WAVELENGTH_NM = 440.0
 # ABC fit uses the degeneracy-free (beta, J0, eta) parametrization (see fit_abc);
 # peak IQE = beta/(beta+2). No raw A/B/C bounds are needed.
 MIN_POINTS_FOR_FIT = 6
-MAX_PIXEL_FITS = 5000  # cap per-pixel ABC fits (runtime guard). ~205 ms/fit, so a
-# block-stratified sweep (~1.5k pixels) fits fully in ~5 min —
-# trivial next to a multi-hour acquisition, and it gives a REAL
-# per-pixel peak IQE + R² for every pixel (no proxy, no aliasing
-# from a strided subset). Only a full 65k raster sweep hits the cap.
+MAX_PIXEL_FITS = 0  # cap on the per-pixel ABC fits; 0 = every pixel. It was 5000 at
+# ~205 ms a fit, and the 113 568-pixel sweep 261026-0813 then fitted 4909 targets and
+# reported "4476 clean fits" for the whole array. A fit is ~43 ms now, runs in FIT_JOBS
+# processes and is cached, so all of them is a one-time ~10-15 min on 8 cores.
 FIRST_N_PIXELS = 20  # per-pixel diagnostic plots for the first N pixels
 PER_PIXEL_R2_MIN = 0.70  # a per-pixel peak-IQE counts only if its own fit R² ≥ this
 # (individual-pixel sweeps are noisy; this keeps junk fits
@@ -131,6 +130,11 @@ NOISE_FLOOR_A = 1e-6  # hard floor on |I_NVLED| (~1 µA) for runs WITHOUT the re
 # the SMU's raw noise (~20 nA). Lower it only with a lower I-range
 # or a real low-J current calibration.
 NVLED_RELSTD_MAX = 0.50  # reject points whose NVLED current std/mean exceeds this
+OPT_SNR_MIN = 5.0     # the LED light (lit - reference) must be this many times the noise
+# of that difference, hypot(lit SEM, reference SEM). 261026-0813 at -0.7 V: 0.67 nW of
+# light against 0.63 nW of noise on the 470 nW range, median SNR 1.1 -- and 65 % of those
+# points passed every other gate, feeding pure noise into the rising side of the fits.
+# On the earlier runs this gate removes at most 26 of 36 000 points.
 PM_RELSTD_MAX = 3.00  # reject points where OPTICAL noise (σ of the mean) > 3×
 # signal — catches *noisy* low-J points.
 PM_MIN_OVER_DARK = 1.0  # reject points whose dark-subtracted power is below this ×
@@ -911,6 +915,13 @@ def enrich(df, dark_W=0.0):
     if "PM400_POWER_SEM" in df.columns:
         relP = df["PM400_POWER_SEM"].astype(float) / df["P_W"].replace(0, np.nan)
         gate("OPTICAL_NOISE", ~(relP.fillna(np.inf) <= PM_RELSTD_MAX))
+        # The light is lit minus reference, so its noise is both readings' noise. The
+        # gate above sees only the lit SEM, and allows it up to 3x the signal.
+        ref_sem = (df["PM400_POWER_REF_SEM"].astype(float).abs().fillna(0)
+                   if "PM400_POWER_REF_SEM" in df.columns else 0.0)
+        sig = np.hypot(df["PM400_POWER_SEM"].astype(float).abs(), ref_sem)
+        df["OPT_SNR"] = df["P_W"] / sig.replace(0, np.nan)
+        gate("OPTICAL_SNR", ~(df["OPT_SNR"].fillna(np.inf) >= OPT_SNR_MIN))
     # Absolute optical SNR: the signal must be above the dark/background floor —
     # otherwise EQE≈0 even when the (averaged) value is precise.
     if dark_W and dark_W > 0:
@@ -2522,6 +2533,7 @@ GATES = [
                       f"> {REF_POWER_SUSPECT:g} of the lit light and > 5 sigma"),
     ("CURRENT_NOISE", f"current SEM / current > {NVLED_RELSTD_MAX:g}"),
     ("OPTICAL_NOISE", f"power SEM / power > {PM_RELSTD_MAX:g}"),
+    ("OPTICAL_SNR", f"light / hypot(lit SEM, reference SEM) < {OPT_SNR_MIN:g}"),
     ("DARK_FLOOR", f"power < {PM_MIN_OVER_DARK:g}x the dark level"),
 ]
 
@@ -3011,6 +3023,57 @@ def plot_pixel_matrix(summ, stat, out, plt, what="Per-pixel quantities"):
     plt.close(fig)
 
 
+def bias_diagnostics(df, out, plt):
+    """bias_diagnostics.csv and eqe_vs_J_by_bias.png: per sweep bias, what was measured
+    and how well. One row per bias: points, the share that passed the gates, the PM400
+    range(s), the share with a cached reference, the median light, its noise and SNR,
+    the median LED current, J and (reliable) EQE. The plot colours EQE(J) by bias, and
+    the optical SNR against J with the OPT_SNR_MIN line: a bias whose light sits at the
+    meter's floor shows up as a whole colour below the line."""
+    g = df.groupby("NVLED_V")
+    rel = df[df["RELIABLE"]]
+    t = pd.DataFrame({"n": g.size(), "reliable_frac": g["RELIABLE"].mean()})
+    if "PM_RANGE_W" in df:
+        t["pm_ranges_W"] = g["PM_RANGE_W"].agg(
+            lambda s: " ".join(f"{v:.2g}" for v in sorted(s.dropna().unique())))
+    if "LEAK_REF_CACHED" in df:
+        t["ref_cached_frac"] = g["LEAK_REF_CACHED"].mean()
+    t["P_W_median"] = g["P_W"].median()
+    if "OPT_SNR" in df:
+        t["noise_W_median"] = (df["P_W"] / df["OPT_SNR"]).groupby(df["NVLED_V"]).median()
+        t["opt_snr_median"] = g["OPT_SNR"].median()
+    t["I_LED_A_median"] = g["I_LED"].median()
+    t["J_median"] = g["J_LED"].median()
+    t["EQE_reliable_median"] = rel.groupby("NVLED_V")["EQE_LED"].median()
+    t.sort_index(ascending=False).to_csv(out / "bias_diagnostics.csv")
+
+    volts = np.sort(df["NVLED_V"].unique())
+    cm = plt.get_cmap("turbo")
+    col = {v: cm(i / max(1, len(volts) - 1)) for i, v in enumerate(volts)}
+    from matplotlib.colors import to_rgb
+    from matplotlib.lines import Line2D
+    fig, ax = plt.subplots(1, 2, figsize=(15, 6))
+    for a, d_, y, ttl in ((ax[0], rel, "EQE_LED", "EQE, reliable points"),
+                          (ax[1], df, "OPT_SNR", "optical SNR, every point")):
+        if y not in d_:
+            continue
+        m = (d_["J_LED"] > 0) & (d_[y] > 0)
+        rgb = np.array([to_rgb(col[v]) for v in d_.loc[m, "NVLED_V"]]).reshape(-1, 3)
+        point_image(a, np.log10(d_.loc[m, "J_LED"].values), np.log10(d_.loc[m, y].values),
+                    rgb, alpha=0.3)
+        a.set_xlabel("log10 J (A/cm²)")
+        a.set_ylabel(f"log10 {y}")
+        a.set_title(ttl, fontsize=10)
+        a.grid(alpha=0.3)
+    ax[1].axhline(np.log10(OPT_SNR_MIN), color="k", ls="--", lw=0.8)
+    ax[1].legend([Line2D([], [], ls="", marker="s", color=col[v]) for v in volts],
+                 [f"{v:+.2f} V" for v in volts], fontsize=7, ncol=2, loc="upper left")
+    fig.suptitle("EQE and optical SNR by bias (dashed: the OPTICAL_SNR gate)", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out / "eqe_vs_J_by_bias.png", dpi=150)
+    plt.close(fig)
+
+
 def iqe_dir(sweep_dir):
     """Where a sweep group's IQE/EQE outputs go: <run>/REPORT_assets/IQE_EQE, or
     IQE_EQE_<group> for a group not named Sweep. Every plot and table of a run lives
@@ -3066,6 +3129,7 @@ def analyse_sweep(sweep_dir, label, log):
     _safe(plot_ivl, df, out / "IVL_full.png", plt)
     _safe(plot_leakage, df, out / "leakage_vs_bias.png", plt)
     _safe(plot_eqe_by_bitval, df, out / "eqe_vs_J_by_bitval.png", plt)
+    _safe(bias_diagnostics, df, out, plt)
     _safe(plot_first_pixels, df, out / "first_pixels_diagnostics.png", plt)
     _safe(
         plot_burst_scatter, sweep_dir, out / "burst_scatter.png", plt
@@ -3134,7 +3198,7 @@ def analyse_sweep(sweep_dir, label, log):
     # map and the CSV (fitting is the expensive step). For very large sweeps we
     # fit an evenly-sampled subset so runtime stays bounded.
     groups = list(df.groupby(["X", "Y"]))
-    if len(groups) > MAX_PIXEL_FITS:
+    if MAX_PIXEL_FITS and len(groups) > MAX_PIXEL_FITS:
         step = int(np.ceil(len(groups) / MAX_PIXEL_FITS))
         groups = groups[::step]
         log(f"    (fitting {len(groups)} of {n_px} pixels per-pixel — capped)")
@@ -4893,7 +4957,7 @@ def analyse_run(run_dir, log):
 
 def main():
     global PIXEL_AREA_UM2, ACTIVE_THICKNESS_NM, WAVELENGTH_NM, RUN_TRUNCATION, RUN_DECIMATION
-    global FIT_JOBS
+    global FIT_JOBS, MAX_PIXEL_FITS
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -4907,12 +4971,15 @@ def main():
     ap.add_argument("--decimation", action="store_true",
                     help="refit on every k-th bias, ends kept: could fewer biases have "
                          "given the same peak IQE? (slow, off by default)")
+    ap.add_argument("--max-fits", type=int, default=MAX_PIXEL_FITS,
+                    help="fit at most this many pixels, evenly spaced (default 0 = all)")
     ap.add_argument("--jobs", type=int, default=FIT_JOBS,
                     help=f"processes for the per-pixel ABC fits (default {FIT_JOBS}, "
                          "1 = none). Each one holds its own numpy and scipy, ~100 MB")
     args = ap.parse_args()
     RUN_TRUNCATION, RUN_DECIMATION = args.truncation, args.decimation
     FIT_JOBS = max(1, args.jobs)
+    MAX_PIXEL_FITS = max(0, args.max_fits)
 
     PIXEL_AREA_UM2, ACTIVE_THICKNESS_NM, WAVELENGTH_NM = (
         args.area,

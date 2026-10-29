@@ -93,12 +93,20 @@ python analyze_array.py "<run_dir>" --area 100 --wavelength 440
 | `--thickness` | active region thickness in nm |
 | `--wavelength` | emission wavelength in nm, for the photon energy |
 | `--jobs` | processes for the per-pixel ABC fits (default: CPU count − 1; 1 = none) |
+| `--max-fits` | fit at most this many pixels, evenly spaced (default 0 = every pixel) |
 
 The per-pixel fits are cached in `REPORT_assets/IQE_EQE/abc_fit_cache.pkl`. The key
 for each pixel is a hash of the fit source (`fit_abc` and its helpers) and that pixel's
 exact J and EQE arrays. A plot or report change reuses every fit. A gate or `enrich`
 change refits only the pixels whose reliable points it moved. A change to the fit code
 refits all of them.
+
+`REPORT_assets/IQE_EQE/bias_diagnostics.csv` has one row per sweep bias: points, the
+share that passed the gates, the PM400 range, the share with a cached reference, the
+median light, its noise and optical SNR, the median current, J and EQE.
+`eqe_vs_J_by_bias.png` colours EQE(J) and the optical SNR by bias. A bias whose light
+sits at the meter's floor shows up as one colour below the `OPTICAL_SNR` line: the
+light (lit − reference) must be at least 5 × hypot(lit SEM, reference SEM).
 
 `REPORT_assets/IQE_EQE/pixel_summary.csv` has one row per swept pixel:
 
