@@ -70,7 +70,7 @@ def main(run: Path) -> None:
             s = summ[summ["BITVAL"] == b]
             a.plot(-s["NVLED_V"], s[med] * scale, color="k", lw=2)
             a.set_title(f"bitval {b}", fontsize=10)
-            a.set_xlabel("|V_NVLED| (V)")
+            a.set_xlabel("-V_NVLED (V)")
             if k == 0:
                 a.set_ylabel(label)
             a.grid(alpha=0.3)
@@ -81,7 +81,7 @@ def main(run: Path) -> None:
         a.plot(-s["NVLED_V"], s["median_A"] * 1e6, color=colors[b], label=f"{b}")
         a.fill_between(-s["NVLED_V"], s["p10_A"] * 1e6, s["p90_A"] * 1e6, color=colors[b],
                        alpha=0.15, lw=0)
-    a.set_xlabel("|V_NVLED| (V)")
+    a.set_xlabel("-V_NVLED (V)")
     a.set_ylabel("|I_B| (uA), median, p10-p90")
     a.legend(title="bitval", fontsize=8)
     a.grid(alpha=0.3)
@@ -108,7 +108,7 @@ def main(run: Path) -> None:
     for b in bits:
         s = summ[summ["BITVAL"] == b]
         a.plot(-s["NVLED_V"], 100 * s["mad_A"] / s["median_A"], color=colors[b], label=f"{b}")
-    a.set_xlabel("|V_NVLED| (V)")
+    a.set_xlabel("-V_NVLED (V)")
     a.set_ylabel("spread across pixels: 1.4826 MAD / median (%)")
     a.legend(title="bitval", fontsize=8)
     a.grid(alpha=0.3)

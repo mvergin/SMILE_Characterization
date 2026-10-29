@@ -2464,8 +2464,9 @@ def exp_transistoriv(pm, smu, smile, cfg, args, log):
     A shorted LED puts the whole NVLED voltage across the pixel's drive transistors,
     so the pixel is a transistor test structure. The bitval picks which of the four
     binary-weighted transistors conduct: 1, 2, 4, 8 alone, 15 all, 0 none (the
-    leakage the others sit on). Every sweep runs 0 V -> the most negative bias and
-    goes back to 0 V before the next bitval, so no frame is switched at full current.
+    leakage the others sit on). Every sweep runs from the highest --tiv-volts bias down
+    (0 V by default; a positive start such as +1 V works the same) and goes back to 0 V
+    before the next bitval, so no frame is switched at full current.
     No High-C: a short has no capacitive node to settle.
     """
     pixels = _list_pixels(args, log, "transistoriv")
@@ -3102,8 +3103,9 @@ def build_parser():
                          "transistors alone, 15 all of them, 0 none (the leakage)")
     ap.add_argument("--tiv-volts", nargs="+", type=float,
                     default=[round(-0.1 * k, 2) for k in range(33)],
-                    help="transistoriv: biases, swept from 0 V down (default 0 to -3.2 V "
-                         "in 0.1 V)")
+                    help="transistoriv: biases, swept from the highest down (default 0 to "
+                         "-3.2 V in 0.1 V). In PowerShell, +1 to -3.2 V in 0.1 V: "
+                         "--tiv-volts (10..-32 | ForEach-Object { $_ / 10 })")
     ap.add_argument("--tiv-limit", type=float, default=1e-3,
                     help="transistoriv: ch B limit (A). One pixel's drivers give ~120 uA")
     ap.add_argument("--tiv-nplc", type=float, default=1.0)
