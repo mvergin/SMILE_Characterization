@@ -1755,13 +1755,22 @@ SWM_PAIRS_CROSS = ((1, 3), (1, 5), (1, 7))            # p1 (TL) against each oth
 def swm_sequence(a, b, bitval, cycles):
     """The frame writes of one switch-matrix capture, after the baseline.
 
-    A is lit through the hold. Then: switch to B, ``cycles`` x (A, B), then B off
-    (bitval 0, still addressed) and B on again. Each entry is (label, (x, y), bitval).
+    A is lit through the hold. Then: switch to B, ``cycles`` x (A, B); ``cycles`` x (B
+    off at bitval 0, still addressed, B on); and the single-pixel references: blank,
+    A only, blank, B only, blank. A blank is the all-quadrant zero frame, so after it
+    nothing is lit. The references put dark, A alone and B alone on the same trace as
+    the switches: a "B" level after A->B that is A + B, not B, means A never turned
+    off -- which a set_pixel into another quadrant cannot do if the quadrant enable
+    only gates which quadrant takes the new frame. Each entry is (label, (x, y) or None
+    for a blank frame, bitval).
     """
     seq = [("A->B", b, bitval)]
     for _ in range(cycles):
         seq += [("B->A", a, bitval), ("A->B", b, bitval)]
-    seq += [("B off", b, 0), ("B on", b, bitval)]
+    for _ in range(cycles):
+        seq += [("B off", b, 0), ("B on", b, bitval)]
+    seq += [("blank", None, 0), ("A only", a, bitval), ("blank", None, 0),
+            ("B only", b, bitval), ("blank", None, 0)]
     return seq
 
 
@@ -1803,6 +1812,8 @@ def exp_switchmatrix(pm, smu, smile, cfg, args, log):
     bv = cfg.bitvals[0]
     rows, events = [], []
     nan = float("nan")
+    if hasattr(smu, "display_off"):
+        smu.display_off()            # no display refresh competing with the record
     for v in args.swm_voltages:
         for ka, kb in pairs:
             a, b = slots[ka], slots[kb]
@@ -1824,7 +1835,11 @@ def exp_switchmatrix(pm, smu, smile, cfg, args, log):
                 cur[k], pw[k] = abs(pt[4]), abs(pt[0])
             need = 1.5 * max(cur.values())
             rng = next((r for r in m.SMU_I_RANGES if r >= need), m.SMU_I_RANGES[-1])
-            scfg = dataclasses.replace(cfg, nvled_compliance=rng, nvled_range_i=None)
+            # Autozero ONCE: AUTO adds reference and zero readings to every sample,
+            # and at NPLC 0.001 that overhead is the record. Delays are zero already
+            # (configure_voltage_source_b without High-C).
+            scfg = dataclasses.replace(cfg, nvled_compliance=rng, nvled_range_i=None,
+                                       sweep_autozero="ONCE")
             m.configure_voltage_source_b(smu, scfg, log)
             # The PM400 range for the brighter of the two, set before the hold so it
             # never changes inside the record.
@@ -1857,7 +1872,10 @@ def exp_switchmatrix(pm, smu, smile, cfg, args, log):
             def _sequence(_seq=seq, _sent=sent):
                 for label, xy, bit in _seq:
                     t_s = time.perf_counter()
-                    smile.set_pixel(*xy, bit)
+                    if xy is None:
+                        smile.blank_frame()
+                    else:
+                        smile.set_pixel(*xy, bit)
                     _sent.append((label, xy, bit, t_s, time.perf_counter()))
                     time.sleep(args.swm_gap_s)
 
@@ -1876,12 +1894,18 @@ def exp_switchmatrix(pm, smu, smile, cfg, args, log):
                 p_t, p_p = ptrace.stop(restore_averaging=cfg.pm_averaging)
                 if ptrace.t0 is not None and "host_t0" in sync:
                     p_t = p_t + (ptrace.t0 - sync["host_t0"])
+                # The meter thread runs until stop(), which comes after the SMU buffer
+                # is read back -- 20000 readings over USB, a second or more. Past the
+                # current record P(t) has nothing to be compared with: cut it there.
+                if t.size:
+                    keep = p_t <= float(t[-1])
+                    p_t, p_p = p_t[keep], p_p[keep]
                 keep_power_trace(tag, p_t, p_p)
             t0h = sync.get("host_t0", nan)
             for i, (label, xy, bit, t_s, t_a) in enumerate(sent):
-                events.append(dict(trace_tag=tag, v=v, idx=i, label=label, x=xy[0],
-                                   y=xy[1], bitval=bit, sent_s=t_s - t0h,
-                                   ack_s=t_a - t0h))
+                events.append(dict(trace_tag=tag, v=v, idx=i, label=label,
+                                   x=xy[0] if xy else nan, y=xy[1] if xy else nan,
+                                   bitval=bit, sent_s=t_s - t0h, ack_s=t_a - t0h))
             n_over = int((np.abs(ib) >= 1e36).sum()) if ib.size else 0
             rows.append(dict(
                 trace_tag=tag, v=v, kind=kind, a_slot=f"p{ka}", a_x=a[0], a_y=a[1],
@@ -2893,12 +2917,13 @@ def build_parser():
                     help="switchmatrix: settle with pixel A lit before each record")
     ap.add_argument("--swm-samples", type=int, default=20000,
                     help="switchmatrix: readings per record (trigger model, one buffer)")
-    ap.add_argument("--swm-nplc", type=float, default=0.002,
-                    help="switchmatrix: integration per reading. 0.002 at ch B only is "
-                         "~93 us a reading (trigger model, 261025), so 20000 last ~1.9 s")
+    ap.add_argument("--swm-nplc", type=float, default=0.001,
+                    help="switchmatrix: integration per reading, 0.001 the 2602B's "
+                         "minimum. 0.002 at ch B only was 86 us a reading (trigger "
+                         "model, 261025-1915), 40 us of it integration")
     ap.add_argument("--swm-pre-s", type=float, default=0.1,
                     help="switchmatrix: baseline recorded before the first switch")
-    ap.add_argument("--swm-gap-s", type=float, default=0.1,
+    ap.add_argument("--swm-gap-s", type=float, default=0.05,
                     help="switchmatrix: wait after each acknowledged frame write")
     ap.add_argument("--swm-cycles", type=int, default=3,
                     help="switchmatrix: A/B back-and-forth cycles after the first switch")

@@ -382,7 +382,8 @@ def plot_switch_sync(run_dir: Path) -> None:
 
 
 SWM_COLORS = {"A->B": "tab:orange", "B->A": "tab:green", "B off": "0.45",
-              "B on": "tab:purple"}
+              "B on": "tab:purple", "blank": "k", "A only": "tab:olive",
+              "B only": "tab:cyan"}
 
 
 def _autoscale(y, unit):
@@ -447,6 +448,8 @@ def plot_switchmatrix(run_dir: Path) -> None:
                            alpha=0.45, label=None if lab in seen else lab)
                 seen.add(lab)
             ax.set_xlabel("time from the first SMU sample (s)")
+            # runs before 2026-11-02 kept P(t) through the SMU read-back, past the record
+            ax.set_xlim(0.0, float(t[-1]) if t.size else None)
             ax.grid(alpha=0.3)
             ax.legend(fontsize=8, loc="upper right", title="write sent -> acked")
             late = ("   START ack late: write positions NOT trustworthy"
@@ -467,6 +470,64 @@ def plot_switchmatrix(run_dir: Path) -> None:
             fig.savefig(out, dpi=200)
             plt.close(fig)
             print(f"wrote {out}")
+            mine = sorted((e for e in events if e["trace_tag"] == tag),
+                          key=lambda e: float(e["ack_s"]))
+            ptr = (d[pmk] if pmk is not None and r.get("pm_on_trace_axis") == "1"
+                   else None)
+            if mine:
+                zoom_switches(t, ib, ptr, mine, r, out_dir / f"zoom_{tag}.png", plt)
+
+
+def zoom_switches(t, ib, ptr, events, r, out, plt):
+    """One panel per frame write, from halfway since the previous write (or the
+    record start) to halfway to the next one (or the record end): the transition and
+    both plateaus around it, in ms from that write's ACK. Current left, light right,
+    the send->ack band shaded. Whether the current settles inside one reading only
+    shows at this scale."""
+    ack = [float(e["ack_s"]) for e in events]
+    # halfway points: record start -> 1st write -> ... -> last write -> record end
+    edges = [0.5 * (a0 + a1) for a0, a1 in zip([0.0] + ack, ack + [float(t[-1])])]
+    n = len(events)
+    nc = 4
+    nr = -(-n // nc)
+    fig, axs = plt.subplots(nr, nc, figsize=(4.2 * nc, 3.0 * nr), squeeze=False)
+    si_, ui = _autoscale(ib, "A")
+    if ptr is not None:
+        sp, up = _autoscale(ptr[1], "W")
+    for k, (e, ax) in enumerate(zip(events, axs.flat)):
+        lo, hi, a0 = edges[k], edges[k + 1], ack[k]
+        m = (t >= lo) & (t <= hi)
+        ax.plot(1e3 * (t[m] - a0), ib[m] / si_, ".-", ms=2, lw=0.5, color="tab:blue")
+        ax.axvspan(1e3 * (float(e["sent_s"]) - a0), 0.0,
+                   color=SWM_COLORS.get(e["label"], "0.6"), alpha=0.4)
+        if ptr is not None:
+            tp, pp = ptr
+            mp = (tp >= lo) & (tp <= hi)
+            a2 = ax.twinx()
+            a2.plot(1e3 * (tp[mp] - a0), pp[mp] / sp, ".-", ms=2, lw=0.5,
+                    color="tab:red")
+            a2.tick_params(axis="y", colors="tab:red", labelsize=7)
+            if k % nc == nc - 1:
+                a2.set_ylabel(f"P ({up})", color="tab:red", fontsize=8)
+        ax.set_title(f"{k}: {e['label']}", fontsize=9)
+        ax.tick_params(labelsize=7)
+        ax.grid(alpha=0.3)
+        if k % nc == 0:
+            ax.set_ylabel(f"|I_B| ({ui})", color="tab:blue", fontsize=8)
+        if k >= n - nc:
+            ax.set_xlabel("ms from the write's ACK", fontsize=8)
+    for ax in list(axs.flat)[n:]:
+        ax.set_visible(False)
+    fig.suptitle(
+        f"{r['kind']}-quadrant, {float(r['v']):+.3f} V, A = {r['a_slot']} "
+        f"({r['a_x']},{r['a_y']}) {r['a_quadrant']}, B = {r['b_slot']} "
+        f"({r['b_x']},{r['b_y']}) {r['b_quadrant']}: every write, halfway to its "
+        f"neighbours; NPLC {float(r['nplc']):g} @ {float(r['interval_us']):.0f} us",
+        fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"wrote {out}")
 
 
 def plot_isrc(run_dir: Path) -> None:

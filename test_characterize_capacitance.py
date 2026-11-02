@@ -634,12 +634,14 @@ def test_the_switch_matrix_runs_every_pair_and_times_every_write():
     ev = cc._EXTRA_ROWS["switchmatrix_events"]
     for r in rows:
         mine = [e for e in ev if e["trace_tag"] == r["trace_tag"]]
-        assert [e["label"] for e in mine] == (["A->B"] + ["B->A", "A->B"] * 3
-                                              + ["B off", "B on"]), mine
-        assert mine[-2]["bitval"] == 0 and mine[-1]["bitval"] == 15
+        assert [e["label"] for e in mine] == (
+            ["A->B"] + ["B->A", "A->B"] * 3 + ["B off", "B on"] * 3
+            + ["blank", "A only", "blank", "B only", "blank"]), mine
+        assert [e["bitval"] for e in mine[7:9]] == [0, 15]
+        assert all(np.isnan(e["x"]) for e in mine if e["label"] == "blank")
         t = [x for e in mine for x in (e["sent_s"], e["ack_s"])]
         assert t == sorted(t) and t[0] >= 0.02, "writes in order, after the baseline"
-        assert r["n_events"] == 9 and np.isfinite(r["fpga_refresh_ms"]), r
+        assert r["n_events"] == 18 and np.isfinite(r["fpga_refresh_ms"]), r
     cc._EXTRA_ROWS.clear()
 
 
