@@ -3149,7 +3149,8 @@ def build_parser():
                     help="take only this many pixels from --pixel-list (0 = all)")
     ap.add_argument("--list-order", choices=("file", "random"), default="file",
                     help="file: top to bottom as listed; random: shuffled with --list-seed")
-    ap.add_argument("--list-seed", type=int, default=0)
+    ap.add_argument("--list-seed", type=int, default=0,
+                    help="the --list-order random shuffle seed, so a pick can be repeated")
     ap.add_argument("--tiv-bitvals", nargs="+", type=int, default=[0, 1, 2, 4, 8, 15],
                     help="transistoriv: bitvals to sweep. 1, 2, 4, 8 are the four drive "
                          "transistors alone, 15 all of them, 0 none (the leakage)")
@@ -3160,7 +3161,8 @@ def build_parser():
                          "--tiv-volts (10..-32 | ForEach-Object { $_ / 10 })")
     ap.add_argument("--tiv-limit", type=float, default=1e-3,
                     help="transistoriv: ch B limit (A). One pixel's drivers give ~120 uA")
-    ap.add_argument("--tiv-nplc", type=float, default=1.0)
+    ap.add_argument("--tiv-nplc", type=float, default=1.0,
+                    help="transistoriv: integration per reading, in power-line cycles")
     ap.add_argument("--tiv-n-smu", type=int, default=2, help="transistoriv: SMU reads per point")
     ap.add_argument("--tiv-settle-s", type=float, default=0.02,
                     help="transistoriv: wait after each bias step")
@@ -3187,9 +3189,12 @@ def build_parser():
                     help="droop: stop at this many lit pixels (0 = all alive)")
     ap.add_argument("--droop-settle-s", type=float, default=0.1,
                     help="droop: wait after each frame change")
-    ap.add_argument("--droop-nplc", type=float, default=1.0)
-    ap.add_argument("--droop-n-smu", type=int, default=2)
-    ap.add_argument("--droop-n-pm", type=int, default=3)
+    ap.add_argument("--droop-nplc", type=float, default=1.0,
+                    help="droop: integration per reading, in power-line cycles")
+    ap.add_argument("--droop-n-smu", type=int, default=2,
+                    help="droop: SMU readings per step")
+    ap.add_argument("--droop-n-pm", type=int, default=3,
+                    help="droop: PM400 readings per step")
     ap.add_argument("--droop-seed", type=int, default=0, help="droop: the random order's seed")
     return ap
 
