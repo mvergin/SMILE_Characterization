@@ -1814,6 +1814,10 @@ def exp_switchmatrix(pm, smu, smile, cfg, args, log):
     nan = float("nan")
     if hasattr(smu, "display_off"):
         smu.display_off()            # no display refresh competing with the record
+    # The long hold is for the BIAS: after a bias change the current relaxes for tens of
+    # seconds. A pixel switch at a settled bias is done in < 1 ms (261025-1915 zoom), so
+    # the later captures at the same bias need only --swm-hold-short-s.
+    last_v = None
     for v, mode, (ka, kb) in ((v, mode, pq) for v in args.swm_voltages
                               for pq in pairs for mode in args.swm_switch_modes):
         a, b = slots[ka], slots[kb]
@@ -1892,12 +1896,14 @@ def exp_switchmatrix(pm, smu, smile, cfg, args, log):
 
         smile.blank_frame()                 # the hold is A alone
         smile.set_pixel(*a, bv)
+        hold = args.swm_hold_s if v != last_v else args.swm_hold_short_s
+        last_v = v
         sync = {}
         t, ia, ib = capture_step(
             smu, v, v, args.swm_samples, args.swm_nplc,
-            settle_first_s=args.swm_hold_s, chunk=args.chunk, log=log,
+            settle_first_s=hold, chunk=args.chunk, log=log,
             limit_a=rng, capacitance=args.capacitance,
-            max_presettle_s=max(args.max_presettle_s, args.swm_hold_s), cfg=scfg,
+            max_presettle_s=max(args.max_presettle_s, hold), cfg=scfg,
             charge_limit=None, trigger=_sequence, channels=args.switch_channels,
             pre_s=args.swm_pre_s, sync=sync, on_fire=_relight_then_record,
             hold_tick=_relight, tick_s=args.switch_refresh_s)
@@ -1929,7 +1935,7 @@ def exp_switchmatrix(pm, smu, smile, cfg, args, log):
             p_a_probe=pw["A"], p_b_probe=pw["B"], pm_range_w=pm_rng,
             nplc=args.swm_nplc, n=int(t.size), n_overflow=n_over,
             interval_us=(1e6 * float(np.median(np.diff(t))) if t.size > 1 else nan),
-            hold_s=args.swm_hold_s, pre_s=args.swm_pre_s, gap_s=args.swm_gap_s,
+            hold_s=hold, pre_s=args.swm_pre_s, gap_s=args.swm_gap_s,
             n_events=len(sent), fpga_refresh_ms=refresh.get("ms", nan),
             sync_first_unc_s=sync.get("first_unc_s", nan),
             sync_start_ack_late=sync.get("start_ack_late", nan),
@@ -2762,8 +2768,10 @@ def estimate_seconds(what, cfg, args, n_pixels):
                                                          + len(LEAKM_STATES) * per_state)
     if "switchmatrix" in what:
         rec = args.swm_samples * sample_interval_s(args.swm_nplc, args.switch_channels)
-        total += (len(args.swm_voltages) * 7 * len(args.swm_switch_modes)
-                  * (args.swm_hold_s + 1.0 + max(rec, 1.5)))
+        n_cap = len(args.swm_voltages) * 7 * len(args.swm_switch_modes)
+        # one long hold per bias, the short one for every other capture
+        total += (n_cap * (1.0 + max(rec, 1.5) + args.swm_hold_short_s)
+                  + len(args.swm_voltages) * (args.swm_hold_s - args.swm_hold_short_s))
         total += 4 * args.swm_window ** 2 * 0.05            # the four scan windows
     if "optfloor" in what:
         total += sum(n * 4e-3 * args.optfloor_reps for n in args.optfloor_n)
@@ -2934,7 +2942,12 @@ def build_parser():
                     help="switchmatrix: edge of the scan window at each quadrant centre, "
                          "where the two pixels per quadrant are found")
     ap.add_argument("--swm-hold-s", type=float, default=60.0,
-                    help="switchmatrix: settle with pixel A lit before each record")
+                    help="switchmatrix: settle with pixel A lit before the first record "
+                         "at each bias, where the current relaxes for tens of seconds")
+    ap.add_argument("--swm-hold-short-s", type=float, default=5.0,
+                    help="switchmatrix: the hold before every later record at the same "
+                         "bias. The bias is settled already and a switch settles in "
+                         "< 1 ms; this covers the probe's range change")
     ap.add_argument("--swm-samples", type=int, default=20000,
                     help="switchmatrix: readings per record (trigger model, one buffer)")
     ap.add_argument("--swm-nplc", type=float, default=0.001,

@@ -625,7 +625,8 @@ def test_the_switch_matrix_runs_every_pair_and_times_every_write():
     pm, smu, sim = m.connect(cfg, lambda _s: None, simulate=True)
     args = build_parser().parse_args(
         ["--what", "switchmatrix", "--swm-voltages", "-1.2", "--swm-window", "4",
-         "--swm-hold-s", "0.2", "--switch-refresh-s", "0.05", "--max-presettle-s", "0.2",
+         "--swm-hold-s", "0.2", "--swm-hold-short-s", "0.05",
+         "--switch-refresh-s", "0.05", "--max-presettle-s", "0.2",
          "--swm-samples", "100", "--swm-gap-s", "0.01", "--swm-pre-s", "0.02"])
     cc._EXTRA_ROWS.clear()
     smile = _FakeSmile(sim)
@@ -637,6 +638,8 @@ def test_the_switch_matrix_runs_every_pair_and_times_every_write():
     assert pairs == [("p1", "p2"), ("p3", "p4"), ("p5", "p6"), ("p7", "p8"),
                      ("p1", "p3"), ("p1", "p5"), ("p1", "p7")], pairs
     assert len(rows) == 3 * len(px)
+    # the long hold once per bias (one bias here), the short one after it
+    assert [r["hold_s"] for r in rows] == [0.2] + [0.05] * (len(rows) - 1)
     assert [r["kind"] for r in px] == ["same"] * 4 + ["cross"] * 3
     assert all(r["a_quadrant"] == q for r, q in zip(px[:4], ("TL", "TR", "BL", "BR")))
     kinds = [f[0] for f in smile.frames]
