@@ -199,6 +199,39 @@ def settle_time(t, i, settled, frac=0.01):
     return float(t[w - 1:][bad[-1]])
 
 
+LEGEND_MAX = 12      # settling.png gets a legend up to this many captures
+
+
+def plot_long_settling(run_dir, longs, settings, plt):
+    """settling_long.png: the long captures alone, each labelled with its pixel (from
+    step.csv, whose row number is the capture index of the trace key)."""
+    import csv
+    rows = (list(csv.DictReader((run_dir / "step.csv").open()))
+            if (run_dir / "step.csv").exists() else [])
+    fig, ax = plt.subplots(figsize=(8.5, 5.5))
+    for key, t, dev, settled in longs:
+        i = int(parse_key(key)["idx"])
+        px = (f" ({rows[i]['pixel_x']},{rows[i]['pixel_y']})"
+              if i < len(rows) and "pixel_x" in rows[i] else "")
+        ax.plot(t, dev * 100, lw=1.0,
+                label=f"#{i}{px} {label_of(key)}  (settled {settled * 1e9:,.0f} nA)")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_ylim(2e-2, None)
+    ax.axhline(1.0, color="tab:red", ls="--", lw=1)
+    ax.axhline(0.1, color="tab:red", ls=":", lw=1)
+    ax.set_xlabel("time after the voltage step (s)")
+    ax.set_ylabel("|I − I∞| / I∞  (%)")
+    ax.set_title(f"long captures — {run_dir.name}\n{settings}", fontsize=9)
+    ax.legend(fontsize=7)
+    ax.grid(alpha=0.3, which="both")
+    fig.tight_layout()
+    out = run_dir / "settling_long.png"
+    fig.savefig(out, dpi=200)
+    plt.close(fig)
+    print(f"wrote {out}")
+
+
 def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -213,6 +246,7 @@ def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
     fig, ax = plt.subplots(nrow, ncol, figsize=(5.2 * ncol, 3.6 * nrow), squeeze=False)
     fig2, bx = plt.subplots(nrow, ncol, figsize=(5.2 * ncol, 3.6 * nrow), squeeze=False)
     fig3, cx = plt.subplots(figsize=(7.2, 5.0))
+    devs = []                 # (key, t, deviation), for the long-capture figure
     for idx, key in enumerate(keys):
         a, b = ax[idx // ncol][idx % ncol], bx[idx // ncol][idx % ncol]
         t, _ia, ib = traces[key]
@@ -252,6 +286,7 @@ def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
         m = (ts > 0) & (dev > 0)
         line, = cx.plot(ts[m], dev[m] * 100, lw=1.0,
                         label=f"{label}   (settled {settled*1e9:,.0f} nA)")
+        devs.append((key, ts[m], dev[m], settled))
         fit = m & (ts > 0.8) & (ts < 10) & (dev > 2e-3)
         if fit.sum() > 20:
             slope = np.polyfit(np.log(ts[fit]), np.log(dev[fit]), 1)[0]
@@ -288,8 +323,14 @@ def plot(run_dir: Path, traces: dict[str, np.ndarray], mains_hz: float) -> None:
     cx.set_title(f"how the current approaches its final value — {run_dir.name}\n"
                  f"{settings}\n"
                  "a straight line here is a power law, not an exponential", fontsize=9)
-    cx.legend(fontsize=8)
+    # One entry per capture: past a dozen the legend covers the plot (261102-1346 had
+    # 88). Then the long captures, which carry the decay law, get their own figure.
+    if n <= LEGEND_MAX:
+        cx.legend(fontsize=8)
     cx.grid(alpha=0.3, which="both")
+    longs = [d for d in devs if "_long_" in d[0]]
+    if n > LEGEND_MAX and longs:
+        plot_long_settling(run_dir, longs, settings, plt)
 
     for f_, a_ in ((fig, ax), (fig2, bx)):
         for j in range(n, nrow * ncol):
