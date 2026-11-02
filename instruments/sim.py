@@ -253,6 +253,10 @@ class SmileFPGASim:
         time.sleep(0.005)
         return time.perf_counter()
 
+    def show_pixel(self, log_x, log_y, bit_val):
+        time.sleep(0.008)          # a full frame: a longer write than set_pixel
+        return time.perf_counter()
+
     def blank_frame(self, enables=None):
         time.sleep(0.005)
         return time.perf_counter()

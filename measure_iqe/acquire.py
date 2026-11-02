@@ -1253,6 +1253,10 @@ class _SimSmile:
         self._smu._bit_scale = max(1, int(bit)) / 15.0
         return time.perf_counter()
 
+    def show_pixel(self, x, y, bit):
+        """The full-frame write: only this pixel, nothing left over."""
+        return self.set_pixel(x, y, bit)
+
     def blank_frame(self, enables=None):
         self._smu._on = False
         return time.perf_counter()

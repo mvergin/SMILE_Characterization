@@ -255,6 +255,10 @@ class _FakeSmile:
         self.frames.append(("blank", (), 0) + (() if enables is None else (enables,)))
         return self._sim.blank_frame()
 
+    def show_pixel(self, x, y, bit):
+        self.frames.append(("frame", ((int(x), int(y)),), int(bit)))
+        return self._sim.show_pixel(x, y, bit)
+
 
 def _cluster_run(ks, n_members=16):
     """exp_cluster against the built-in sim rig, with every frame recorded."""
@@ -626,11 +630,17 @@ def test_the_switch_matrix_runs_every_pair_and_times_every_write():
     cc._EXTRA_ROWS.clear()
     smile = _FakeSmile(sim)
     rows = exp_switchmatrix(pm, smu, smile, cfg, args, lambda _s: None)
-    pairs = [(r["a_slot"], r["b_slot"]) for r in rows]
+    # every pair once per switch mode: set_pixel, blank + set_pixel, one full frame
+    assert [r["switch_mode"] for r in rows[:3]] == ["pixel", "blank", "frame"]
+    px = [r for r in rows if r["switch_mode"] == "pixel"]
+    pairs = [(r["a_slot"], r["b_slot"]) for r in px]
     assert pairs == [("p1", "p2"), ("p3", "p4"), ("p5", "p6"), ("p7", "p8"),
                      ("p1", "p3"), ("p1", "p5"), ("p1", "p7")], pairs
-    assert [r["kind"] for r in rows] == ["same"] * 4 + ["cross"] * 3
-    assert all(r["a_quadrant"] == q for r, q in zip(rows[:4], ("TL", "TR", "BL", "BR")))
+    assert len(rows) == 3 * len(px)
+    assert [r["kind"] for r in px] == ["same"] * 4 + ["cross"] * 3
+    assert all(r["a_quadrant"] == q for r, q in zip(px[:4], ("TL", "TR", "BL", "BR")))
+    kinds = [f[0] for f in smile.frames]
+    assert "frame" in kinds, "the frame mode writes full frames"
     ev = cc._EXTRA_ROWS["switchmatrix_events"]
     for r in rows:
         mine = [e for e in ev if e["trace_tag"] == r["trace_tag"]]
@@ -642,6 +652,8 @@ def test_the_switch_matrix_runs_every_pair_and_times_every_write():
         t = [x for e in mine for x in (e["sent_s"], e["ack_s"])]
         assert t == sorted(t) and t[0] >= 0.02, "writes in order, after the baseline"
         assert r["n_events"] == 18 and np.isfinite(r["fpga_refresh_ms"]), r
+        blank_acks = [e["blank_ack_s"] for e in mine if e["label"] in ("A->B", "B->A")]
+        assert all(np.isfinite(b) == (r["switch_mode"] == "blank") for b in blank_acks)
     cc._EXTRA_ROWS.clear()
 
 

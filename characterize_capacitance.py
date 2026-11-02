@@ -1814,123 +1814,137 @@ def exp_switchmatrix(pm, smu, smile, cfg, args, log):
     nan = float("nan")
     if hasattr(smu, "display_off"):
         smu.display_off()            # no display refresh competing with the record
-    for v in args.swm_voltages:
-        for ka, kb in pairs:
-            a, b = slots[ka], slots[kb]
-            kind = "same" if _quadrant_of(*a) == _quadrant_of(*b) else "cross"
-            # 1. probe both, at a limit wide enough not to clamp either
-            probe = dataclasses.replace(cfg, highc_b=False, nvled_compliance=1e-2,
-                                        nvled_range_i=None)
-            m.configure_voltage_source_b(smu, probe, log)
-            smu.set_voltage("b", float(v))
-            pm_lad = m.acquire.pm_ladder(pm, cfg, log) if cfg.pm_autorange else None
-            if pm_lad:                  # probe the light on the widest range
-                m.acquire.set_pm_range(pm, pm_lad[-1])
+    for v, mode, (ka, kb) in ((v, mode, pq) for v in args.swm_voltages
+                              for pq in pairs for mode in args.swm_switch_modes):
+        a, b = slots[ka], slots[kb]
+        kind = "same" if _quadrant_of(*a) == _quadrant_of(*b) else "cross"
+        # 1. probe both, at a limit wide enough not to clamp either
+        probe = dataclasses.replace(cfg, highc_b=False, nvled_compliance=1e-2,
+                                    nvled_range_i=None)
+        m.configure_voltage_source_b(smu, probe, log)
+        smu.set_voltage("b", float(v))
+        pm_lad = m.acquire.pm_ladder(pm, cfg, log) if cfg.pm_autorange else None
+        if pm_lad:                  # probe the light on the widest range
+            m.acquire.set_pm_range(pm, pm_lad[-1])
+            m.acquire.flush_pm_after_range(pm, smu, 1, 1, cfg)
+        cur, pw = {}, {}
+        for k, xy in (("B", b), ("A", a)):
+            # Blank first: set_pixel rewrites only rows 0..row of the pixel, so B
+            # stays lit under A whenever B's row is the higher one -- the BL and BR
+            # captures of 261025-1915 held A + B (235 uA) instead of A.
+            smile.blank_frame()
+            smile.set_pixel(*xy, bv)
+            time.sleep(0.3)
+            pt = m.acquire_point(pm, smu, 10, 1)
+            cur[k], pw[k] = abs(pt[4]), abs(pt[0])
+        need = 1.5 * max(cur.values())
+        rng = next((r for r in m.SMU_I_RANGES if r >= need), m.SMU_I_RANGES[-1])
+        # Autozero ONCE: AUTO adds reference and zero readings to every sample,
+        # and at NPLC 0.001 that overhead is the record. Delays are zero already
+        # (configure_voltage_source_b without High-C).
+        scfg = dataclasses.replace(cfg, nvled_compliance=rng, nvled_range_i=None,
+                                   sweep_autozero="ONCE")
+        m.configure_voltage_source_b(smu, scfg, log)
+        # The PM400 range for the brighter of the two, set before the hold so it
+        # never changes inside the record.
+        pm_rng = cfg.pm_range
+        if pm_lad:
+            pm_rng = m.acquire.pick_pm_range(max(pw.values()), cfg, pm_lad)
+            if m.acquire.set_pm_range(pm, pm_rng)[1]:
                 m.acquire.flush_pm_after_range(pm, smu, 1, 1, cfg)
-            cur, pw = {}, {}
-            for k, xy in (("B", b), ("A", a)):
-                # Blank first: set_pixel rewrites only rows 0..row of the pixel, so B
-                # stays lit under A whenever B's row is the higher one -- the BL and BR
-                # captures of 261025-1915 held A + B (235 uA) instead of A.
-                smile.blank_frame()
-                smile.set_pixel(*xy, bv)
-                time.sleep(0.3)
-                pt = m.acquire_point(pm, smu, 10, 1)
-                cur[k], pw[k] = abs(pt[4]), abs(pt[0])
-            need = 1.5 * max(cur.values())
-            rng = next((r for r in m.SMU_I_RANGES if r >= need), m.SMU_I_RANGES[-1])
-            # Autozero ONCE: AUTO adds reference and zero readings to every sample,
-            # and at NPLC 0.001 that overhead is the record. Delays are zero already
-            # (configure_voltage_source_b without High-C).
-            scfg = dataclasses.replace(cfg, nvled_compliance=rng, nvled_range_i=None,
-                                       sweep_autozero="ONCE")
-            m.configure_voltage_source_b(smu, scfg, log)
-            # The PM400 range for the brighter of the two, set before the hold so it
-            # never changes inside the record.
-            pm_rng = cfg.pm_range
-            if pm_lad:
-                pm_rng = m.acquire.pick_pm_range(max(pw.values()), cfg, pm_lad)
-                if m.acquire.set_pm_range(pm, pm_rng)[1]:
-                    m.acquire.flush_pm_after_range(pm, smu, 1, 1, cfg)
-            tag = f"swm_v{v:+.3f}_p{ka}-{a[0]}-{a[1]}_p{kb}-{b[0]}-{b[1]}"
-            log(f"    {v:+.3f} V  p{ka}{a} {_quadrant_of(*a)} <-> p{kb}{b} "
-                f"{_quadrant_of(*b)}: I_A {cur['A'] * 1e6:.2f} uA, I_B "
-                f"{cur['B'] * 1e6:.2f} uA -> range {rng:g} A; P_A {pw['A'] * 1e9:.1f} nW, "
-                f"P_B {pw['B'] * 1e9:.1f} nW -> PM400 {pm_rng:.3g} W")
-            ptrace = (PowerTrace(pm, args.swm_n_pm, averaging=1)
-                      if args.swm_n_pm else None)
-            seq = swm_sequence(a, b, bv, args.swm_cycles)
-            sent = []
-            refresh = {}
+        tag = f"swm_{mode}_v{v:+.3f}_p{ka}-{a[0]}-{a[1]}_p{kb}-{b[0]}-{b[1]}"
+        log(f"    {v:+.3f} V  p{ka}{a} {_quadrant_of(*a)} <-> p{kb}{b} "
+            f"{_quadrant_of(*b)}: I_A {cur['A'] * 1e6:.2f} uA, I_B "
+            f"{cur['B'] * 1e6:.2f} uA -> range {rng:g} A; P_A {pw['A'] * 1e9:.1f} nW, "
+            f"P_B {pw['B'] * 1e9:.1f} nW -> PM400 {pm_rng:.3g} W")
+        ptrace = (PowerTrace(pm, args.swm_n_pm, averaging=1)
+                  if args.swm_n_pm else None)
+        seq = swm_sequence(a, b, bv, args.swm_cycles)
+        sent = []
+        refresh = {}
 
-            def _relight(_a=a):
-                smile.set_pixel(*_a, bv)
+        def _relight(_a=a):
+            smile.set_pixel(*_a, bv)
 
-            def _relight_then_record(_relight=_relight, _ptrace=ptrace, _r=refresh):
-                t = time.perf_counter()
-                _relight()
-                _r["ms"] = 1e3 * (time.perf_counter() - t)
-                if _ptrace is not None:
-                    _ptrace.start()
+        def _relight_then_record(_relight=_relight, _ptrace=ptrace, _r=refresh):
+            t = time.perf_counter()
+            _relight()
+            _r["ms"] = 1e3 * (time.perf_counter() - t)
+            if _ptrace is not None:
+                _ptrace.start()
 
-            def _sequence(_seq=seq, _sent=sent):
-                for label, xy, bit in _seq:
-                    t_s = time.perf_counter()
-                    if xy is None:
-                        smile.blank_frame()
-                    else:
-                        smile.set_pixel(*xy, bit)
-                    _sent.append((label, xy, bit, t_s, time.perf_counter()))
-                    time.sleep(args.swm_gap_s)
+        def _sequence(_seq=seq, _sent=sent, _mode=mode):
+            for label, xy, bit in _seq:
+                t_s = t_b = time.perf_counter()
+                if xy is None:
+                    smile.blank_frame()
+                elif label in ("A only", "B only"):
+                    smile.set_pixel(*xy, bit)      # after an explicit blank
+                elif _mode == "blank":             # blank, then the pixel
+                    t_b = smile.blank_frame()
+                    smile.set_pixel(*xy, bit)
+                elif _mode == "frame":             # one full frame
+                    smile.show_pixel(*xy, bit)
+                else:                              # "pixel": rows 0..row only
+                    smile.set_pixel(*xy, bit)
+                _sent.append((label, xy, bit, t_s, time.perf_counter(), t_b))
+                time.sleep(args.swm_gap_s)
 
-            smile.blank_frame()                 # the hold is A alone
-            smile.set_pixel(*a, bv)
-            sync = {}
-            t, ia, ib = capture_step(
-                smu, v, v, args.swm_samples, args.swm_nplc,
-                settle_first_s=args.swm_hold_s, chunk=args.chunk, log=log,
-                limit_a=rng, capacitance=args.capacitance,
-                max_presettle_s=max(args.max_presettle_s, args.swm_hold_s), cfg=scfg,
-                charge_limit=None, trigger=_sequence, channels=args.switch_channels,
-                pre_s=args.swm_pre_s, sync=sync, on_fire=_relight_then_record,
-                hold_tick=_relight, tick_s=args.switch_refresh_s)
-            keep_trace(tag, t, ia, ib, args.trace_points)
-            if ptrace is not None:
-                p_t, p_p = ptrace.stop(restore_averaging=cfg.pm_averaging)
-                if ptrace.t0 is not None and "host_t0" in sync:
-                    p_t = p_t + (ptrace.t0 - sync["host_t0"])
-                # The meter thread runs until stop(), which comes after the SMU buffer
-                # is read back -- 20000 readings over USB, a second or more. Past the
-                # current record P(t) has nothing to be compared with: cut it there.
-                if t.size:
-                    keep = p_t <= float(t[-1])
-                    p_t, p_p = p_t[keep], p_p[keep]
-                keep_power_trace(tag, p_t, p_p)
-            t0h = sync.get("host_t0", nan)
-            for i, (label, xy, bit, t_s, t_a) in enumerate(sent):
-                events.append(dict(trace_tag=tag, v=v, idx=i, label=label,
-                                   x=xy[0] if xy else nan, y=xy[1] if xy else nan,
-                                   bitval=bit, sent_s=t_s - t0h, ack_s=t_a - t0h))
-            n_over = int((np.abs(ib) >= 1e36).sum()) if ib.size else 0
-            rows.append(dict(
-                trace_tag=tag, v=v, kind=kind, a_slot=f"p{ka}", a_x=a[0], a_y=a[1],
-                a_quadrant=_quadrant_of(*a), b_slot=f"p{kb}", b_x=b[0], b_y=b[1],
-                b_quadrant=_quadrant_of(*b), bitval=bv, i_a_probe=cur["A"],
-                i_b_probe=cur["B"], range_a=rng, highc=int(cfg.highc_b),
-                p_a_probe=pw["A"], p_b_probe=pw["B"], pm_range_w=pm_rng,
-                nplc=args.swm_nplc, n=int(t.size), n_overflow=n_over,
-                interval_us=(1e6 * float(np.median(np.diff(t))) if t.size > 1 else nan),
-                hold_s=args.swm_hold_s, pre_s=args.swm_pre_s, gap_s=args.swm_gap_s,
-                n_events=len(sent), fpga_refresh_ms=refresh.get("ms", nan),
-                sync_first_unc_s=sync.get("first_unc_s", nan),
-                sync_start_ack_late=sync.get("start_ack_late", nan),
-                pm_on_trace_axis=int(ptrace is not None)))
-            slow = [e for e in sent if e[4] - e[3] > 0.05]
-            if slow:
-                log(f"      !! {len(slow)} frame write(s) took > 50 ms, the slowest "
-                    f"{1e3 * max(e[4] - e[3] for e in slow):.0f} ms")
-            if n_over:
-                log(f"      !! {n_over} samples over range {rng:g} A")
+        smile.blank_frame()                 # the hold is A alone
+        smile.set_pixel(*a, bv)
+        sync = {}
+        t, ia, ib = capture_step(
+            smu, v, v, args.swm_samples, args.swm_nplc,
+            settle_first_s=args.swm_hold_s, chunk=args.chunk, log=log,
+            limit_a=rng, capacitance=args.capacitance,
+            max_presettle_s=max(args.max_presettle_s, args.swm_hold_s), cfg=scfg,
+            charge_limit=None, trigger=_sequence, channels=args.switch_channels,
+            pre_s=args.swm_pre_s, sync=sync, on_fire=_relight_then_record,
+            hold_tick=_relight, tick_s=args.switch_refresh_s)
+        keep_trace(tag, t, ia, ib, args.trace_points)
+        if ptrace is not None:
+            p_t, p_p = ptrace.stop(restore_averaging=cfg.pm_averaging)
+            if ptrace.t0 is not None and "host_t0" in sync:
+                p_t = p_t + (ptrace.t0 - sync["host_t0"])
+            # The meter thread runs until stop(), which comes after the SMU buffer
+            # is read back -- 20000 readings over USB, a second or more. Past the
+            # current record P(t) has nothing to be compared with: cut it there.
+            if t.size:
+                keep = p_t <= float(t[-1])
+                p_t, p_p = p_t[keep], p_p[keep]
+            keep_power_trace(tag, p_t, p_p)
+        t0h = sync.get("host_t0", nan)
+        for i, (label, xy, bit, t_s, t_a, t_b) in enumerate(sent):
+            events.append(dict(trace_tag=tag, v=v, idx=i, label=label, mode=mode,
+                               x=xy[0] if xy else nan, y=xy[1] if xy else nan,
+                               bitval=bit, sent_s=t_s - t0h, ack_s=t_a - t0h,
+                               blank_ack_s=(t_b - t0h if t_b != t_s else nan)))
+        n_over = int((np.abs(ib) >= 1e36).sum()) if ib.size else 0
+        rows.append(dict(
+            trace_tag=tag, v=v, kind=kind, switch_mode=mode, a_slot=f"p{ka}",
+            a_x=a[0], a_y=a[1],
+            a_quadrant=_quadrant_of(*a), b_slot=f"p{kb}", b_x=b[0], b_y=b[1],
+            b_quadrant=_quadrant_of(*b), bitval=bv, i_a_probe=cur["A"],
+            i_b_probe=cur["B"], range_a=rng, highc=int(cfg.highc_b),
+            p_a_probe=pw["A"], p_b_probe=pw["B"], pm_range_w=pm_rng,
+            nplc=args.swm_nplc, n=int(t.size), n_overflow=n_over,
+            interval_us=(1e6 * float(np.median(np.diff(t))) if t.size > 1 else nan),
+            hold_s=args.swm_hold_s, pre_s=args.swm_pre_s, gap_s=args.swm_gap_s,
+            n_events=len(sent), fpga_refresh_ms=refresh.get("ms", nan),
+            sync_first_unc_s=sync.get("first_unc_s", nan),
+            sync_start_ack_late=sync.get("start_ack_late", nan),
+            pm_on_trace_axis=int(ptrace is not None)))
+        slow = [e for e in sent if e[4] - e[3] > 0.05]
+        ack_ms = [1e3 * (e[4] - e[3]) for e in sent if e[0] not in (
+            "blank", "A only", "B only")]
+        if ack_ms:
+            log(f"      {mode}: switch write {np.median(ack_ms):.2f} ms median "
+                f"(send -> ACK)")
+        if slow:
+            log(f"      !! {len(slow)} frame write(s) took > 50 ms, the slowest "
+                f"{1e3 * max(e[4] - e[3] for e in slow):.0f} ms")
+        if n_over:
+            log(f"      !! {n_over} samples over range {rng:g} A")
     smile.blank_frame()
     _EXTRA_ROWS.setdefault("switchmatrix_events", []).extend(events)
     return rows
@@ -2748,7 +2762,8 @@ def estimate_seconds(what, cfg, args, n_pixels):
                                                          + len(LEAKM_STATES) * per_state)
     if "switchmatrix" in what:
         rec = args.swm_samples * sample_interval_s(args.swm_nplc, args.switch_channels)
-        total += len(args.swm_voltages) * 7 * (args.swm_hold_s + 1.0 + max(rec, 1.5))
+        total += (len(args.swm_voltages) * 7 * len(args.swm_switch_modes)
+                  * (args.swm_hold_s + 1.0 + max(rec, 1.5)))
         total += 4 * args.swm_window ** 2 * 0.05            # the four scan windows
     if "optfloor" in what:
         total += sum(n * 4e-3 * args.optfloor_reps for n in args.optfloor_n)
@@ -2928,6 +2943,13 @@ def build_parser():
                          "model, 261025-1915), 40 us of it integration")
     ap.add_argument("--swm-pre-s", type=float, default=0.1,
                     help="switchmatrix: baseline recorded before the first switch")
+    ap.add_argument("--swm-switch-modes", nargs="+", choices=("pixel", "blank", "frame"),
+                    default=["pixel", "blank", "frame"],
+                    help="switchmatrix: how each switch is written, one capture per mode "
+                         "and pair. pixel: set_pixel, rows 0..row only, so a pixel on a "
+                         "higher row stays lit. blank: blank frame, then set_pixel (~2 ms "
+                         "dark between). frame: one full frame with only the new pixel "
+                         "(send_image), nothing left over, a longer write")
     ap.add_argument("--swm-gap-s", type=float, default=0.05,
                     help="switchmatrix: wait after each acknowledged frame write")
     ap.add_argument("--swm-cycles", type=int, default=3,

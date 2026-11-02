@@ -455,7 +455,9 @@ def plot_switchmatrix(run_dir: Path) -> None:
             late = ("   START ack late: write positions NOT trustworthy"
                     if r.get("sync_start_ack_late") == "True" else "")
             ax.set_title(
-                f"{r['kind']}-quadrant switch, {float(r['v']):+.3f} V:  A = "
+                f"{r['kind']}-quadrant switch"
+                + (f" by {r['switch_mode']}" if r.get("switch_mode") else "")
+                + f", {float(r['v']):+.3f} V:  A = "
                 f"{r['a_slot']} ({r['a_x']},{r['a_y']}) {r['a_quadrant']}   B = "
                 f"{r['b_slot']} ({r['b_x']},{r['b_y']}) {r['b_quadrant']}\n"
                 f"range {si(float(r['range_a']))}, High-C {'on' if r['highc'] == '1' else 'off'}, "
@@ -522,7 +524,9 @@ def zoom_switches(t, ib, ptr, events, r, out, plt):
     for ax in list(axs.flat)[n:]:
         ax.set_visible(False)
     fig.suptitle(
-        f"{r['kind']}-quadrant, {float(r['v']):+.3f} V, A = {r['a_slot']} "
+        f"{r['kind']}-quadrant"
+        + (f" by {r['switch_mode']}" if r.get("switch_mode") else "")
+        + f", {float(r['v']):+.3f} V, A = {r['a_slot']} "
         f"({r['a_x']},{r['a_y']}) {r['a_quadrant']}, B = {r['b_slot']} "
         f"({r['b_x']},{r['b_y']}) {r['b_quadrant']}: every write, "
         f"+-{ZOOM_HALF_S * 1e3:.0f} ms around its ACK; NPLC {float(r['nplc']):g} @ {float(r['interval_us']):.0f} us",

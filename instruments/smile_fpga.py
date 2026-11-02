@@ -27,15 +27,18 @@ class SmileFPGA:
         self._dev = smile_dev
         # Lazy import so the module can be imported without the smile library installed.
         if smile_dev is not None:
-            from smile.utils.display import send_image, set_pixel, set_pixels
+            from smile.utils.display import (_pixel_row_constructor, send_image,
+                                             set_pixel, set_pixels)
 
             self._send_image = send_image
             self._set_pixel = set_pixel
             self._set_pixels = set_pixels
+            self._pixel_row = _pixel_row_constructor
         else:
             self._send_image = None
             self._set_pixel = None
             self._set_pixels = None
+            self._pixel_row = None
 
     # ------------------------------------------------------------------
     # Coordinate mapping
@@ -130,6 +133,30 @@ class SmileFPGA:
         if self._dev is not None:
             self._set_pixels(self._dev, [(r, c) for r, c, _ in mapped], bit_val,
                              cfg=quad_cfg)
+        return time.perf_counter()
+
+    def show_pixel(self, log_x, log_y, bit_val):
+        """A FULL frame in which only this pixel is at ``bit_val``.
+
+        ``set_pixel`` rewrites rows 0..row only, so a pixel lit earlier on a higher row
+        stays lit (261025-1915: A + B after A->B whenever A's row was the higher). This
+        rewrites all 256 rows in one write. It is ``blank_frame``'s write (send_image,
+        2048 words) with the pixel's row from ``set_pixel``'s row builder put in, both
+        long in use. The pixel's own quadrant is enabled, as set_pixel does: every
+        quadrant reads the same frame data, so enabling all four would light the
+        pixel's mirror images too. A full frame is ~2x set_pixel's payload, so expect
+        a longer ACK.
+
+        Returns
+        -------
+        float
+            `time.perf_counter()` taken immediately after the FPGA ACK.
+        """
+        row, col, quad_cfg = self.map_logical_to_physical(log_x, log_y)
+        if self._dev is not None:
+            data = [0] * self.BLANK_FRAME_CHUNK_COUNT
+            data[8 * row: 8 * row + 8] = self._pixel_row(col, bit_val)
+            self._send_image(self._dev, data, quad_cfg)
         return time.perf_counter()
 
     def blank_frame(self, enables=None):
