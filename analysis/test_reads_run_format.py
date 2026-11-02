@@ -381,6 +381,27 @@ def test_pixel_classes_one_of_each():
     assert (got[n:n + 40] == "open").all()
     assert d.iloc[n + 40]["is_overcurrent"]    # the short also draws > 120 uA
     assert (got[:n] == "typical").mean() > 0.5
+    # a sweep passes its own floor and threshold: per-point floor, overcurrent at 130 uA
+    floor = np.full(len(P), 1e-11)
+    floor[n] = 1e-11                           # the first "open" pixel: 1 pW, still dark
+    d2 = aa.classify_pixels(fs, floor_W=floor, i_max_A=130e-6)
+    assert d2.attrs["i_max_A"] == 130e-6
+    assert not d2.iloc[n + 40]["is_overcurrent"]    # 125 uA is below 130 uA now
+    assert (d2["primary"].values[n:n + 40] == "open").all()
+
+
+def test_transition_matrix_counts():
+    import tempfile
+    import pixel_classes as pc
+    idx = pd.MultiIndex.from_tuples([(0, 0), (1, 0), (2, 0), (3, 0)], names=["X", "Y"])
+    a = pd.Series(["typical", "typical", "short", "open"], index=idx)
+    b = pd.Series(["typical", "other", "short"], index=idx[:3])   # (3, 0) not in b
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "t"
+        pc.plot_transitions(a, b, "a", "b", out, aa._plt())
+        ct = pd.read_csv(out.with_suffix(".csv"), index_col=0)
+        assert ct.loc["typical", "typical"] == 1 and ct.loc["typical", "other"] == 1
+        assert ct.loc["All", "All"] == 3 and out.with_suffix(".png").is_file()
 
 
 def test_block_stats_match_the_per_block_loop():

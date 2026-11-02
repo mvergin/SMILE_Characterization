@@ -9,6 +9,8 @@ what the folder holds and skips a run that is already up to date.
 | folder holds                                 | tool                 |
 |----------------------------------------------|----------------------|
 | FastScan/                                    | analyze_array.py     |
+| FastScan/                                    | pixel_classes.py     |
+| NVLEDSweep/ (and shorts measured on its list)| led_vs_shorts.py     |
 | calibration_traces.npz                       | plot_calibration.py  |
 | traces.npz, switchmatrix.csv or isrc.csv     | plot_transients.py   |
 | leakmatrix.csv                               | plot_leakmatrix.py   |
@@ -39,6 +41,9 @@ STATE = "ANALYSIS_STATE.json"
 LOG = "ANALYSIS_LOG.txt"
 TOOLS = {   # tool: does this run folder need it
     "analyze_array.py": lambda d: (d / "FastScan").is_dir(),
+    "pixel_classes.py": lambda d: (d / "FastScan").is_dir(),
+    # after pixel_classes: it reads sweep_classes.csv. Exits at once without shorts.
+    "led_vs_shorts.py": lambda d: (d / "NVLEDSweep").is_dir(),
     "plot_calibration.py": lambda d: (d / "calibration_traces.npz").is_file(),
     "plot_transients.py": lambda d: any((d / f).is_file() for f in
                                         ("traces.npz", "switchmatrix.csv", "isrc.csv")),

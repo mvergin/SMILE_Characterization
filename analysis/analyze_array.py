@@ -3951,7 +3951,7 @@ PIXEL_CLASSES = {      # name: (colour, rule). Priority order: first match is pr
 }
 
 
-def classify_pixels(fs):
+def classify_pixels(fs, floor_W=None, i_max_A=None):
     """Fast-scan pixel classes, one row per pixel: a primary class (the first rule that
     matches, in PIXEL_CLASSES order) and an is_<class> flag for every rule that matches.
     Classes overlap -- most shorts also draw more than 120 uA -- so the flags keep every
@@ -3961,6 +3961,10 @@ def classify_pixels(fs):
     collection, 261022-0037), so one array-wide median would put whole quadrants into
     the high or low groups. "Dark" is below a noise floor measured in the same scan:
     median + FLOOR_MAD x MAD of the pixels under 1 % of the lit median.
+
+    A sweep has no dead pixels to measure that floor or the shorts' current on, so
+    pixel_classes.py passes them: ``floor_W`` a scalar or one value per row (the
+    OPTICAL_SNR floor of each point), ``i_max_A`` the overcurrent threshold.
     """
     d = pd.DataFrame({"X": fs["X"].astype(int).values, "Y": fs["Y"].astype(int).values,
                       "quadrant": _quadrant_col(fs).values,
@@ -3971,6 +3975,9 @@ def classify_pixels(fs):
     dk = d.loc[d["P_W"] < 0.01 * d.loc[alive, "P_W"].median(), "P_W"]
     floor = (float(dk.median() + FLOOR_MAD * 1.4826 * (dk - dk.median()).abs().median())
              if len(dk) >= 10 else 0.01 * p_lit)
+    if floor_W is not None:
+        floor = (pd.Series(np.asarray(floor_W, float), index=d.index)
+                 if np.ndim(floor_W) else float(floor_W))
     # P/I on the LED current: the quadrant's leakage taken out. An open pixel draws
     # exactly that leakage (0.12-0.2 uA per quadrant in 261022-0037), so the median open
     # pixel of the quadrant is its leakage. Without it the dimmest lit pixels, where the
@@ -3999,6 +4006,8 @@ def classify_pixels(fs):
     shorts = dark & (I > I_SHORT_A)
     i_max = max(I_MAX_A, SHORT_X * float(I[shorts].median())) if shorts.sum() >= 10 \
         else I_MAX_A
+    if i_max_A is not None:
+        i_max = float(i_max_A)
     rules = {
         "short": shorts,
         "open": dark & (I < I_OPEN_A),
@@ -4015,7 +4024,7 @@ def classify_pixels(fs):
     for name, m in rules.items():
         d[f"is_{name}"] = m.astype(bool)
     d["is_other"] = d["primary"] == "other"
-    d.attrs.update(floor_W=floor, p_lit_W=p_lit, i_max_A=i_max,
+    d.attrs.update(floor_W=float(np.median(floor)), p_lit_W=p_lit, i_max_A=i_max,
                    v=float(fs["NVLED_V"].iloc[0]) if "NVLED_V" in fs else float("nan"))
     return d
 

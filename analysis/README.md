@@ -47,6 +47,8 @@ It picks the tools from what each run folder holds:
 | folder holds | tool |
 |---|---|
 | `FastScan/` | `analyze_array.py` |
+| `FastScan/` | `pixel_classes.py` |
+| `NVLEDSweep/` (does nothing without a transistoriv run on its shorts) | `led_vs_shorts.py` |
 | `calibration_traces.npz` | `plot_calibration.py` |
 | `traces.npz`, `switchmatrix.csv` or `isrc.csv` | `plot_transients.py` |
 | `leakmatrix.csv` | `plot_leakmatrix.py` |
@@ -73,6 +75,30 @@ spread across pixels, and the current per bitval over bitval 1 against 1:2:4:8:1
 `plot_droop.py` reads a `--what droop` run: total current and light with N pixels lit,
 against N × one pixel; per-pixel current and light over their N = 1 value; and P/I.
 One row per bias, the random and the growing-patch order as two lines.
+
+### `pixel_classes.py` — the classes across biases
+
+The fast-scan classes (analyze_array's rules) at each fast-scan bias against the first
+(`pixelclassification/fastscan/class_transitions_<a>_to_<b>.png`), and with a sweep, the
+same rules applied at every lit sweep bias on lit minus reference, dark below the
+OPTICAL_SNR floor of each point (`pixelclassification/sweep/`: transition matrices,
+persistence of each fast-scan class, counts and median I/P/(P/I) curves per class).
+Overcurrent is 1.2 x the shorts' current at that bias, from the transistoriv run on this
+run's `short.csv`.
+
+### `led_vs_shorts.py` — the LED without its driver
+
+A sweep against the transistoriv run on its shorts (found through the transistoriv
+run's `--pixel-list`). Bitval-0 leakage of both, the median LED I-V with the driver's
+drop bounded by the short's chord resistance at the same NVLED, per-pixel ideality and
+sub-threshold current. `REPORT_assets/led_vs_shorts/summary.md` has the numbers.
+
+### `compare_cap_removal.py` — one array with and without its carrier capacitors
+
+Not per run: `python analysis/compare_cap_removal.py` (Array42 by default) writes
+`results/comparisons/Array42_cap_removal/`: step table and long captures, cap table, and
+the fast scans pixel by pixel. Run `analyze_cap_comparison.py <step run caps> <step run
+no caps> -o <same folder>` for the capacitance, power-law and range-artifact figures.
 
 ### `analyze_array.py` — the main report
 
