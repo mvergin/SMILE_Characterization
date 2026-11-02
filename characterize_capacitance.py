@@ -1829,6 +1829,10 @@ def exp_switchmatrix(pm, smu, smile, cfg, args, log):
                 m.acquire.flush_pm_after_range(pm, smu, 1, 1, cfg)
             cur, pw = {}, {}
             for k, xy in (("B", b), ("A", a)):
+                # Blank first: set_pixel rewrites only rows 0..row of the pixel, so B
+                # stays lit under A whenever B's row is the higher one -- the BL and BR
+                # captures of 261025-1915 held A + B (235 uA) instead of A.
+                smile.blank_frame()
                 smile.set_pixel(*xy, bv)
                 time.sleep(0.3)
                 pt = m.acquire_point(pm, smu, 10, 1)
@@ -1879,6 +1883,7 @@ def exp_switchmatrix(pm, smu, smile, cfg, args, log):
                     _sent.append((label, xy, bit, t_s, time.perf_counter()))
                     time.sleep(args.swm_gap_s)
 
+            smile.blank_frame()                 # the hold is A alone
             smile.set_pixel(*a, bv)
             sync = {}
             t, ia, ib = capture_step(

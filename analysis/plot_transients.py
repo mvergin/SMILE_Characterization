@@ -478,10 +478,12 @@ def plot_switchmatrix(run_dir: Path) -> None:
                 zoom_switches(t, ib, ptr, mine, r, out_dir / f"zoom_{tag}.png", plt)
 
 
+ZOOM_HALF_S = 0.010     # zoom panels: this long either side of the write's ACK
+
+
 def zoom_switches(t, ib, ptr, events, r, out, plt):
-    """One panel per frame write, from halfway since the previous write (or the
-    record start) to halfway to the next one (or the record end): the transition and
-    both plateaus around it, in ms from that write's ACK. Current left, light right,
+    """One panel per frame write: ZOOM_HALF_S either side of its ACK, never past
+    halfway to the neighbouring writes, in ms from the ACK. Current left, light right,
     the send->ack band shaded. Whether the current settles inside one reading only
     shows at this scale."""
     ack = [float(e["ack_s"]) for e in events]
@@ -495,7 +497,8 @@ def zoom_switches(t, ib, ptr, events, r, out, plt):
     if ptr is not None:
         sp, up = _autoscale(ptr[1], "W")
     for k, (e, ax) in enumerate(zip(events, axs.flat)):
-        lo, hi, a0 = edges[k], edges[k + 1], ack[k]
+        a0 = ack[k]
+        lo, hi = max(edges[k], a0 - ZOOM_HALF_S), min(edges[k + 1], a0 + ZOOM_HALF_S)
         m = (t >= lo) & (t <= hi)
         ax.plot(1e3 * (t[m] - a0), ib[m] / si_, ".-", ms=2, lw=0.5, color="tab:blue")
         ax.axvspan(1e3 * (float(e["sent_s"]) - a0), 0.0,
@@ -521,8 +524,8 @@ def zoom_switches(t, ib, ptr, events, r, out, plt):
     fig.suptitle(
         f"{r['kind']}-quadrant, {float(r['v']):+.3f} V, A = {r['a_slot']} "
         f"({r['a_x']},{r['a_y']}) {r['a_quadrant']}, B = {r['b_slot']} "
-        f"({r['b_x']},{r['b_y']}) {r['b_quadrant']}: every write, halfway to its "
-        f"neighbours; NPLC {float(r['nplc']):g} @ {float(r['interval_us']):.0f} us",
+        f"({r['b_x']},{r['b_y']}) {r['b_quadrant']}: every write, "
+        f"+-{ZOOM_HALF_S * 1e3:.0f} ms around its ACK; NPLC {float(r['nplc']):g} @ {float(r['interval_us']):.0f} us",
         fontsize=10)
     fig.tight_layout()
     fig.savefig(out, dpi=150)
