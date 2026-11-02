@@ -2535,6 +2535,10 @@ def exp_transistoriv(pm, smu, smile, cfg, args, log):
         f"{len(volts)} points, limit {args.tiv_limit:g} A, NPLC {args.tiv_nplc:g}, "
         f"autozero {args.tiv_autozero}, {'ch A and B' if args.tiv_channels == 2 else 'ch B'}"
         f", PM400 read at every point")
+    # The light too: a "short" may still emit (p7 of 261102-1114 was a working LED, and
+    # every reading above the 470 nW range it inherited came back over-range). Each
+    # bitval sweep starts on the lowest range and steps up on over-range.
+    ladder = m.acquire.pm_ladder(pm, cfg, log) if cfg.pm_autorange else None
     rows = []
     try:
         for k, (x, y) in enumerate(pixels, 1):
@@ -2546,17 +2550,31 @@ def exp_transistoriv(pm, smu, smile, cfg, args, log):
                 smu.set_voltage("b", 0.0)
                 smile.blank_frame()
                 smile.set_pixel(x, y, int(bv))
+                rng = None
+                if ladder:
+                    rng = ladder[0]
+                    if m.acquire.set_pm_range(pm, rng)[1]:
+                        m.acquire.flush_pm_after_range(pm, smu, 1, 1, cfg)
                 for v in volts:
                     smu.set_voltage("b", float(v))
                     time.sleep(args.tiv_settle_s)
                     pt, raw = m.acquire_point(pm, smu, args.tiv_n_smu, 1, return_raw=True,
                                               channels=args.tiv_channels)
+                    while ladder and m.acquire.pm_over(pt[0], rng, cfg):
+                        up = m.acquire.pm_range_up(pm, smu, rng, 1, 1, cfg, log)
+                        if up == rng:
+                            break
+                        rng = up
+                        pt, raw = m.acquire_point(pm, smu, args.tiv_n_smu, 1,
+                                                  return_raw=True,
+                                                  channels=args.tiv_channels)
                     here.append(dict(
                         X=x, Y=y, QUADRANT=_quadrant_of(x, y), BITVAL=int(bv),
                         NVLED_V=float(v), **m.stat_columns("NVLED_CURR", raw["nvled"]),
                         **(m.stat_columns("VLED_CURR", raw["vled"])
                            if args.tiv_channels == 2 else {}),
                         **m.stat_columns("PM400_POWER", raw["pm"]),
+                        **({"PM_RANGE_W": rng} if rng is not None else {}),
                         NVLED_LIMIT_A=args.tiv_limit,
                         NVLED_AT_COMPLIANCE=int(abs(pt[4]) >= 0.98 * args.tiv_limit)))
             rows.extend(here)
