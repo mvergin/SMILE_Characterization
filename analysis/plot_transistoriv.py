@@ -58,24 +58,29 @@ def main(run: Path) -> None:
     colors = dict(zip(bits, plt.cm.viridis(np.linspace(0, 0.9, len(bits)))))
     n_px = d.groupby(["X", "Y"]).ngroups
 
-    fig = plt.figure(figsize=(3.4 * max(len(bits), 4), 12.6))
-    gs = fig.add_gridspec(3, max(len(bits), 4))
-    for row, (col, scale, label, med) in enumerate((
+    # per-bitval panels wrap at 8 a row: all 16 bitvals were one 8160 px wide row
+    nc = min(len(bits), 8)
+    nrb = -(-len(bits) // nc)
+    ncol = max(nc, 5)
+    bottom = 2 * nrb
+    fig = plt.figure(figsize=(3.4 * ncol, 4.2 * (bottom + 1)))
+    gs = fig.add_gridspec(bottom + 1, ncol)
+    for blk, (col, scale, label, med) in enumerate((
             ("I", 1e6, "|I_B| (uA)", "median_A"),
             ("P", 1e9, "optical power (nW)", "P_median_W"))):
         for k, b in enumerate(bits):
-            a = fig.add_subplot(gs[row, k])
+            a = fig.add_subplot(gs[blk * nrb + k // nc, k % nc])
             for _, c in d[d["BITVAL"] == b].groupby(["X", "Y"]):
                 a.plot(c["V"], c[col] * scale, color=colors[b], lw=0.5, alpha=0.3)
             s = summ[summ["BITVAL"] == b]
             a.plot(-s["NVLED_V"], s[med] * scale, color="k", lw=2)
             a.set_title(f"bitval {b}", fontsize=10)
             a.set_xlabel("-V_NVLED (V)")
-            if k == 0:
+            if k % nc == 0:
                 a.set_ylabel(label)
             a.grid(alpha=0.3)
 
-    a = fig.add_subplot(gs[2, 0])                      # medians together
+    a = fig.add_subplot(gs[bottom, 0])                 # medians together
     for b in bits:
         s = summ[summ["BITVAL"] == b]
         a.plot(-s["NVLED_V"], s["median_A"] * 1e6, color=colors[b], label=f"{b}")
@@ -86,7 +91,7 @@ def main(run: Path) -> None:
     a.legend(title="bitval", fontsize=8)
     a.grid(alpha=0.3)
 
-    a = fig.add_subplot(gs[2, 1])                      # additivity
+    a = fig.add_subplot(gs[bottom, 1])                 # additivity
     w = d.pivot_table(index=["X", "Y", "NVLED_V"], columns="BITVAL", values="I")
     if {0, 1, 2, 4, 8, 15} <= set(w.columns):
         s1 = w[1] + w[2] + w[4] + w[8] - 3 * w[0]
@@ -104,7 +109,7 @@ def main(run: Path) -> None:
     a.set_ylabel("I15 (uA)")
     a.grid(alpha=0.3)
 
-    a = fig.add_subplot(gs[2, 2])                      # spread across pixels
+    a = fig.add_subplot(gs[bottom, 2])                 # spread across pixels
     for b in bits:
         s = summ[summ["BITVAL"] == b]
         a.plot(-s["NVLED_V"], 100 * s["mad_A"] / s["median_A"], color=colors[b], label=f"{b}")
@@ -113,7 +118,7 @@ def main(run: Path) -> None:
     a.legend(title="bitval", fontsize=8)
     a.grid(alpha=0.3)
 
-    a = fig.add_subplot(gs[2, 3])                      # weighting at the deepest bias
+    a = fig.add_subplot(gs[bottom, 3])                 # weighting at the deepest bias
     vmin = d["NVLED_V"].min()
     top = d[d["NVLED_V"] == vmin].pivot_table(index=["X", "Y"], columns="BITVAL",
                                               values="I")
@@ -131,9 +136,25 @@ def main(run: Path) -> None:
     a.set_ylabel(f"I / I(bitval 1) at {vmin:g} V")
     a.grid(alpha=0.3, which="both")
 
+    # Past the knee each bitval holds its current whatever the bias, so the bitvals are
+    # current sources: P/I against I at the most negative bias is the pixel's
+    # efficiency at up to 15 fixed currents (all biases faint, for the rising side).
+    a = fig.add_subplot(gs[bottom, 4])
+    lit = d[(d["BITVAL"] != 0) & (d["I"] > 1e-6) & (d["P"] > 0)]   # W/A x 1e3 = nW/uA
+    a.scatter(lit["I"] * 1e6, lit["P"] / lit["I"] * 1e3, s=4, color="0.75",
+              label="every bias, I > 1 uA")
+    deep = lit[lit["NVLED_V"] == vmin]
+    a.scatter(deep["I"] * 1e6, deep["P"] / deep["I"] * 1e3, s=18,
+              c=[colors[b] for b in deep["BITVAL"]], label=f"{vmin:g} V, one per bitval")
+    a.set_xlabel("|I_B| (uA)")
+    a.set_ylabel("P / I (nW/uA)")
+    a.set_title("efficiency: the bitvals as current sources", fontsize=9)
+    a.legend(fontsize=8)
+    a.grid(alpha=0.3)
+
     fig.suptitle(f"Drive-transistor IV through shorted pixels -- {n_px} pixels "
                  f"({run.name})", fontsize=11)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
     fig.savefig(run / "transistoriv.png", dpi=150)
     plt.close(fig)
     print(f"wrote {run / 'transistoriv.png'} and transistoriv_summary.csv")
