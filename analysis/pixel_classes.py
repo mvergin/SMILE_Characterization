@@ -187,7 +187,10 @@ def sweep_classes(sw: pd.DataFrame, fsc: dict, i_max: dict, base: Path, plt, log
                               "NVLED_CURR_MEAN": s["I_LED"].clip(lower=0).values,
                               "PM400_POWER_MEAN": s["P"].clip(lower=0).values,
                               "NVLED_V": v})
-        im = i_max.get(round(float(v), 4))
+        # the shorts are measured in 0.1 V steps: interpolate for -0.95 V and the like
+        vs = sorted(i_max)
+        im = (float(np.interp(v, vs, [i_max[k] for k in vs]))
+              if vs and vs[0] <= v <= vs[-1] else None)
         src = "shorts (transistoriv)"
         if im is None:
             im, src = max(aa.I_MAX_A, aa.SHORT_X * float(s["I_LED"].median())), "1.2 x median"
