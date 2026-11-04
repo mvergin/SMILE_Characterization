@@ -1320,8 +1320,9 @@ def fastscan_vs_sweep_compare(by_bias, sw_raw, eta, roi, out_dir, plt, log):
                 q = np.nanpercentile(np.abs(d[np.isfinite(d)]), 95) if np.isfinite(d).any() else 1
                 draw_nearest(ax[2, c], fig, X, Y, d, roi, "sweep / fast scan - 1 (%)",
                              "RdBu_r", vlo=-q, vhi=q, centred=True)
-                ax[2, c].set_title(f"difference: {lab}, median {np.nanmedian(d):+.1f} %",
-                                   fontsize=9)
+                ax[2, c].set_title(f"difference: {lab}, median " + (
+                    f"{np.nanmedian(d):+.1f} %" if np.isfinite(d).any() else "n/a"),
+                    fontsize=9)
             fig.suptitle(
                 f"{kind} targets: fast scan at {v:+.3f} V against the nearest sweep bias "
                 f"{v + float(dv.median()):+.3f} V (dV {float(dv.min()) * 1e3:+.0f} to "
@@ -1344,6 +1345,7 @@ def leakage_map(df, roi, out, plt):
         d = d[d["POOL_K_EFF"] <= 1]
     if "LEAK_REF_CACHED" in d.columns:
         d = d[d["LEAK_REF_CACHED"].astype(float) != 1]       # its own read, not the cache
+    d = d[d["NVLED_CURR_REF"].notna()]      # biases without a reference (0 V..) are empty
     vs = sorted(d["NVLED_V"].astype(float).round(4).unique(), reverse=True)
     if not vs:
         return None
@@ -4789,7 +4791,15 @@ def analyse_run(run_dir, log):
                                 out / "pixelclassification" / "fastscan", plt, log)
     except Exception as e:
         log(f"  (skipped the pixel classes: {e})")
-    plot_fastscan_overview(fs, cls, out / "fastscan_overview.png", plt)
+    if fs["PM400_POWER_MEAN"].notna().sum() == 0:
+        # 261104-0656: the PM400 sat on a range where it returned nothing readable.
+        # Nothing of the fast scan can be classified, but the sweep can still be used.
+        log("  !! the fast scan has no readable light (PM400_POWER all NaN): its plots "
+            "are skipped, the sweep is analysed alone")
+    try:
+        plot_fastscan_overview(fs, cls, out / "fastscan_overview.png", plt)
+    except Exception as e:
+        log(f"  (skipped the fast-scan overview: {e})")
     for fsv in [fs, *fs_extra.values()]:
         try:
             tag = "" if not fs_extra else f"_v{float(fsv['NVLED_V'].iloc[0]):+.3f}"

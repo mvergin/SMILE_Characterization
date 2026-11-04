@@ -2236,20 +2236,30 @@ def probe_pm_range(pm, smu, smile, pixels, cfg: IQEConfig, log: Logger, bitval: 
     brightest x ``scale`` (K for groups) x headroom picks the range; a pixel that is
     brighter still is caught by the per-point over-range retry."""
     ladder = pm_ladder(pm, cfg, log)
-    set_pm_range(pm, ladder[-1])
-    flush_pm_after_range(pm, smu, 1, 1, cfg)
     pick = list(pixels)
     if len(pick) > n:
         idx = np.random.default_rng(0).choice(len(pick), n, replace=False)
         pick = [pick[i] for i in sorted(idx)]
-    p_max = 0.0
-    for (x, y) in pick:
-        smile.blank_frame()
-        smile.set_pixel(x, y, bitval)
-        time.sleep(max(cfg.fastscan_settle_ms, 5.0) / 1000.0)
-        p = pm.measure()
-        if p is not None and math.isfinite(p):
-            p_max = max(p_max, abs(p))
+    # A range on which no pixel gives a readable value leaves the ladder: 261104-0656
+    # was offered 47 mW, every lit reading there came back unparseable (NaN), the
+    # brightest read as 0 W, "nothing predicted" picked the widest range again, and
+    # the fast scan and the sweep down to -1.0 V lost all their light.
+    while True:
+        set_pm_range(pm, ladder[-1])
+        flush_pm_after_range(pm, smu, 1, 1, cfg)
+        p_max, readable = 0.0, False
+        for (x, y) in pick:
+            smile.blank_frame()
+            smile.set_pixel(x, y, bitval)
+            time.sleep(max(cfg.fastscan_settle_ms, 5.0) / 1000.0)
+            p = pm.measure()
+            if p is not None and math.isfinite(p):
+                p_max, readable = max(p_max, abs(p)), True
+        if readable or len(ladder) == 1 or not pick:
+            break
+        log(f"  !! PM400 {ladder[-1]:.3g} W range: no readable value from {len(pick)} "
+            f"pixel(s) -- dropped from the ladder")
+        ladder.pop()
     smile.blank_frame()
     rng = pick_pm_range(p_max * scale, cfg, ladder)
     _, changed = set_pm_range(pm, rng)

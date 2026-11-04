@@ -2175,6 +2175,29 @@ def test_the_pm400_range_is_picked_like_the_smu_limit():
     assert acquire.pm_over(float("nan"), 4.7e-7, cfg), "an unreadable value is over range"
 
 
+def test_a_range_that_reads_nothing_leaves_the_ladder():
+    """261104-0656: on the 47 mW range every lit reading was NaN, the probe saw 0 W and
+    kept that range. The probe drops it and picks from the next range down."""
+    class PM:
+        rng = 0.0
+        def set_range(self, r): self.rng = r
+        def measure(self): return float("nan") if self.rng > 1e-2 else 6e-6
+    class Smile:
+        def blank_frame(self): pass
+        def set_pixel(self, x, y, b): pass
+    saved = (acquire._pm_ladder[:], acquire._pm_range_now[0])
+    try:
+        acquire._pm_ladder[:] = [4.7e-7, 4.7e-6, 4.7e-5, 4.7e-4, 4.7e-2]
+        acquire._pm_range_now[0] = 0.0
+        cfg = dataclasses.replace(IQEConfig(), pm_range_settle_s=0, fastscan_settle_ms=0)
+        rng = acquire.probe_pm_range(PM(), None, Smile(), [(0, 0), (1, 0)], cfg,
+                                     lambda s: None, 15, 2)
+        assert acquire._pm_ladder == [4.7e-7, 4.7e-6, 4.7e-5, 4.7e-4]
+        assert rng == 4.7e-5, "1.5 x 6 uW = 9 uW"
+    finally:
+        acquire._pm_ladder[:], acquire._pm_range_now[0] = saved
+
+
 def test_every_point_is_read_on_a_range_that_holds_it():
     """pm_autorange (the default): fast scan and sweep write PM_RANGE_W, and no reading
     sits above pm_overrange_frac of its own range -- at every fast-scan bias."""
