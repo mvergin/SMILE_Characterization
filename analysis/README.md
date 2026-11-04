@@ -100,6 +100,14 @@ Not per run: `python analysis/compare_cap_removal.py` (Array42 by default) write
 the fast scans pixel by pixel. Run `analyze_cap_comparison.py <step run caps> <step run
 no caps> -o <same folder>` for the capacitance, power-law and range-artifact figures.
 
+### `driver_stats.py` — the pixel drivers, from transistoriv runs
+
+Not per run: `python analysis/driver_stats.py [<transistoriv run> ...]` (default: the
+Array38 and Array42 shorts) writes `results/comparisons/drivers/`: quadrant against
+local spread, spread per code against 1/sqrt(weight), code linearity, saturation slope,
+and the current spread of LED pixels (the sweep their pixel list came from) against
+their drivers' at every bias.
+
 ### `analyze_array.py` — the main report
 
 Loads a run directory, enriches it (EQE, current density, leakage, reliability
