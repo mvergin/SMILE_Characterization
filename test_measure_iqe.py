@@ -2175,6 +2175,52 @@ def test_the_pm400_range_is_picked_like_the_smu_limit():
     assert acquire.pm_over(float("nan"), 4.7e-7, cfg), "an unreadable value is over range"
 
 
+def test_light_writes_a_full_frame_only_when_asked():
+    """frame_write 'full': light() sends show_pixel; 'partial' (default): set_pixel.
+    Pooling with 'full' is refused: set_pixels has no full-frame form."""
+    calls = []
+
+    class Smile:
+        def set_pixel(self, x, y, b): calls.append(("set_pixel", x, y, b))
+        def show_pixel(self, x, y, b): calls.append(("show_pixel", x, y, b))
+    for mode, want in (("full", "show_pixel"), ("partial", "set_pixel")):
+        calls.clear()
+        acquire.begin_writes(dataclasses.replace(IQEConfig(), frame_write=mode))
+        acquire.light(Smile(), 3, 4, 15)
+        assert calls == [(want, 3, 4, 15)], (mode, calls)
+        assert len(acquire._write_s) == 1, "every write is timed"
+    acquire.begin_writes(IQEConfig())
+    try:
+        dataclasses.replace(IQEConfig(), frame_write="full", pool_groups=(4,)).validate()
+        raise AssertionError("frame_write='full' with pooling must be refused")
+    except ValueError as e:
+        assert "pooling" in str(e)
+
+
+def test_a_lit_reference_is_retried_by_current_when_there_is_no_light():
+    """261104-0656: the PM400 read NaN, so the optical gate could not run and 1064 lit
+    references (> 1 uA) went unretried. Without light, a reference above 5x the pixel's
+    lowest reference is re-written."""
+    reads = iter([(float("nan"), 0, 0, 0, -20e-6, 0, 0, 0),      # still lit
+                  (float("nan"), 0, 0, 0, -150e-9, 0, 0, 0)])    # clean
+    real = acquire.acquire_point
+    acquire.acquire_point = lambda *a, **k: (next(reads), {})
+
+    class Smile:
+        def set_pixel(self, *a): pass
+    try:
+        acquire.begin_writes(IQEConfig())
+        acquire._ref_last[(1, 1)] = 160e-9
+        cfg = dataclasses.replace(IQEConfig(), leak_ref_tries=2, leak_ref_settle_s=0)
+        ref, tries, _ = acquire.read_reference(None, None, Smile(), 1, 1, 1, 1, cfg,
+                                               float("nan"), lambda s: None, -1.4)
+        assert tries == 2 and ref[4] == -150e-9
+        assert acquire._ref_last[(1, 1)] == 150e-9, "the lowest clean reference is kept"
+    finally:
+        acquire.acquire_point = real
+        acquire.begin_writes(IQEConfig())
+
+
 def test_a_range_that_reads_nothing_leaves_the_ladder():
     """261104-0656: on the 47 mW range every lit reading was NaN, the probe saw 0 W and
     kept that range. The probe drops it and picks from the next range down."""

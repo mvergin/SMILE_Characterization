@@ -680,6 +680,14 @@ class IQEConfig:
     #     gets ~6s at -2.6V and then sits dark through most of the next 15 biases. The
     #     cheap test is to condition all selected pixels once before the first bias
     #     (+1.5s each, ~24s for 16) and see whether the deficit collapses. Section 17.
+    frame_write: str = "partial"  # how the sweep writes a single pixel's frame.
+    # "partial": set_pixel, which sends rows 0..row only (as always). A pixel lit on a
+    # higher row stays lit (the row rule), and in 261104-0656 3-15 % of the bitval-0
+    # references on rows 248-267 stayed lit -- 0 % on rows 255/256, the two rows whose
+    # set_pixel already covers all 256 rows. "full": show_pixel, one full frame with
+    # only this pixel; clean in all 42 switch-matrix captures on Array42 (261102-1216),
+    # ~0.5-1 ms longer per write. Single pixels only: pooled targets go through
+    # set_pixels, so "full" with pooling is refused.
     pixel_switch_settle_s: float = 2.0  # bias_major: the wait after a frame change,
                                        # before measuring the next pixel at a held bias.
                                        # This is the ONLY per-point wait in bias_major,
@@ -992,9 +1000,13 @@ class IQEConfig:
                               ("sweep_select", {"blocks", "spatial", "stride"}),
                               ("fine_sweep_mode", {"voltage", "current"}),
                               ("sweep_direction", {"low_to_high", "high_to_low"}),
-                              ("sweep_autozero", {"AUTO", "ONCE", "OFF"})):
+                              ("sweep_autozero", {"AUTO", "ONCE", "OFF"}),
+                              ("frame_write", {"partial", "full"})):
             if getattr(self, name) not in allowed:
                 raise ValueError(f"{name}={getattr(self, name)!r}; expected one of {sorted(allowed)}")
+        if self.frame_write == "full" and (self.pool_groups or self.fastscan_pool):
+            raise ValueError("frame_write='full' with pooling: a pooled target is written "
+                             "by set_pixels, which has no full-frame form")
         if self.sweep_voltages:
             if self.fine_sweep_mode != "voltage":
                 raise ValueError("sweep_voltages needs fine_sweep_mode='voltage'")

@@ -134,6 +134,7 @@
     "resume": false,
     "settle_scale": 0.0,
     "sweep_order": "bias_major",
+    "frame_write": "partial",
     "pixel_switch_settle_s": 2.0,
     "vramp_perseg_effort": true,
     "vramp_lowv_nplc": 2.0,

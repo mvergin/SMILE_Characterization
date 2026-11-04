@@ -3025,6 +3025,35 @@ def plot_pixel_matrix(summ, stat, out, plt, what="Per-pixel quantities"):
     plt.close(fig)
 
 
+LIT_REF_A = 1e-6     # a measured bitval-0 reference above this is lit: 125-175 nA clean
+
+
+def write_faults(df):
+    """Per bias, the two numbers of the frame-write A/B test (frame_write, 2026-11-04):
+    lit references -- measured (not cached) references above LIT_REF_A, so the pixel was
+    still lit when its reference was taken -- and overcurrent points, I_LED >
+    max(I_MAX_A, SHORT_X x the bias's median I_LED): a second driver bit or pixel lit
+    (the latch). A lit reference only passes 1 uA where the pixel draws > 1 uA, i.e. at
+    -0.9 V and below; above that the column says nothing."""
+    if "I_NVLED_REF" not in df:
+        return None
+    d = df[df["I_NVLED_REF"].notna()]
+    if "LEAK_REF_CACHED" in d:
+        d = d[d["LEAK_REF_CACHED"].astype(float) != 1]
+    if d.empty:
+        return None
+    g = d.groupby("NVLED_V")
+    t = pd.DataFrame({"refs_measured": g.size(),
+                      "lit_refs": (d["I_NVLED_REF"] > LIT_REF_A).groupby(d["NVLED_V"]).sum()})
+    t["lit_ref_pct"] = 100 * t["lit_refs"] / t["refs_measured"]
+    i_max = df.groupby("NVLED_V")["I_LED"].median().mul(SHORT_X).clip(lower=I_MAX_A)
+    over = df["I_LED"] > df["NVLED_V"].map(i_max)
+    t["overcurrent"] = over.groupby(df["NVLED_V"]).sum()
+    t["overcurrent_above_uA"] = i_max * 1e6
+    t[["lit_refs", "overcurrent"]] = t[["lit_refs", "overcurrent"]].fillna(0).astype(int)
+    return t.sort_index(ascending=False)
+
+
 def bias_diagnostics(df, out, plt):
     """bias_diagnostics.csv and eqe_vs_J_by_bias.png: per sweep bias, what was measured
     and how well. One row per bias: points, the share that passed the gates, the PM400
@@ -3047,6 +3076,9 @@ def bias_diagnostics(df, out, plt):
     t["I_LED_A_median"] = g["I_LED"].median()
     t["J_median"] = g["J_LED"].median()
     t["EQE_reliable_median"] = rel.groupby("NVLED_V")["EQE_LED"].median()
+    wf = write_faults(df)
+    if wf is not None:
+        t = t.join(wf)
     t.sort_index(ascending=False).to_csv(out / "bias_diagnostics.csv")
 
     volts = np.sort(df["NVLED_V"].unique())
@@ -3404,6 +3436,7 @@ def analyse_sweep(sweep_dir, label, log):
         eta_pixels=float(single_clean["eta_LEE"].median()) if len(single_clean) else np.nan,
         curve="median per bias" if per_bias else "median in log-J bins",
         gates=gates,
+        faults=write_faults(df),
         trunc=trunc,
         iqe_spatial=iqe_spatial_stats,
     )
@@ -3681,6 +3714,19 @@ def write_report(
             if gt["tries"]:
                 A("Frame writes per measured leakage reference (`LEAK_REF_TRIES`): "
                   + ", ".join(f"{k} × {v}" for k, v in gt["tries"].items()) + ".")
+            A("")
+        wf = s.get("faults")
+        if wf is not None and len(wf):
+            A("**Frame-write faults per bias.** Lit reference: a measured bitval-0 "
+              f"reference above {LIT_REF_A * 1e6:g} µA (the pixel was still lit; only "
+              "detectable at -0.9 V and below). Overcurrent: I_LED above max(120 µA, "
+              "1.2x the bias median), a second driver bit or pixel lit.\n")
+            A("| bias | references measured | lit references | overcurrent (> µA) |")
+            A("|---|---|---|---|")
+            for v, r in wf.iterrows():
+                A(f"| {v:+.2f} V | {int(r['refs_measured'])} | {int(r['lit_refs'])} "
+                  f"({r['lit_ref_pct']:.2f} %) | {int(r['overcurrent'])} "
+                  f"(> {r['overcurrent_above_uA']:.0f}) |")
             A("")
         sp = s.get("spatial")
         if sp is not None:

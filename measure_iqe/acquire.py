@@ -1894,6 +1894,7 @@ def run_sweep_current(pm, smu, smile, selected: list[Row], run_dir: Path,
     """Current-source sweep: set log-spaced currents at bitval 15, measure V + P."""
     _ref_warned.clear()
     _ref_cache.clear()
+    begin_writes(cfg)
     setpoints = build_current_setpoints(cfg)
     log("=" * 56)
     log(f"CURRENT-SOURCE SWEEP — {len(selected)} pixels, bitval {cfg.current_sweep_bitval}, "
@@ -1945,6 +1946,14 @@ def run_sweep_current(pm, smu, smile, selected: list[Row], run_dir: Path,
 
 
 _ref_warned: set[tuple[int, int]] = set()
+# The lowest reference current each pixel has read so far in this sweep: the yardstick
+# for a reference that cannot be judged by its light (REF_CURRENT_X below).
+_ref_last: dict[tuple[int, int], float] = {}
+# A reference drawing more than this times the pixel's lowest reference is lit. Used
+# only where the optical gate cannot run (no lit light reading): in 261104-0656 the
+# PM400 read NaN, LEAK_REF_FRAC was NaN, and none of the 1064 lit references (> 1 uA
+# against 125-175 nA clean) was retried. Clean references move < 1.5x across 0..-3.2 V.
+REF_CURRENT_X = 5.0
 # ponytail: one set per process, cleared by the sweep entry points. A process runs one
 # sweep, so this only matters to the tests, which is why they clear it.
 
@@ -1983,18 +1992,47 @@ def fs_power_anchor(r) -> float:
         return 0.0
 
 
+# How light() writes a single pixel (cfg.frame_write), and the send -> ACK time of every
+# write in the sweep. Set by begin_writes() at the start of each sweep, like the
+# reference cache: one sweep per process.
+_frame_write = ["partial"]
+_write_s: list[float] = []
+
+
+def begin_writes(cfg: IQEConfig) -> None:
+    _frame_write[0] = cfg.frame_write
+    _write_s.clear()
+    _ref_last.clear()
+
+
+def log_write_time(log: Logger) -> None:
+    """The median frame write of the sweep, so the full frame's cost shows. The switch
+    matrix gave set_pixel 1.5-2.2 ms and the full frame 2.4-2.9 ms (261102-1216)."""
+    if _write_s:
+        ms = 1e3 * np.asarray(_write_s)
+        log(f"  frame writes ({_frame_write[0]}): {ms.size}, send -> ACK median "
+            f"{np.median(ms):.2f} ms (10-90 % {np.percentile(ms, 10):.2f}-"
+            f"{np.percentile(ms, 90):.2f} ms)")
+
+
 def light(smile, x, y, bitval):
     """Drive the target keyed by ``(x, y)`` at ``bitval``.
 
-    A single pixel goes through ``set_pixel``; a pooled group goes through
-    ``set_pixels``, which writes all K members in ONE frame instruction. That is why a
-    pooled point costs what a single point costs: the dwell, the settle and the burst
-    are per FRAME, not per pixel.
+    A single pixel goes through ``set_pixel``, or ``show_pixel`` (one full frame) with
+    frame_write "full"; a pooled group goes through ``set_pixels``, which writes all K
+    members in ONE frame instruction. That is why a pooled point costs what a single
+    point costs: the dwell, the settle and the burst are per FRAME, not per pixel.
     """
     members = _pool_members.get((int(x), int(y)))
-    if members is None:
-        return smile.set_pixel(x, y, bitval)
-    return smile.set_pixels(members, bitval)
+    t0 = time.perf_counter()
+    if members is not None:
+        r = smile.set_pixels(members, bitval)
+    elif _frame_write[0] == "full":
+        r = smile.show_pixel(x, y, bitval)
+    else:
+        r = smile.set_pixel(x, y, bitval)
+    _write_s.append(time.perf_counter() - t0)
+    return r
 # Per-pixel leakage reference, filled by prefill_reference_cache() and read by
 # measure_point() at every bias at or below cfg.leak_ref_per_point_above_v. Same
 # lifetime and the same reason as _ref_warned: one sweep per process.
@@ -2048,13 +2086,21 @@ def read_reference(pm, smu, smile, x, y, n_pm, n_smu, cfg: IQEConfig,
                                 channels=2 if cfg.sweep_read_vled else 1)
         ref = pt + (raw,)
         frac = abs(ref[0] / p_lit) if p_lit else float("nan")
-        if not (frac > cfg.leak_ref_max_frac):   # NaN must not trigger a retry
+        key = (int(x), int(y))
+        low = _ref_last.get(key)
+        # No light to judge it by: judge it by current against the pixel's own lowest.
+        lit_i = (not math.isfinite(frac) and low is not None
+                 and abs(ref[4]) > REF_CURRENT_X * low)
+        if not (frac > cfg.leak_ref_max_frac) and not lit_i:   # NaN alone: no retry
+            _ref_last[key] = min(abs(ref[4]), low if low is not None else float("inf"))
             break
         if tries < max(1, cfg.leak_ref_tries):
+            why = (f"draws {abs(ref[4]) * 1e9:.0f} nA, over {REF_CURRENT_X:g}x its lowest "
+                   f"reference {low * 1e9:.0f} nA" if lit_i else
+                   f"carries {100 * frac:.0f}% of the lit light")
             log(f"      ({x},{y})" + (f" at {v:+.2f} V" if v is not None else "")
-                + f": bitval {cfg.leak_ref_bitval} reference carries "
-                f"{100 * frac:.0f}% of the lit light -- the frame write did not land. "
-                f"Re-writing it (try {tries + 1} of {cfg.leak_ref_tries}).")
+                + f": bitval {cfg.leak_ref_bitval} reference {why} -- the frame write "
+                f"did not land. Re-writing it (try {tries + 1} of {cfg.leak_ref_tries}).")
     return ref, tries, frac
 
 
@@ -3065,6 +3111,7 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
     longer integration on the low-current rising side (per-point NPLC)."""
     _ref_warned.clear()
     _ref_cache.clear()
+    begin_writes(cfg)
     log("=" * 56)
     if cfg.fine_sweep_mode == "voltage":
         eff = (f"low-V NPLC {cfg.vramp_lowv_nplc}/{cfg.vramp_lowv_n_pm} PM/"
@@ -3191,8 +3238,10 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
     try:
       if cfg.sweep_order == "bias_major":
         # Shares the writer, the trace list and the finally below; only the walk differs.
-        return _sweep_bias_major(pm, smu, smile, selected, writer, settle_traces,
+        n_done = _sweep_bias_major(pm, smu, smile, selected, writer, settle_traces,
                                  cfg, log, t0, run_dir)
+        log_write_time(log)
+        return n_done
       for i, r in enumerate(selected, 1):
         x, y = r["X"], r["Y"]
         if (int(x), int(y)) in skip:
@@ -3346,6 +3395,7 @@ def run_sweep_voltage(pm, smu, smile, selected: list[Row], run_dir: Path,
                 f"for the extrapolation and EQE-settling questions")
     if n_dead:
         log(f"  dead-skipped {n_dead}/{len(selected)} selected pixels (fast-scan false-alive)")
+    log_write_time(log)
     return len(sw_rows)
 
 
