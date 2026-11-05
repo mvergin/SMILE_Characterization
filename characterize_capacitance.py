@@ -2507,6 +2507,66 @@ def _list_pixels(args, log, what):
     return pts
 
 
+TIV_LIGHT_SIGMA = 10.0     # light above the blank-frame offset + this many sigma is light
+TIV_FLOOR_READS = 10       # single PM400 reads of the blank frame per short
+
+
+def tiv_dark_floor(pm, smile, wait_s, n=TIV_FLOOR_READS):
+    """(threshold, offset, sigma) of the PM400 with a blank frame on the current range.
+
+    A short has no LED in its path, so its reading must sit on this floor. In 261103-1623
+    the floor was -1.18 nW +- 0.26 nW and in 261029-0836 +0.04 +- 0.37 nW: the offset
+    moves between sessions by more than the noise, so it is measured, not assumed. sigma
+    has a 0.1 nW floor, so a quantised meter cannot make every reading "light"."""
+    smile.blank_frame()
+    time.sleep(wait_s)
+    r = np.array([pm.measure() for _ in range(n)], float)
+    r = r[np.isfinite(r)]
+    if not r.size:
+        return float("nan"), float("nan"), float("nan")
+    off = float(np.median(r))
+    sig = max(1.4826 * float(np.median(np.abs(r - off))), 1e-10)
+    return off + TIV_LIGHT_SIGMA * sig, off, sig
+
+
+def tiv_clean_point(pm, smile, x, y, bv, pt, raw, rng, thr, low, read, args, log, v):
+    """Re-measure a transistoriv point that gave light. Returns (pt, raw, rng, tries, ok).
+
+    Light on a short means something else conducts: its own LED, or another pixel lit
+    with it -- whose current the reading then includes. So: blank the frame and read the
+    light. Only if that is back on the floor, set the pixel again and re-read the point.
+    A clean re-read is kept; up to --tiv-light-tries attempts. ``low`` is the lowest PM
+    range: a point that had to range up is light whatever it reads. NaN counts as light."""
+    lit = lambda p, r: (low is not None and r > low) or not (p <= thr)
+    if not lit(pt[0], rng):
+        return pt, raw, rng, 0, True
+    tries, ok = 0, False
+    for tries in range(1, args.tiv_light_tries + 1):
+        smile.blank_frame()
+        time.sleep(args.tiv_write_wait_s)
+        if low is not None and rng != low:
+            rng = low
+            if m.acquire.set_pm_range(pm, rng)[1]:
+                pm.measure()     # the first reading after a range change is junk
+        dark = pm.measure()
+        if not (dark <= thr):
+            log(f"      ({x},{y}) b{bv} {v:+.2f} V: blank frame still reads "
+                f"{dark * 1e9:.2f} nW (floor {thr * 1e9:.2f} nW), try {tries}")
+            continue
+        smile.set_pixel(x, y, int(bv))
+        time.sleep(args.tiv_write_wait_s + args.tiv_settle_s)
+        pt, raw, rng = read(rng)
+        if not lit(pt[0], rng):
+            ok = True
+            break
+        log(f"      ({x},{y}) b{bv} {v:+.2f} V: still {pt[0] * 1e9:.2f} nW after a blank "
+            f"(floor {thr * 1e9:.2f} nW), try {tries}")
+    if not ok:              # leave the pixel set for the next point, whatever happened
+        smile.set_pixel(x, y, int(bv))
+        time.sleep(args.tiv_write_wait_s + args.tiv_settle_s)
+    return pt, raw, rng, tries, ok
+
+
 def exp_transistoriv(pm, smu, smile, cfg, args, log):
     """Drive-transistor IV through SHORTED pixels: I(V) for every bitval in --tiv-bitvals.
 
@@ -2517,6 +2577,14 @@ def exp_transistoriv(pm, smu, smile, cfg, args, log):
     (0 V by default; a positive start such as +1 V works the same) and goes back to 0 V
     before the next bitval, so no frame is switched at full current.
     No High-C: a short has no capacitive node to settle.
+
+    The light is checked at every point against the blank-frame floor of that short
+    (tiv_dark_floor, tiv_clean_point). A short that still gives light after
+    --tiv-light-tries is dropped: its rows go to transistoriv_dropped.csv, not to
+    transistoriv.csv. --accept-light keeps it, its lit points flagged LIGHT_OK 0.
+    --tiv-no-light-check turns the check off, for LED pixels, which are meant to emit.
+    Every FPGA write is followed by --tiv-write-wait-s, and the frame is blanked
+    between shorts.
     """
     pixels = _list_pixels(args, log, "transistoriv")
     volts = sorted(args.tiv_volts, reverse=True)            # 0 V first
@@ -2534,22 +2602,50 @@ def exp_transistoriv(pm, smu, smile, cfg, args, log):
     log(f"  transistor IV: bitvals {args.tiv_bitvals}, {volts[0]:g} -> {volts[-1]:g} V in "
         f"{len(volts)} points, limit {args.tiv_limit:g} A, NPLC {args.tiv_nplc:g}, "
         f"autozero {args.tiv_autozero}, {'ch A and B' if args.tiv_channels == 2 else 'ch B'}"
-        f", PM400 read at every point")
+        f", PM400 read at every point"
+        + (f"; light checked against the blank-frame floor + {TIV_LIGHT_SIGMA:g} sigma, "
+           f"{args.tiv_light_tries} tries, then "
+           f"{'kept and flagged' if args.accept_light else 'the short is dropped'}"
+           if args.tiv_light_check else "; light NOT checked"))
     # The light too: a "short" may still emit (p7 of 261102-1114 was a working LED, and
     # every reading above the 470 nW range it inherited came back over-range). Each
     # bitval sweep starts on the lowest range and steps up on over-range.
     ladder = m.acquire.pm_ladder(pm, cfg, log) if cfg.pm_autorange else None
-    rows = []
+    low = ladder[0] if ladder else None
+    wait = args.tiv_write_wait_s
+
+    def read(rng):
+        """One point on ``rng``, stepping the PM400 up while it is over range."""
+        pt, raw = m.acquire_point(pm, smu, args.tiv_n_smu, 1, return_raw=True,
+                                  channels=args.tiv_channels)
+        while ladder and m.acquire.pm_over(pt[0], rng, cfg):
+            up = m.acquire.pm_range_up(pm, smu, rng, 1, 1, cfg, log)
+            if up == rng:
+                break
+            rng = up
+            pt, raw = m.acquire_point(pm, smu, args.tiv_n_smu, 1, return_raw=True,
+                                      channels=args.tiv_channels)
+        return pt, raw, rng
+
+    rows, dropped = [], []
     try:
         for k, (x, y) in enumerate(pixels, 1):
             here = []
+            drop = None
             t_px = time.perf_counter()
             if args.tiv_autozero == "ONCE" and hasattr(smu, "inst"):
                 smu.inst.write("smub.measure.autozero = smub.AUTOZERO_ONCE")
+            smu.set_voltage("b", 0.0)
+            if low is not None and m.acquire.set_pm_range(pm, low)[1]:
+                m.acquire.flush_pm_after_range(pm, smu, 1, 1, cfg)
+            thr, off, sig = (tiv_dark_floor(pm, smile, wait) if args.tiv_light_check
+                             else (float("nan"),) * 3)
             for bv in args.tiv_bitvals:
                 smu.set_voltage("b", 0.0)
                 smile.blank_frame()
+                time.sleep(wait)
                 smile.set_pixel(x, y, int(bv))
+                time.sleep(wait)
                 rng = None
                 if ladder:
                     rng = ladder[0]
@@ -2558,16 +2654,11 @@ def exp_transistoriv(pm, smu, smile, cfg, args, log):
                 for v in volts:
                     smu.set_voltage("b", float(v))
                     time.sleep(args.tiv_settle_s)
-                    pt, raw = m.acquire_point(pm, smu, args.tiv_n_smu, 1, return_raw=True,
-                                              channels=args.tiv_channels)
-                    while ladder and m.acquire.pm_over(pt[0], rng, cfg):
-                        up = m.acquire.pm_range_up(pm, smu, rng, 1, 1, cfg, log)
-                        if up == rng:
-                            break
-                        rng = up
-                        pt, raw = m.acquire_point(pm, smu, args.tiv_n_smu, 1,
-                                                  return_raw=True,
-                                                  channels=args.tiv_channels)
+                    pt, raw, rng = read(rng)
+                    tries, ok = 0, True
+                    if args.tiv_light_check:
+                        pt, raw, rng, tries, ok = tiv_clean_point(
+                            pm, smile, x, y, bv, pt, raw, rng, thr, low, read, args, log, v)
                     here.append(dict(
                         X=x, Y=y, QUADRANT=_quadrant_of(x, y), BITVAL=int(bv),
                         NVLED_V=float(v), **m.stat_columns("NVLED_CURR", raw["nvled"]),
@@ -2576,7 +2667,26 @@ def exp_transistoriv(pm, smu, smile, cfg, args, log):
                         **m.stat_columns("PM400_POWER", raw["pm"]),
                         **({"PM_RANGE_W": rng} if rng is not None else {}),
                         NVLED_LIMIT_A=args.tiv_limit,
-                        NVLED_AT_COMPLIANCE=int(abs(pt[4]) >= 0.98 * args.tiv_limit)))
+                        NVLED_AT_COMPLIANCE=int(abs(pt[4]) >= 0.98 * args.tiv_limit),
+                        **({"LIGHT_FLOOR_W": thr, "LIGHT_OFFSET_W": off,
+                            "LIGHT_RETRIES": tries, "LIGHT_OK": int(ok)}
+                           if args.tiv_light_check else {})))
+                    if not ok and not args.accept_light:
+                        drop = (bv, v, pt[0])
+                        break
+                if drop:
+                    break
+            smu.set_voltage("b", 0.0)
+            smile.blank_frame()                # between shorts: nothing left lit
+            time.sleep(wait)
+            if drop:
+                dropped.extend(here)
+                log(f"    [{k}/{len(pixels)}] ({x},{y}) DROPPED: still {drop[2] * 1e9:.2f} nW "
+                    f"at b{drop[0]} {drop[1]:+.2f} V after {args.tiv_light_tries} tries "
+                    f"(floor {thr * 1e9:.2f} nW = {off * 1e9:+.2f} nW + {TIV_LIGHT_SIGMA:g} x "
+                    f"{sig * 1e9:.2f} nW). Its rows: transistoriv_dropped.csv")
+                write_csv(args.out_dir, "transistoriv_dropped", dropped)
+                continue
             rows.extend(here)
             top = {r["BITVAL"]: abs(r["NVLED_CURR_MEDIAN"]) for r in here
                    if r["NVLED_V"] == volts[-1]}
@@ -2587,6 +2697,11 @@ def exp_transistoriv(pm, smu, smile, cfg, args, log):
     finally:
         smu.set_voltage("b", 0.0)
         smile.blank_frame()
+    if args.tiv_light_check:
+        n_drop = len({(r["X"], r["Y"]) for r in dropped})
+        n_flag = len({(r["X"], r["Y"]) for r in rows if not r.get("LIGHT_OK", 1)})
+        log(f"  light check: {n_drop} of {len(pixels)} short(s) dropped, {n_flag} kept "
+            f"with light (--accept-light)")
     return rows
 
 
@@ -2813,6 +2928,10 @@ def estimate_seconds(what, cfg, args, n_pixels):
         per_pt = (args.tiv_settle_s + 0.03 + args.tiv_n_smu * args.tiv_channels
                   * az * (args.tiv_nplc / 50.0 + 3e-4))
         total += n_list * len(args.tiv_bitvals) * len(args.tiv_volts) * per_pt
+        # two writes per bitval and one blank per short, each with its wait, and the
+        # blank-frame floor (~10 reads); retries of lit points are not counted
+        total += n_list * ((2 * len(args.tiv_bitvals) + 1) * args.tiv_write_wait_s
+                           + (TIV_FLOOR_READS * 0.03 if args.tiv_light_check else 0))
     if "droop" in what:
         x1, y1, x2, y2 = args.droop_roi or (0, 0, 0, 0)
         npx = (abs(x2 - x1) + 1) * (abs(y2 - y1) + 1)
@@ -3203,6 +3322,21 @@ def build_parser():
     ap.add_argument("--tiv-autozero", choices=("ONCE", "AUTO", "OFF"), default="ONCE",
                     help="transistoriv: ONCE zeroes at the start of every pixel. AUTO "
                          "zeroes with every reading, ~3x the time")
+    ap.add_argument("--tiv-write-wait-s", type=float, default=0.01,
+                    help="transistoriv: wait after every FPGA write (blank or set_pixel)")
+    ap.add_argument("--tiv-light-check", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="transistoriv: a short must give no light. At every point the "
+                         "light is compared with the blank-frame floor of that short "
+                         "(offset + 10 sigma); a lit point is re-measured after a blank "
+                         "frame. --no-tiv-light-check for LED pixels, which are meant to "
+                         "emit")
+    ap.add_argument("--tiv-light-tries", type=int, default=3,
+                    help="transistoriv: re-measurements of a lit point before the short "
+                         "is dropped (or kept, with --accept-light)")
+    ap.add_argument("--accept-light", action="store_true",
+                    help="transistoriv: keep a short that still gives light after "
+                         "--tiv-light-tries; its lit points are flagged LIGHT_OK 0")
     ap.add_argument("--droop-roi", nargs=4, type=int, default=None, metavar=("X1", "Y1", "X2", "Y2"),
                     help="droop: the ROI whose alive pixels are lit 1, 2, 3, ... at once. "
                          "Must stay inside one quadrant")

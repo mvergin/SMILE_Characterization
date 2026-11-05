@@ -692,6 +692,48 @@ if __name__ == "__main__":
     print("all switch-deviation and cluster checks passed")
 
 
+def test_a_lit_transistoriv_point_is_remeasured_after_a_blank_frame():
+    """A point with light is re-read after a blank frame proves the floor; a clean
+    re-read is kept. If the blank frame itself stays lit, nothing is re-read, the point
+    is not ok after --tiv-light-tries, and the pixel is set again for the next point."""
+    import types
+    import characterize_capacitance as cc
+
+    class PM:
+        def __init__(self, darks): self.darks = list(darks)
+        def measure(self): return self.darks.pop(0)
+        def set_range(self, r): pass
+
+    class Smile:
+        def __init__(self): self.log = []
+        def blank_frame(self): self.log.append("blank")
+        def set_pixel(self, x, y, b): self.log.append(("set", x, y, b))
+
+    args = types.SimpleNamespace(tiv_light_tries=3, tiv_write_wait_s=0, tiv_settle_s=0)
+    lit = ((5e-9,) + (0,) * 7, {})                       # 5 nW on a 1 nW floor
+    clean = ((0.2e-9,) + (0,) * 7, {"clean": 1})
+    s = Smile()
+    pt, raw, rng, tries, ok = cc.tiv_clean_point(
+        PM([0.1e-9]), s, 3, 4, 15, *lit, 4.7e-7, 1e-9, 4.7e-7,
+        lambda r: (clean[0], clean[1], r), args, lambda m: None, -3.2)
+    assert ok and tries == 1 and raw == {"clean": 1}
+    assert s.log == ["blank", ("set", 3, 4, 15)]
+    s = Smile()
+    pt, raw, rng, tries, ok = cc.tiv_clean_point(
+        PM([9e-9] * 3), s, 3, 4, 15, *lit, 4.7e-7, 1e-9, 4.7e-7,
+        lambda r: (_ for _ in ()).throw(AssertionError("re-read on a lit blank")),
+        args, lambda m: None, -3.2)
+    assert not ok and tries == 3 and s.log == ["blank"] * 3 + [("set", 3, 4, 15)]
+    # a clean point is left alone, and a point that had to range up counts as light
+    s = Smile()
+    assert cc.tiv_clean_point(PM([]), s, 3, 4, 15, *clean, 4.7e-7, 1e-9, 4.7e-7,
+                              None, args, None, -3.2)[3:] == (0, True) and not s.log
+    s = Smile()
+    assert cc.tiv_clean_point(PM([0.0, 0.1e-9]), s, 3, 4, 15, *clean, 4.7e-6, 1e-9, 4.7e-7,
+                              lambda r: (clean[0], clean[1], r), args, lambda m: None,
+                              -3.2)[3] == 1
+
+
 def test_transistoriv_and_droop_run_end_to_end_on_the_sim():
     """transistoriv sweeps every listed pixel at every bitval from 0 V down; droop lights
     1..N alive pixels of a one-quadrant ROI in both orders; both land in _PIXELS_."""
@@ -702,9 +744,20 @@ def test_transistoriv_and_droop_run_end_to_end_on_the_sim():
     with tempfile.TemporaryDirectory() as tmp:
         lst = pathlib.Path(tmp) / "short.csv"
         lst.write_text("X,Y,primary\n3,4,short\n300,40,short\n9,9,short\n")
+        # the sim's pixels are LEDs: with the light check on (default) both are dropped
         assert main(["--simulate", "--what", "transistoriv", "--pixel-list", str(lst),
                      "--list-n", "2", "--tiv-volts", "0", "-1", "-3.2",
-                     "--tiv-settle-s", "0", "--out", tmp]) == 0
+                     "--tiv-settle-s", "0", "--tiv-write-wait-s", "0",
+                     "--tiv-light-tries", "1", "--out", tmp]) == 0
+        run = next(pathlib.Path(tmp).glob("*_PIXELS_Transistoriv"))
+        gone = list(csv.DictReader((run / "transistoriv_dropped.csv").open()))
+        assert {(r["X"], r["Y"]) for r in gone} == {("3", "4"), ("300", "40")}
+        assert not (run / "transistoriv.csv").exists()
+        import shutil
+        shutil.rmtree(run)
+        assert main(["--simulate", "--what", "transistoriv", "--pixel-list", str(lst),
+                     "--list-n", "2", "--tiv-volts", "0", "-1", "-3.2",
+                     "--tiv-settle-s", "0", "--no-tiv-light-check", "--out", tmp]) == 0
         run = next(pathlib.Path(tmp).glob("*_PIXELS_Transistoriv"))
         rows = list(csv.DictReader((run / "transistoriv.csv").open()))
         assert len(rows) == 2 * 6 * 3, len(rows)
