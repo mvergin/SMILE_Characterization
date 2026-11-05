@@ -15,6 +15,11 @@ Writes into results/<out> (default comparisons/drivers):
   drivers.png        a: bitval-15 current per quadrant at -3.2 V; b: spread against bit
                      weight, with the 1/sqrt(weight) of independent unit cells;
                      c: code linearity; d: current spread against bias, LEDs and drivers
+  best_shorts.png    the shorts only: a: mean of the N best (by bitval-15 current at
+                     -3.2 V) against N; b: the I(V) of the 10 best at bitval 15;
+                     c: every short's current, sorted, against its rank in percent
+  best_shorts.csv    the 10 best shorts of each run
+  emitting_shorts.csv shorts excluded because they gave light (see LIGHT_MAX_W)
   summary.md         the numbers
 
 Spreads are robust CVs: 1.4826 x MAD / median. A bit's current is I(bit) - I(bitval 0).
@@ -40,6 +45,13 @@ BITS = (1, 2, 4, 8, 15)
 QUADS = ("TL", "TR", "BL", "BR")
 V_REF = -3.2               # the bias of the per-bit and per-quadrant numbers
 I_MIN = 50e-6              # bitval 15 below this at V_REF: not a working driver
+# A short has no LED in the path, so it gives no light. One that does, at any point, is
+# not a clean driver measurement: its own LED conducts part of the current, or another
+# pixel was lit with it (a latch), whose current the reading then includes. Array38's
+# shorts never exceed 1.4 nW (the meter's floor on 470 nW); Array42's bitval-0 light has
+# p99 5.6 nW, and 33 of its 303 shorts pass 10 nW, up to 2.9 uW (261103-1623).
+LIGHT_MAX_W = 20e-9
+N_BEST = 10
 
 
 def rcv(s):
@@ -54,13 +66,26 @@ def load(run: Path):
     p = t.pivot_table(index=["X", "Y", "QUADRANT"], columns=["BITVAL", "V"], values="I")
     ok = p[(15, V_REF)] > I_MIN
     args = json.loads((run / "run_config.json").read_text(encoding="utf-8")).get("args", {})
-    src = Path(args.get("pixel_list") or "")
+    src = Path(str(args.get("pixel_list") or "").replace("\\", "/"))
     sweep = next((d for d in R.iterdir() if d.name in str(src)), None)
-    return p[ok], int((~ok).sum()), src, sweep
+    emit = pd.DataFrame()
+    if src.name == "short.csv":          # only a short must be dark; an LED pixel is lit
+        pm = t.pivot_table(index=["X", "Y", "QUADRANT"], columns=["BITVAL", "V"],
+                           values="PM400_POWER_MEAN")
+        mx = pm.max(axis=1)
+        at = pm.idxmax(axis=1)
+        lit = (mx > LIGHT_MAX_W).reindex(p.index, fill_value=False)
+        emit = pd.DataFrame({"max_light_W": mx[lit[lit].index],
+                             "at_bitval": [a[0] for a in at[lit[lit].index]],
+                             "at_V": [a[1] for a in at[lit[lit].index]],
+                             "I15_ref_uA": p.loc[lit, (15, V_REF)] * 1e6})
+        ok &= ~lit
+    return p[ok], int((p[(15, V_REF)] <= I_MIN).sum()), emit, src, sweep
 
 
-def stats(name, p, n_bad, src):
+def stats(name, p, n_bad, n_light, src):
     row = dict(run=name, pixel_list=src.name, n=len(p), n_not_working=n_bad,
+               n_emitting_excluded=n_light,
                **{f"n_{q}": int((p.index.get_level_values("QUADRANT") == q).sum())
                   for q in QUADS})
     volts = sorted({v for b, v in p.columns if b == 15})
@@ -118,6 +143,61 @@ def led_spread(sweep: Path):
     return t[t["led_I_uA"] >= 0.1]         # below ~100 nA the spread is the meter's noise
 
 
+def best_shorts(pops: dict, out: Path, plt):
+    """best_shorts.png and .csv, for the shorts runs only. If the shorts differ because
+    the short damaged some of them, the undamaged ones are the best: the top of each
+    array's distribution is then the transistor itself, and two arrays with the same
+    transistors meet there even when their medians differ."""
+    if not pops:
+        return None
+    fig, ax = plt.subplots(1, 3, figsize=(19, 5.6))
+    cm = plt.get_cmap("tab10")
+    res, rows = {}, []
+    for i, (name, p) in enumerate(pops.items()):
+        c = cm(i)
+        lab = f"{name.split('_')[1]} {name.split('_')[0]} ({len(p)} shorts)"
+        s = p[(15, V_REF)].sort_values(ascending=False) * 1e6
+        n = min(N_BEST, len(s))
+        top = s.iloc[:n].expanding().mean().values
+        res[name] = dict(top=top, median=float(s.median()), p90=float(s.quantile(0.9)))
+        ax[0].plot(range(1, n + 1), top, "o-", color=c, label=lab)
+        ax[0].axhline(s.median(), color=c, ls=":", lw=1)
+        volts = sorted(v for b, v in p.columns if b == 15)
+        for k, idx in enumerate(s.index[:n]):
+            ax[1].plot(volts, p.loc[idx, [(15, v) for v in volts]].values * 1e6, lw=0.8,
+                       color=c, alpha=0.7, label=lab if k == 0 else None)
+        ax[1].plot(volts, p[[(15, v) for v in volts]].median().values * 1e6, "--", lw=2,
+                   color=c, label=f"{lab.split(' (')[0]}: median of all")
+        rank = 100 * np.arange(1, len(s) + 1) / len(s)
+        ax[2].plot(rank, s.values, ".-", ms=3, lw=0.8, color=c, label=lab)
+        for k, (idx, v) in enumerate(s.iloc[:n].items()):
+            rows.append(dict(run=name, rank=k + 1, X=idx[0], Y=idx[1], quadrant=idx[2],
+                             I15_uA=v, mean_of_best_uA=top[k]))
+    pd.DataFrame(rows).to_csv(out / "best_shorts.csv", index=False, float_format="%.3f")
+    ax[0].set_xlabel("N, the best shorts")
+    ax[0].set_ylabel(f"mean I at bitval 15, {V_REF:+.1f} V (uA)")
+    ax[0].set_title("Mean of the N best shorts (dotted: median of all)", fontsize=10)
+    ax[0].set_xticks(range(1, N_BEST + 1))
+    ax[1].set_xlabel("NVLED (V)")
+    ax[1].set_ylabel("I at bitval 15 (uA)")
+    ax[1].set_title(f"The {N_BEST} best shorts of each array (dashed: median of all)",
+                    fontsize=10)
+    ax[1].set_xlim(-3.25, 0.05)
+    lo = min(min(r["top"]) for r in res.values())
+    ax[1].set_ylim(0.85 * min(r["median"] for r in res.values()) if lo else None, None)
+    ax[2].set_xlabel("rank, % of the array's shorts (0 = best)")
+    ax[2].set_ylabel(f"I at bitval 15, {V_REF:+.1f} V (uA)")
+    ax[2].set_title("Every short, sorted: arrays with the same transistors meet at the "
+                    "top", fontsize=10)
+    for a in ax:
+        a.grid(alpha=0.3)
+        a.legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(out / "best_shorts.png", dpi=150)
+    plt.close(fig)
+    return res
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("runs", nargs="*", default=DEFAULT, help="transistoriv run folders")
@@ -127,11 +207,13 @@ def main(argv=None) -> int:
     out = R / a.out
     out.mkdir(parents=True, exist_ok=True)
     plt = aa._plt()
-    rows, nets, spreads, leds = [], {}, [], {}
+    rows, nets, spreads, leds, emits = [], {}, [], {}, []
     for r in a.runs:
         run = R / Path(r).name
-        p, bad, src, sweep = load(run)
-        row, net = stats(run.name, p, bad, src)
+        p, bad, emit, src, sweep = load(run)
+        if len(emit):
+            emits.append(emit.assign(run=run.name))
+        row, net = stats(run.name, p, bad, len(emit), src)
         rows.append(row)
         nets[run.name] = (p, net, sweep.name if sweep else None)
         print(f"{run.name}: {len(p)} drivers from {src.name}"
@@ -207,6 +289,12 @@ def main(argv=None) -> int:
     fig.tight_layout()
     fig.savefig(out / "drivers.png", dpi=150)
     plt.close(fig)
+    if emits:
+        pd.concat(emits).reset_index().to_csv(out / "emitting_shorts.csv", index=False,
+                                              float_format="%.4g")
+    best = best_shorts({n: v[0] for n, v in nets.items()
+                        if st.set_index("run").loc[n, "pixel_list"] == "short.csv"},
+                       out, plt)
 
     f = lambda x, d=2: "" if pd.isna(x) else f"{x:.{d}f}"
     L = ["# Pixel drivers from transistoriv", "",
@@ -214,7 +302,8 @@ def main(argv=None) -> int:
          f"Per-bit and per-quadrant numbers at {V_REF:+.1f} V.", ""]
     for r in rows:
         L += [f"## {r['run']} ({r['pixel_list']}, {r['n']} drivers, "
-              f"{r['n_not_working']} not working; " + ", ".join(
+              f"{r['n_not_working']} not working, {r['n_emitting_excluded']} excluded "
+              f"for light > {LIGHT_MAX_W * 1e9:.0f} nW; " + ", ".join(
                   f"{q} {r[f'n_{q}']}" for q in QUADS) + ")", ""]
         for v in ("-0.5V", "-1.4V", "-3.2V"):
             if f"I15_{v}_uA" in r:
@@ -244,6 +333,14 @@ def main(argv=None) -> int:
             for _, s in ss[ss["led_cv_pct"].notna()].iterrows():
                 L.append(f"| {s['V']:+.2f} | {f(s['led_I_uA'], 1)} | {f(s['led_cv_pct'])} | "
                          f"{f(s['drv_I_uA'], 1)} | {f(s['drv_cv_pct'])} |")
+        L.append("")
+    if best is not None:
+        L += ["## The best shorts (bitval 15, -3.2 V; best_shorts.png)", "",
+              "| run | best | mean of best 3 | best 5 | best 10 | median of all | "
+              "top 10 % (percentile 90) |", "|---|---|---|---|---|---|---|"]
+        for n, b in best.items():
+            L.append(f"| {n} | {b['top'][0]:.1f} | {b['top'][2]:.1f} | {b['top'][4]:.1f} | "
+                     f"{b['top'][-1]:.1f} | {b['median']:.1f} | {b['p90']:.1f} |")
         L.append("")
     (out / "summary.md").write_text("\n".join(L), encoding="utf-8")
     print("\n".join(L))
