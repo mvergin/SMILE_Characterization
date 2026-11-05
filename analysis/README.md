@@ -108,6 +108,16 @@ local spread, spread per code against 1/sqrt(weight), code linearity, saturation
 and the current spread of LED pixels (the sweep their pixel list came from) against
 their drivers' at every bias.
 
+### `bond_resistance.py` — the bond resistance of every pixel, over time
+
+Not per run: `python analysis/bond_resistance.py` reads the usable fast scans listed in
+`results/comparisons/bond_resistance/fastscan_runs.csv` and writes the per-pixel bond
+resistance next to it: R_bond = (V_tot - V_LED - V_driver) / I, with the SGA_15 LED's
+measured I(V) (`SGA_15 10um/SGA_15_10um_IV.csv`, not in git) and a driver fitted to each
+array's 10 best shorts, plus the relative version against the typical pixel's sweep curve.
+Median over time, cumulative distributions, maps, the subtraction overview, and the change
+per pixel between scans against its resistance.
+
 ### `analyze_array.py` — the main report
 
 Loads a run directory, enriches it (EQE, current density, leakage, reliability

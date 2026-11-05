@@ -457,3 +457,16 @@ if __name__ == "__main__":
             fn()
             print(f"ok  {name}")
     print("all contract checks passed")
+
+
+def test_bond_resistance_inversions_round_trip():
+    """v_led reads the SGA_15 table back at its own points; v_driver inverts f15, and
+    returns NaN for a current the driver cannot carry."""
+    import bond_resistance as br
+    k = len(br.LV) // 2
+    assert abs(float(br.v_led(np.array([br.LI[k]]))[0]) - br.LV[k]) < 1e-9
+    P = dict(I15=130e-6, g=0.0, lam=0.02, vov=0.5, m=2.0)
+    for vds in (0.05, 0.3, 1.0, 2.5):
+        i = float(br.f15(np.array([vds]), 3.2, P)[0])
+        assert abs(float(br.v_driver(np.array([i]), 3.2, P)[0]) - vds) < 2e-3, vds
+    assert np.isnan(br.v_driver(np.array([1e-3]), 3.2, P)[0])
