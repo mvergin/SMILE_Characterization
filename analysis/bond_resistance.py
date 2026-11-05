@@ -50,7 +50,16 @@ REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "results" / "comparisons" / "bond_resistance"
 LED_CSV = REPO / "SGA_15 10um" / "SGA_15_10um_IV.csv"
 VLED = 1.8
-R_SHORT = 2.72e3          # the shorts' own series path, 261105-1024 (code dependence)
+# The shorts' own series path. At low voltage the shorts' resistance per code is
+# R_on(code 1)/weight + 2.72 kOhm (261105-1024), but the code-independent 2.72 kOhm holds
+# two things: the short path, and the driver's source resistance R_src shared by its four
+# PMOS, which every LED pixel has too. The design widths (6.8, 2.59, 1.2, 0.54 um, L 2 um)
+# fit the shorts' code currents only with both a narrow-width offset (dW 0.18 um) and a
+# shared source resistance, R_src / V_ov = 885 /A (Array42); V_ov = 2 I_sat R_on = 1.13 V
+# (code 1 and code 15 agree), so R_src = 1.0 kOhm. Only the rest is the short's own path;
+# R_src stays in the driver. Array38 has no low-voltage shorts: same path assumed.
+R_SRC = 1.0e3
+R_SHORT = 2.72e3 - R_SRC
 I_MIN = 1e-6
 DRIVER = {"Array42": "261105-1024_Array42_PIXELS_Transistoriv",
           "Array38": "261029-0836_Array38_PIXELS_Transistoriv"}
