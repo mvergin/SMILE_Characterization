@@ -59,9 +59,9 @@ def main() -> int:
         base = nd / n
         print(f"{arr} {a} -> {b}: {nd} of {n} pixels died ({100 * base:.3f} %)")
         # by R_bond decile
-        q = pd.qcut(pa.R_bond_kOhm, 10, duplicates="drop")
+        q = pd.qcut(pa.R_best_kOhm, 10, duplicates="drop")
         g = pa.groupby(q, observed=True)
-        t = pd.DataFrame({"R_median_kOhm": g.R_bond_kOhm.median(), "n": g.size(),
+        t = pd.DataFrame({"R_median_kOhm": g.R_best_kOhm.median(), "n": g.size(),
                           "died": g.died.sum()})
         t["rate_pct"] = 100 * t.died / t.n
         t = t.reset_index(drop=True).assign(array=arr, earlier=a, later=b)
@@ -70,7 +70,7 @@ def main() -> int:
         x.plot(t.R_median_kOhm, t.rate_pct, "o-")
         x.axhline(100 * base, color="0.5", ls=":", lw=1, label=f"all: {100 * base:.3f} %")
         x.set_xscale("symlog", linthresh=1)
-        x.set_xlabel(f"R_bond in {a} (kOhm), deciles")
+        x.set_xlabel(f"bond resistance above the best pixels, in {a} (kOhm), deciles")
         x.set_ylabel(f"died by {b} (%)")
         x.set_title(f"{arr}: {a} -> {b}, {nd} of {n} died", fontsize=10)
         x.grid(alpha=0.3, which="both")
@@ -80,7 +80,7 @@ def main() -> int:
         c = pd.cut(pa.dist_dark, bins, right=True)
         g = pa.groupby(c, observed=True)
         u = pd.DataFrame({"n": g.size(), "died": g.died.sum(),
-                          "R_median_kOhm": g.R_bond_kOhm.median()})
+                          "R_median_kOhm": g.R_best_kOhm.median()})
         u["rate_pct"] = 100 * u.died / u.n
         u.index = [f"{iv.left + 1}-{iv.right}" if iv.right - iv.left > 1 else f"{iv.right}"
                    for iv in u.index]
@@ -95,7 +95,7 @@ def main() -> int:
         x2.set_ylabel(f"median R_bond in {a} (kOhm)")
         x.set_title(f"{arr}: by distance to the dark region", fontsize=10)
         x.grid(alpha=0.3)
-        died_all.append(pa[pa.died].reset_index()[["X", "Y", "quadrant", "R_bond_kOhm",
+        died_all.append(pa[pa.died].reset_index()[["X", "Y", "quadrant", "R_best_kOhm",
                                                    "dist_dark"]].assign(array=arr, earlier=a,
                                                                         later=b))
     fig.suptitle("Does the bond resistance predict which pixels die? Death rate between two "

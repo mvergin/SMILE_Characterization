@@ -130,6 +130,42 @@ def typical_curve(arr):
     return (VLED - w.V).to_numpy(), np.maximum.accumulate(w.I_LED_med.to_numpy())
 
 
+BEST_FRAC = 0.02          # the best pixels: top 2 % of current at -1.40 V in the sweep
+
+
+def best_reference(arr):
+    """The array's best pixels as the reference: no driver model, no LED curve.
+
+    Two pixels of one array that carry the same current have the same driver drop (PMOS,
+    identical to 0.5 %, depending only on the voltage across it), and the same LED up to its
+    turn-on offset. So with each pixel's own LED anchor dV (its V_tot - V_SGA(I) at the sweep
+    point nearest 1.5 uA, where driver and bond drop a few mV), U = V_tot - dV is the voltage
+    on driver + LED shape + bond, and a pixel's bond above the best ones is
+    (U_i - U_best(I_i)) / I_i. U_best(I): per sweep bias, the best pixels' median current
+    against V_tot minus their median anchor; interpolated in log I.
+    Returns (anchor per pixel, the curve as (I, U), the best pixels' index)."""
+    import pixel_classes as pc
+    sw = pc.load_sweep(ds.R / SWEEP[arr])
+    sw = sw[sw.I_ref.notna() & (sw.I_ref < 1e-6) & (sw.I_LED > 0)].copy()   # no lit references
+    sw["vtot"] = VLED - sw.V
+    a = sw[(sw.I_LED >= 0.5e-6) & (sw.I_LED <= 3e-6)].copy()
+    a["dist"] = np.abs(np.log(a.I_LED / 1.5e-6))
+    a = a.loc[a.groupby(["X", "Y"]).dist.idxmin()].set_index(["X", "Y"])
+    anchor = (a.vtot - v_led(a.I_LED.to_numpy())).rename("dV")
+    cls = pd.read_csv(ds.R / SWEEP[arr] / "REPORT_assets/pixelclassification/sweep/sweep_classes.csv"
+                      ).set_index(["X", "Y"])
+    ok = cls.index[cls.get("m1p40V", pd.Series(dtype=str)).isin(["typical", "other"])]
+    at = sw[sw.V.round(3) == -1.4].set_index(["X", "Y"]).I_LED
+    at = at[at.index.isin(ok) & at.index.isin(anchor.index)]
+    best = at.nlargest(max(20, int(BEST_FRAC * len(at)))).index
+    b = sw.set_index(["X", "Y"]).loc[lambda q: q.index.isin(best)].reset_index()
+    g = b.groupby("V")
+    curve = pd.DataFrame({"I": g.I_LED.median(),
+                          "U": (VLED - g.V.first()) - float(anchor.loc[best].median())})
+    curve = curve[curve.I > 1e-6].sort_values("I")
+    return anchor, (curve.I.to_numpy(), curve.U.to_numpy()), best
+
+
 # ---- one fast scan ----------------------------------------------------------------------
 def run_dir(run):
     for base in (REPO / "results", REPO / "results_georg" / "results"):
@@ -138,7 +174,7 @@ def run_dir(run):
     raise FileNotFoundError(run)
 
 
-def pixels(row, P, typ, P_other):
+def pixels(row, P, typ, P_other, ref=None):
     fs = aa._load_aggregated(run_dir(row.run) / "FastScan")
     fs = fs[fs.NVLED_V.astype(float).round(3) == round(row.V, 3)].copy()
     d = aa.classify_pixels(fs)
@@ -161,6 +197,13 @@ def pixels(row, P, typ, P_other):
     tv, ti = typ
     d["V_typical"] = np.interp(np.log(d.I_LED), np.log(ti), tv)
     d["R_rel_kOhm"] = (vtot - d.V_typical) / d.I_LED / 1e3
+    if ref is not None:
+        anchor, (ci, cu), _ = ref
+        dv = d.set_index(["X", "Y"]).index.map(anchor).to_numpy(dtype=float)
+        d["anchored"] = np.isfinite(dv)
+        dv = np.where(np.isfinite(dv), dv, float(anchor.median()))
+        ub = np.interp(np.log(d.I_LED), np.log(ci), cu)
+        d["R_best_kOhm"] = (vtot - dv - ub) / d.I_LED / 1e3
     return d
 
 
@@ -202,6 +245,10 @@ def main() -> int:
     runs[["roi_x0", "roi_y0", "roi_x1", "roi_y1"]] = xy.to_numpy()
     drv = {a: fit_driver(a) for a in DRIVER}
     typ = {a: typical_curve(a) for a in DRIVER}
+    best = {a: best_reference(a) for a in DRIVER}
+    for a, (anc, (ci, cu), bi) in best.items():
+        print(f"{a} best-pixel reference: {len(bi)} pixels, {len(anc)} anchored; curve "
+              + ", ".join(f"{u:.3f} V at {i * 1e6:.1f} uA" for i, u in zip(ci, cu)))
     for a, P in drv.items():
         print(f"{a} driver (10 best shorts, code 15, short path {R_SHORT / 1e3:.2f} kOhm removed): "
               f"rms {P['rms_pct']:.2f} %, lam {100 * P['lam']:.2f} %/V, g {100 * P['g']:+.2f} %/V, "
@@ -209,10 +256,10 @@ def main() -> int:
     rows, data = [], {}
     for _, r in runs.iterrows():
         other = next(k for k in DRIVER if k != r["array"])
-        d = pixels(r, drv[r["array"]], typ[r["array"]], drv[other])
+        d = pixels(r, drv[r["array"]], typ[r["array"]], drv[other], best[r["array"]])
         tag = f"{r.run[:11]}_{aa._bias_tag(r.V)}"
         d[["X", "Y", "quadrant", "primary", "t_s", "I_LED", "V_LED", "V_driver", "R_bond_kOhm",
-           "R_bond_other_driver_kOhm", "R_rel_kOhm"]].to_csv(OUT / "pixels" / f"{tag}.csv", index=False, float_format="%.5g")
+           "R_bond_other_driver_kOhm", "R_rel_kOhm", "R_best_kOhm", "anchored"]].to_csv(OUT / "pixels" / f"{tag}.csv", index=False, float_format="%.5g")
         data[tag] = (r, d)
         q = d.R_bond_kOhm.quantile([.1, .25, .5, .75, .9])
         im = d.I_LED.median()
@@ -222,7 +269,10 @@ def main() -> int:
                          V_driver_at_median=float(v_driver(np.array([im]), -r.V, drv[r["array"]])[0]),
                          R_p10=q[.1], R_p25=q[.25], R_median=q[.5], R_p75=q[.75], R_p90=q[.9],
                          R_rel_median=d.R_rel_kOhm.median(),
-                         R_median_other_driver=d.R_bond_other_driver_kOhm.median()))
+                         R_median_other_driver=d.R_bond_other_driver_kOhm.median(),
+                         Rbest_p10=d.R_best_kOhm.quantile(.1), Rbest_p25=d.R_best_kOhm.quantile(.25),
+                         Rbest_median=d.R_best_kOhm.median(), Rbest_p75=d.R_best_kOhm.quantile(.75),
+                         Rbest_p90=d.R_best_kOhm.quantile(.9), anchored_frac=d.anchored.mean()))
         print(f"  {tag} {r["array"]} {r.V:+.2f} V: {len(d)} px, I {im * 1e6:.1f} uA, R_bond median "
               f"{q[.5]:.2f} kOhm (25-75 % {q[.25]:.2f}..{q[.75]:.2f}), R_rel median "
               f"{d.R_rel_kOhm.median():+.2f}")
@@ -236,6 +286,7 @@ def main() -> int:
             continue
         rr = data[ref][1].set_index(["X", "Y"]).R_bond_kOhm
         rq = data[ref][1].set_index(["X", "Y"]).R_rel_kOhm
+        rbst = data[ref][1].set_index(["X", "Y"]).R_best_kOhm
         for k, (r, d) in data.items():
             if r["array"] != a:
                 continue
@@ -244,11 +295,52 @@ def main() -> int:
             dif = j.R - j.ref
             jr = d.set_index(["X", "Y"]).R_rel_kOhm.to_frame("R").join(rq.rename("ref"),
                                                                        how="inner").dropna()
+            jb = d.set_index(["X", "Y"]).R_best_kOhm.to_frame("R").join(rbst.rename("ref"),
+                                                                        how="inner").dropna()
             i = t.index[t.tag == k][0]
-            t.loc[i, ["ref", "n_common", "dR_median", "dR_p25", "dR_p75", "dR_rel_median"]] = [
+            t.loc[i, ["ref", "n_common", "dR_median", "dR_p25", "dR_p75", "dR_rel_median",
+                      "dR_best_median"]] = [
                 ref, len(j), dif.median(), dif.quantile(.25), dif.quantile(.75),
-                (jr.R - jr.ref).median()]
+                (jr.R - jr.ref).median(), (jb.R - jb.ref).median()]
     t.to_csv(OUT / "runs.csv", index=False, float_format="%.5g")
+
+    # the best-pixel reference: distributions, over time, and the two arrays' best curves
+    fig, ax = plt.subplots(1, 3, figsize=(19, 5.6))
+    cmap = plt.get_cmap("viridis")
+    for a, ls in zip(DRIVER, ("-", "--")):
+        sel = [k for k, (r, _) in data.items() if r["array"] == a]
+        for j, k in enumerate(sel):
+            v = np.sort(data[k][1].R_best_kOhm.dropna().to_numpy())
+            ax[0].plot(v, np.arange(1, v.size + 1) / v.size, ls=ls, lw=1,
+                       color=cmap(j / max(1, len(sel) - 1)), label=f"{a} {k}")
+        s_ = t[t["array"] == a].copy()
+        s_["when"] = pd.to_datetime(s_.date)
+        ax[1].errorbar(s_.when, s_.Rbest_median, yerr=[s_.Rbest_median - s_.Rbest_p25,
+                                                       s_.Rbest_p75 - s_.Rbest_median],
+                       fmt="o" if a == "Array42" else "s", capsize=3, label=f"{a}: median (25-75 %)")
+        ci, cu = best[a][1]
+        ax[2].plot(cu, ci * 1e6, "o-", ms=3, label=f"{a}: best {BEST_FRAC:.0%} of pixels")
+    ax[0].set_xscale("symlog", linthresh=1)
+    ax[0].set_xlabel("bond resistance above the array's best pixels (kOhm)")
+    ax[0].set_ylabel("fraction of pixels")
+    ax[0].set_title("Per scan (solid Array42, dashed Array38)", fontsize=10)
+    ax[0].legend(fontsize=5, ncol=2)
+    ax[1].set_ylabel("kOhm above the array's best pixels")
+    ax[1].set_title("Over time", fontsize=10)
+    ax[1].tick_params(axis="x", labelrotation=30, labelsize=7)
+    ax[1].legend(fontsize=8)
+    ax[2].set_xlabel("V_tot - the best pixels' median LED anchor (V)")
+    ax[2].set_ylabel("current (uA)")
+    ax[2].set_xlim(2.7, 4.2)
+    ax[2].set_title("The reference curves: each array's best pixels", fontsize=10)
+    ax[2].legend(fontsize=8)
+    for x in ax:
+        x.grid(alpha=0.3, which="both")
+    fig.suptitle("Bond resistance against the array's own best pixels (no driver model, no LED "
+                 "curve; each pixel's LED anchored at ~1.5 uA)", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(OUT / "best_reference.png", dpi=150)
+    plt.close(fig)
 
     # task 7: maps, one colour range per array
     for a in DRIVER:
