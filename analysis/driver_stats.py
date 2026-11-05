@@ -26,6 +26,10 @@ Writes into results/<out> (default comparisons/drivers):
                      neighbours are 1, and every short of the list counts, measured,
                      lit or not working: another short draws current without light
   shorts_isolation.csv per short: the nearest other short and the current
+  paired.csv         every two runs sharing >= 10 pixels (a repeat, e.g. a drift check):
+                     per bitval and bias, the median of each pixel's later/earlier
+                     current and its 95 % interval. Pixel to pixel the drivers differ by
+                     ~1.5 %; the same pixel twice differs only by the drift
   summary.md         the numbers
 
 Spreads are robust CVs: 1.4826 x MAD / median. A bit's current is I(bit) - I(bitval 0).
@@ -78,7 +82,8 @@ def load(run: Path):
     args = rc.get("args", {})
     vled = float(rc.get("config", {}).get("vled_voltage", 1.8))
     src = Path(str(args.get("pixel_list") or "").replace("\\", "/"))
-    sweep = next((d for d in R.iterdir() if d.name in str(src)), None)
+    sweep = next((d for d in R.iterdir()            # the run the list came from
+                  if d.name in str(src) and (d / "NVLEDSweep").is_dir()), None)
     emit = pd.DataFrame()
     if src.name == "short.csv":          # only a short must be dark; an LED pixel is lit
         pm = t.pivot_table(index=["X", "Y", "QUADRANT"], columns=["BITVAL", "V"],
@@ -119,15 +124,22 @@ def stats(name, p, n_bad, n_light, src):
         row[f"within_quadrant_{tag}_pct"] = float(np.median([rcv(g) for _, g in q]))
         for k, m in q.median().items():
             row[f"I15_{tag}_{k}_uA"] = m * 1e6
-    net = pd.DataFrame({b: p[(b, V_REF)] - p[(0, V_REF)] for b in BITS})
+    # a short run (a drift check) may measure only some bitvals: the others stay NaN
+    nan = pd.Series(np.nan, index=p.index)
+    net = pd.DataFrame({b: p[(b, V_REF)] - p[(0, V_REF)] if (b, V_REF) in p else nan
+                        for b in BITS})
     for b in BITS:
         row[f"bit{b}_uA"] = net[b].median() * 1e6
         row[f"bit{b}_cv_pct"] = rcv(net[b])
         row[f"code{b}_over_code1"] = net[b].median() / net[1].median()
-    row["additivity_15_over_sum"] = float((net[15] / net[[1, 2, 4, 8]].sum(axis=1)).median())
-    g = net[[1, 2, 4, 8]].div(net[[1, 2, 4, 8]].median())
-    ev = np.linalg.eigvalsh(np.cov(g.T.values))
-    row["common_gain_share_pct"] = 100 * ev[-1] / ev.sum()
+    row["additivity_15_over_sum"] = float((net[15] / net[[1, 2, 4, 8]].sum(axis=1,
+                                                                         min_count=4)).median())
+    if net[[1, 2, 4, 8]].notna().all().all():
+        g = net[[1, 2, 4, 8]].div(net[[1, 2, 4, 8]].median())
+        ev = np.linalg.eigvalsh(np.cov(g.T.values))
+        row["common_gain_share_pct"] = 100 * ev[-1] / ev.sum()
+    else:
+        row["common_gain_share_pct"] = np.nan
     row["corr_bit1_bit8"] = float(net[1].corr(net[8]))
     sat = [v for v in volts if -3.2 <= v <= -1.5]
     if len(sat) >= 5:
@@ -159,6 +171,40 @@ def led_spread(sweep: Path):
     g = sw.groupby("V")["I_LED"]
     t = pd.DataFrame({"led_I_uA": g.median() * 1e6, "led_cv_pct": g.agg(rcv)})
     return t[t["led_I_uA"] >= 0.1]         # below ~100 nA the spread is the meter's noise
+
+
+def paired(pops: dict, out: Path):
+    """paired.csv and summary lines: the same pixels in two runs, run order as given.
+    Bitval b > 0 is the bit's own current, I(b) - I(0)."""
+    rows = []
+    names = list(pops)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            pa, pb = pops[a], pops[b]
+            common = pa.index.intersection(pb.index)
+            if len(common) < 10:
+                continue
+            for col in pa.columns.intersection(pb.columns):
+                bv, v = col
+                if bv == 0 or (0, v) not in pa or (0, v) not in pb:
+                    continue
+                ia = pa.loc[common, col] - pa.loc[common, (0, v)]
+                ib = pb.loc[common, col] - pb.loc[common, (0, v)]
+                r = (ib / ia).replace([np.inf, -np.inf], np.nan).dropna()
+                r = r[ia.loc[r.index] > 1e-6]          # a bit's current above 1 uA
+                if len(r) < 10:
+                    continue
+                med = float(r.median())
+                ci = 1.96 * 1.2533 * 1.4826 * float((r - med).abs().median()) / np.sqrt(len(r))
+                rows.append(dict(earlier=a, later=b, BITVAL=bv, NVLED_V=v, n=len(r),
+                                 I_earlier_uA=float(ia.median()) * 1e6,
+                                 ratio_median=med, ratio_ci95=ci))
+    if not rows:
+        return None
+    t = pd.DataFrame(rows).sort_values(["earlier", "later", "BITVAL", "NVLED_V"],
+                                       ascending=[True, True, True, False])
+    t.to_csv(out / "paired.csv", index=False, float_format="%.5g")
+    return t
 
 
 def isolation(pops: dict, out: Path, plt):
@@ -361,6 +407,7 @@ def main(argv=None) -> int:
                                               float_format="%.4g")
     isolation({n: (v[0], v[4]) for n, v in nets.items()
               if st.set_index("run").loc[n, "pixel_list"] == "short.csv"}, out, plt)
+    pair = paired({n: v[0] for n, v in nets.items()}, out)
     best = best_shorts({n: (v[0], v[3]) for n, v in nets.items()
                         if st.set_index("run").loc[n, "pixel_list"] == "short.csv"},
                        out, plt)
@@ -404,6 +451,17 @@ def main(argv=None) -> int:
             for _, s in ss[ss["led_cv_pct"].notna()].iterrows():
                 L.append(f"| {s['V']:+.2f} | {f(s['led_I_uA'], 1)} | {f(s['led_cv_pct'])} | "
                          f"{f(s['drv_I_uA'], 1)} | {f(s['drv_cv_pct'])} |")
+        L.append("")
+    if pair is not None:
+        L += ["## The same pixels in two runs (paired.csv)", "",
+              "Median of each pixel's later / earlier current (bit current, bitval 0 "
+              "subtracted), 95 % interval of the median.", "",
+              "| earlier | later | bitval | NVLED (V) | n | I earlier (uA) | later / earlier |",
+              "|---|---|---|---|---|---|---|"]
+        for _, q in pair.iterrows():
+            L.append(f"| {q['earlier'][:11]} | {q['later'][:11]} | {int(q['BITVAL'])} | "
+                     f"{q['NVLED_V']:+.2f} | {int(q['n'])} | {q['I_earlier_uA']:.2f} | "
+                     f"{q['ratio_median']:.4f} +- {q['ratio_ci95']:.4f} |")
         L.append("")
     if best is not None:
         L += ["## The best shorts (bitval 15, -3.2 V; best_shorts.png)", "",
