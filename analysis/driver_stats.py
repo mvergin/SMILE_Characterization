@@ -20,6 +20,12 @@ Writes into results/<out> (default comparisons/drivers):
                      c: every short's current, sorted, against its rank in percent
   best_shorts.csv    the 10 best shorts of each run
   emitting_shorts.csv shorts excluded because they gave light (see LIGHT_SIGMA)
+  shorts_isolation.png the shorts only: a: current against the distance to the nearest
+                     other short; b: the current of the shorts with no other short
+                     within r, against r. Distance = max(|dX|, |dY|), so all 8
+                     neighbours are 1, and every short of the list counts, measured,
+                     lit or not working: another short draws current without light
+  shorts_isolation.csv per short: the nearest other short and the current
   summary.md         the numbers
 
 Spreads are robust CVs: 1.4826 x MAD / median. A bit's current is I(bit) - I(bitval 0).
@@ -155,6 +161,55 @@ def led_spread(sweep: Path):
     return t[t["led_I_uA"] >= 0.1]         # below ~100 nA the spread is the meter's noise
 
 
+def isolation(pops: dict, out: Path, plt):
+    """shorts_isolation.png/.csv: does a short's current depend on how close the next
+    short is? A neighbouring short draws current and gives no light, so the light check
+    cannot see it; if it added to the reading, clustered shorts would read high."""
+    pops = {n: v for n, v in pops.items() if v[1].is_file()}
+    if not pops:
+        return
+    fig, ax = plt.subplots(1, 2, figsize=(15, 5.6))
+    cm = plt.get_cmap("tab10")
+    rows, radii = [], np.arange(0, 31)
+    for i, (name, (p, lst)) in enumerate(pops.items()):
+        c = cm(i)
+        allp = pd.read_csv(lst)[["X", "Y"]].drop_duplicates().to_numpy()
+        xy = np.array([(k[0], k[1]) for k in p.index])
+        d = np.abs(allp[None, :, :] - xy[:, None, :]).max(axis=2)
+        d[d == 0] = 10 ** 6                          # the short itself
+        nn = d.min(axis=1)
+        I = p[(15, V_REF)].to_numpy() * 1e6
+        lab = f"{name.split('_')[1]} {name.split('_')[0]} ({len(p)} measured, {len(allp)} in the list)"
+        jit = np.random.default_rng(i).uniform(0.9, 1.1, len(nn))
+        ax[0].plot(nn * jit, I, ".", ms=4, color=c, alpha=0.7, label=lab)
+        med = [np.median(I[nn > r]) if (nn > r).sum() >= 3 else np.nan for r in radii]
+        q1 = [np.percentile(I[nn > r], 25) if (nn > r).sum() >= 3 else np.nan for r in radii]
+        q3 = [np.percentile(I[nn > r], 75) if (nn > r).sum() >= 3 else np.nan for r in radii]
+        cnt = [(nn > r).sum() for r in radii]
+        ax[1].plot(radii, med, "o-", ms=3, color=c, label=lab)
+        ax[1].fill_between(radii, q1, q3, color=c, alpha=0.15, lw=0)
+        for r_ in (0, 1, 5, 10, 20):
+            if cnt[r_] >= 3:
+                ax[1].annotate(f"n={cnt[r_]}", (r_, med[r_]), fontsize=7, color=c,
+                               textcoords="offset points", xytext=(2, 6))
+        rows += [dict(run=name, X=k[0], Y=k[1], quadrant=k[2], nearest_short_px=int(n_),
+                      I15_uA=v) for k, n_, v in zip(p.index, nn, I)]
+    pd.DataFrame(rows).to_csv(out / "shorts_isolation.csv", index=False, float_format="%.3f")
+    ax[0].set_xscale("log")
+    ax[0].set_xlabel("distance to the nearest other short, max(|dX|, |dY|) (px; 1 = touching)")
+    ax[0].set_ylabel(f"I at bitval 15, {V_REF:+.1f} V (uA)")
+    ax[0].set_title("Each short against its nearest neighbouring short", fontsize=10)
+    ax[1].set_xlabel("r: only shorts with no other short within r (px)")
+    ax[1].set_ylabel(f"median I at bitval 15, {V_REF:+.1f} V (uA), 25-75 % shaded")
+    ax[1].set_title("Current of ever more isolated shorts", fontsize=10)
+    for a in ax:
+        a.grid(alpha=0.3, which="both")
+        a.legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(out / "shorts_isolation.png", dpi=150)
+    plt.close(fig)
+
+
 def best_shorts(pops: dict, out: Path, plt):
     """best_shorts.png and .csv, for the shorts runs only. If the shorts differ because
     the short damaged some of them, the undamaged ones are the best: the top of each
@@ -225,7 +280,8 @@ def main(argv=None) -> int:
             emits.append(emit.assign(run=run.name))
         row, net = stats(run.name, p, bad, len(emit), src)
         rows.append(row)
-        nets[run.name] = (p, net, sweep.name if sweep else None, vled)
+        nets[run.name] = (p, net, sweep.name if sweep else None, vled,
+                          R.parent / src if not src.is_absolute() else src)
         print(f"{run.name}: {len(p)} drivers from {src.name}"
               + (f", sweep {sweep.name}" if sweep else ""))
         if sweep is not None and sweep.name not in leds:
@@ -247,7 +303,7 @@ def main(argv=None) -> int:
     fig, ax = plt.subplots(2, 2, figsize=(14, 10))
     cm = plt.get_cmap("tab10")
     shown = set()                          # one LED curve per sweep
-    for i, (name, (p, net, swn, _vled)) in enumerate(nets.items()):
+    for i, (name, (p, net, swn, _vled, _src)) in enumerate(nets.items()):
         c = cm(i)
         s = p[(15, V_REF)]
         for j, q in enumerate(QUADS):
@@ -303,6 +359,8 @@ def main(argv=None) -> int:
     if emits:
         pd.concat(emits).reset_index().to_csv(out / "emitting_shorts.csv", index=False,
                                               float_format="%.4g")
+    isolation({n: (v[0], v[4]) for n, v in nets.items()
+              if st.set_index("run").loc[n, "pixel_list"] == "short.csv"}, out, plt)
     best = best_shorts({n: (v[0], v[3]) for n, v in nets.items()
                         if st.set_index("run").loc[n, "pixel_list"] == "short.csv"},
                        out, plt)
