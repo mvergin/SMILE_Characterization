@@ -90,14 +90,17 @@ def fit_driver(arr):
     keep = vt > 0.02
     vt, i = vt[keep], i[keep]
     vds, vn = vt - i * R_SHORT, vt - VLED
-    names = ["I15", "g", "lam", "vov", "m"]
+    # The drivers are PMOS with the source at VLED (1.8 V in every run): the gate drive does
+    # not see NVLED, so the gate term g is 0, not a fit parameter. Free, it took +3.2 %/V
+    # (Array42) and -3.3 %/V (Array38), compensating the saturation slope.
+    names = ["I15", "lam", "vov", "m"]
 
     def res(x):
-        P = dict(zip(names, x))
+        P = dict(zip(names, x), g=0.0)
         return f15(vds, vn, P) / i - 1
-    r = least_squares(res, [i.max(), 0.0, 0.02, 0.5, 2.0],
-                      bounds=([1e-5, -0.1, 0.0, 0.02, 0.5], [1e-3, 0.1, 0.1, 6, 20]))
-    P = dict(zip(names, r.x))
+    r = least_squares(res, [i.max(), 0.02, 0.5, 2.0],
+                      bounds=([1e-5, 0.0, 0.02, 0.5], [1e-3, 0.1, 6, 20]))
+    P = dict(zip(names, r.x), g=0.0)
     P["rms_pct"] = 100 * float(np.sqrt(np.mean(r.fun ** 2)))
     P["vt_min"] = float(vt.min())
     P["data"] = (vt, i)
