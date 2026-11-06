@@ -470,3 +470,19 @@ def test_bond_resistance_inversions_round_trip():
         i = float(br.f15(np.array([vds]), 3.2, P)[0])
         assert abs(float(br.v_driver(np.array([i]), 3.2, P)[0]) - vds) < 2e-3, vds
     assert np.isnan(br.v_driver(np.array([1e-3]), 3.2, P)[0])
+
+
+def test_bond_local_removes_a_block_offset():
+    """Two 32x32 blocks, the second 1 kOhm higher: R_local has the same distribution in
+    both, and a block under 100 pixels gets no reference."""
+    import bond_local as bl
+    rng = np.random.default_rng(0)
+    xy = [(x, y) for x in range(64) for y in range(32)] + [(x, 40) for x in range(50)]
+    d = pd.DataFrame(xy, columns=["X", "Y"])
+    d["R_best_kOhm"] = rng.normal(0.5, 0.2, len(d)) + (d.X >= 32)
+    d = bl.add_local(d)
+    a, b = d[(d.Y < 32) & (d.X < 32)], d[(d.Y < 32) & (d.X >= 32)]
+    assert abs(a.R_local_kOhm.median() - b.R_local_kOhm.median()) < 0.1
+    assert abs(b.block_median_kOhm.iloc[0] - a.block_median_kOhm.iloc[0] - 1) < 0.05
+    assert d[d.Y == 40].R_local_kOhm.isna().all()
+    assert d.edge_px.min() == 0 and int(d[(d.X == 20) & (d.Y == 10)].edge_px.iloc[0]) == 10

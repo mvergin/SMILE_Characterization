@@ -121,6 +121,8 @@ per pixel between scans against its resistance.
 `bond_failure.py`: the death rate between two full-array fast scans, against the earlier
 R_bond and the distance to the dark region. `bond_sweep.py`: the series resistance of every
 swept pixel from the slope of its own I(V), its LED anchored at its own ~1.5 uA point.
+`bond_local.py`: each pixel against the best pixels of its own 32x32 block (R_local), maps of
+position against pixel-to-pixel, and where the best pixels sit.
 
 ### `analyze_array.py` — the main report
 

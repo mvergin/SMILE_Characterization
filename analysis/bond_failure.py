@@ -5,7 +5,8 @@
 Pairs of full-array fast scans of one array, earlier -> later. Every pixel alive in the
 earlier scan (in bond_resistance.py's selection, with its R_bond) is followed into the
 later scan's class: still lit, or dark (open, short, dark_conducting). The death rate is
-binned by the earlier R_bond, and by the distance to the nearest pixel that was already
+binned by the earlier R_best (above the array's best pixels) and R_local (above the
+32x32 block's best, bond_local.py), and by the distance to the nearest pixel that was already
 dark in the earlier scan (Chebyshev, so the 8 neighbours are 1).
 
 Writes results/comparisons/bond_resistance/failure/: failure.png, failure_by_R.csv,
@@ -20,6 +21,7 @@ import pandas as pd
 from scipy.ndimage import distance_transform_cdt
 
 import analyze_array as aa
+import bond_local as bl
 import bond_resistance as br
 
 PAIRS = [("Array38", "260706-1114", "261022-0037"),     # July (caps) -> October (no caps)
@@ -58,23 +60,31 @@ def main() -> int:
         n, nd = len(pa), int(pa.died.sum())
         base = nd / n
         print(f"{arr} {a} -> {b}: {nd} of {n} pixels died ({100 * base:.3f} %)")
-        # by R_bond decile
-        q = pd.qcut(pa.R_best_kOhm, 10, duplicates="drop")
-        g = pa.groupby(q, observed=True)
-        t = pd.DataFrame({"R_median_kOhm": g.R_best_kOhm.median(), "n": g.size(),
-                          "died": g.died.sum()})
-        t["rate_pct"] = 100 * t.died / t.n
-        t = t.reset_index(drop=True).assign(array=arr, earlier=a, later=b)
-        rows_r.append(t)
+        # by decile: above the array's best, and above the block's own best (bond_local.py)
+        pa = bl.add_local(pa.reset_index()).set_index(["X", "Y"])
         x = ax[0, j]
-        x.plot(t.R_median_kOhm, t.rate_pct, "o-")
+        for col, lab, mk in (("R_best_kOhm", "the array's best", "o-"),
+                             ("R_local_kOhm", "the 32x32 block's best", "s--")):
+            q = pd.qcut(pa[col], 10, duplicates="drop")
+            g = pa.groupby(q, observed=True)
+            t = pd.DataFrame({"R_median_kOhm": g[col].median(), "n": g.size(),
+                              "died": g.died.sum()})
+            t["rate_pct"] = 100 * t.died / t.n
+            t = t.reset_index(drop=True).assign(measure=col, array=arr, earlier=a, later=b)
+            rows_r.append(t)
+            top = 100 * t.died.iloc[-1] / max(1, t.died.sum())
+            print(f"  {col}: top decile {t.rate_pct.iloc[-1]:.2f} % died, "
+                  f"{t.rate_pct.iloc[-1] / max(1e-9, t.rate_pct.iloc[:5].mean()):.0f}x the lower "
+                  f"half; {top:.0f} % of the {int(t.died.sum())} ranked deaths")
+            x.plot(t.R_median_kOhm, t.rate_pct, mk,
+                   label=f"above {lab}: top decile holds {top:.0f} % of deaths")
         x.axhline(100 * base, color="0.5", ls=":", lw=1, label=f"all: {100 * base:.3f} %")
         x.set_xscale("symlog", linthresh=1)
-        x.set_xlabel(f"bond resistance above the best pixels, in {a} (kOhm), deciles")
+        x.set_xlabel(f"bond resistance in {a} (kOhm), deciles")
         x.set_ylabel(f"died by {b} (%)")
         x.set_title(f"{arr}: {a} -> {b}, {nd} of {n} died", fontsize=10)
         x.grid(alpha=0.3, which="both")
-        x.legend(fontsize=8)
+        x.legend(fontsize=7)
         # by distance to the dark region
         bins = [0, 1, 2, 3, 5, 10, 20, 50, 1000]
         c = pd.cut(pa.dist_dark, bins, right=True)
@@ -107,7 +117,7 @@ def main() -> int:
     pd.concat(rows_d).to_csv(out / "failure_by_distance.csv", index=False, float_format="%.4g")
     pd.concat(died_all).to_csv(out / "died.csv", index=False, float_format="%.4g")
     for t in rows_r:
-        print(t[["R_median_kOhm", "n", "died", "rate_pct"]].round(3).to_string(index=False))
+        print(t[["measure", "R_median_kOhm", "n", "died", "rate_pct"]].round(3).to_string(index=False))
     for u in rows_d:
         print(u[["dist_px", "n", "died", "rate_pct", "R_median_kOhm"]].round(3).to_string(index=False))
     return 0
