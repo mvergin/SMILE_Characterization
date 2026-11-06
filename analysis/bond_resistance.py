@@ -133,7 +133,10 @@ def typical_curve(arr):
 BEST_FRAC = 0.02          # the best pixels: top 2 % of current at -1.40 V in the sweep
 
 
-def best_reference(arr):
+AGREE = 0.03             # the best pixels' sweep current must match the fast scan within 3 %
+
+
+def best_reference(arr, fs_i=None):
     """The array's best pixels as the reference: no driver model, no LED curve.
 
     Two pixels of one array that carry the same current have the same driver drop (PMOS,
@@ -143,6 +146,10 @@ def best_reference(arr):
     on driver + LED shape + bond, and a pixel's bond above the best ones is
     (U_i - U_best(I_i)) / I_i. U_best(I): per sweep bias, the best pixels' median current
     against V_tot minus their median anchor; interpolated in log I.
+    The best pixels are chosen by the same run's fast scan current at -1.40 V (fs_i): random
+    order, retest Spearman 0.97, latched pixels removed. Chosen by the sweep's own -1.40 V
+    point (before 2026-11-06), half of Array42's set drew >5 % more in the sweep than in the
+    fast scan: a second driver adding current (neighbour_on/other), not a better bond.
     Returns (anchor per pixel, the curve as (I, U), the best pixels' index)."""
     import pixel_classes as pc
     sw = pc.load_sweep(ds.R / SWEEP[arr])
@@ -154,9 +161,12 @@ def best_reference(arr):
     anchor = (a.vtot - v_led(a.I_LED.to_numpy())).rename("dV")
     cls = pd.read_csv(ds.R / SWEEP[arr] / "REPORT_assets/pixelclassification/sweep/sweep_classes.csv"
                       ).set_index(["X", "Y"])
-    ok = cls.index[cls.get("m1p40V", pd.Series(dtype=str)).isin(["typical", "other"])]
+    ok = cls.index[cls.get("m1p40V", pd.Series(dtype=str)) == "typical"]
     at = sw[sw.V.round(3) == -1.4].set_index(["X", "Y"]).I_LED
     at = at[at.index.isin(ok) & at.index.isin(anchor.index)]
+    if fs_i is not None:
+        f = fs_i.reindex(at.index)
+        at = f[(at / f - 1).abs() <= AGREE]
     best = at.nlargest(max(20, int(BEST_FRAC * len(at)))).index
     b = sw.set_index(["X", "Y"]).loc[lambda q: q.index.isin(best)].reset_index()
     g = b.groupby("V")
@@ -245,7 +255,12 @@ def main() -> int:
     runs[["roi_x0", "roi_y0", "roi_x1", "roi_y1"]] = xy.to_numpy()
     drv = {a: fit_driver(a) for a in DRIVER}
     typ = {a: typical_curve(a) for a in DRIVER}
-    best = {a: best_reference(a) for a in DRIVER}
+    # the best pixels are chosen by the reference run's own fast scan (best_reference)
+    best = {}
+    for a in DRIVER:
+        r0 = runs[runs.run.str.startswith(REFERENCE_RUN[a])].iloc[0]
+        f0 = pixels(r0, drv[a], typ[a], drv[a]).set_index(["X", "Y"]).I_LED
+        best[a] = best_reference(a, f0)
     for a, (anc, (ci, cu), bi) in best.items():
         print(f"{a} best-pixel reference: {len(bi)} pixels, {len(anc)} anchored; curve "
               + ", ".join(f"{u:.3f} V at {i * 1e6:.1f} uA" for i, u in zip(ci, cu)))

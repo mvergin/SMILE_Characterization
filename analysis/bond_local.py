@@ -130,7 +130,7 @@ def main() -> int:
     # where the best pixels sit
     fig, ax = plt.subplots(len(ref), 3, figsize=(19, 6 * len(ref)), squeeze=False)
     for j, (a, (r, d)) in enumerate(ref.items()):
-        anchor, _, best = br.best_reference(a)
+        anchor, _, best = br.best_reference(a, d.set_index(["X", "Y"]).I_LED)
         bx, by = best.get_level_values("X"), best.get_level_values("Y")
         x = ax[j, 0]
         lo, hi = clim(d)
@@ -169,7 +169,7 @@ def main() -> int:
         x.set_xticks(k, bin_labels())
         x.set_xlabel("distance to the array edge (px)")
         x.set_ylabel("kOhm (median, 25-75 %)")
-        x.set_title(f"{a}, {r.tag}: the ring, and the local reference removes it", fontsize=10)
+        x.set_title(f"{a}, {r.tag}: R against the edge distance", fontsize=10)
         x.legend(fontsize=8)
         x.grid(alpha=0.3)
     fig.tight_layout()
