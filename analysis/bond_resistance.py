@@ -13,8 +13,10 @@ Per pixel, at a fast-scan bias NVLED (V_tot = VLED - NVLED across the pixel):
   series resistance (270 Ohm, the device's rser plot), so R_bond is what remains.
 - V_driver: the drive transistor at code 15, a smooth-knee model fitted to each array's
   10 best shorts (their own series path, 2.7 kOhm, removed: the code-1/code-15 split of
-  261105-1024). Array42's shorts reach 0 V across them (261105-1024); Array38's start at
-  0.8 V (261029-0836), so its driver below 0.8 V is the model's extrapolation.
+  261105-1024). Array42's shorts reach 0 V across them (261105-1024). Array38's start at
+  0.8 V (261029-0836), above the knee: free, the fit invented a near-vertical rise below it
+  (V_ov 0.07 V, 0.02 V at 27 uA). So Array38 takes Array42's measured shape (V_ov, m, lam),
+  scaled by one factor I15 fitted to its own shorts (SHAPE_FROM).
 - I: the fast-scan current minus its quadrant's leakage (classify_pixels' I_leak_A).
 - V_typical: the typical class's median I(V) from the array's no-caps sweep (261026-0813,
   261102-1703).
@@ -66,6 +68,9 @@ DRIVER = {"Array42": "261105-1024_Array42_PIXELS_Transistoriv",
 SWEEP = {"Array42": "261102-1703_Array42_ROI_(0, 0, 511, 511)",
          "Array38": "261026-0813_Array38_ROI_(0, 0, 511, 511)"}
 REFERENCE_RUN = {"Array42": "261102-1703", "Array38": "261026-0813"}
+# arrays whose shorts have no data below the knee borrow the knee of an array that has;
+# same design, drivers within ~3 %
+SHAPE_FROM = {"Array38": "Array42"}
 
 
 # ---- LED, driver, typical pixel ---------------------------------------------------------
@@ -102,14 +107,23 @@ def fit_driver(arr):
     # The drivers are PMOS with the source at VLED (1.8 V in every run): the gate drive does
     # not see NVLED, so the gate term g is 0, not a fit parameter. Free, it took +3.2 %/V
     # (Array42) and -3.3 %/V (Array38), compensating the saturation slope.
-    names = ["I15", "lam", "vov", "m"]
+    if arr in SHAPE_FROM:
+        S = fit_driver(SHAPE_FROM[arr])
+        shape = {k: S[k] for k in ("lam", "vov", "m")}
 
-    def res(x):
-        P = dict(zip(names, x), g=0.0)
-        return f15(vds, vn, P) / i - 1
-    r = least_squares(res, [i.max(), 0.02, 0.5, 2.0],
-                      bounds=([1e-5, 0.0, 0.02, 0.5], [1e-3, 0.1, 6, 20]))
-    P = dict(zip(names, r.x), g=0.0)
+        def res(x):
+            return f15(vds, vn, dict(shape, I15=x[0], g=0.0)) / i - 1
+        r = least_squares(res, [S["I15"]])
+        P = dict(shape, I15=float(r.x[0]), g=0.0, shape_from=SHAPE_FROM[arr],
+                 scale=float(r.x[0] / S["I15"]))
+    else:
+        names = ["I15", "lam", "vov", "m"]
+
+        def res(x):
+            return f15(vds, vn, dict(zip(names, x), g=0.0)) / i - 1
+        r = least_squares(res, [i.max(), 0.02, 0.5, 2.0],
+                          bounds=([1e-5, 0.0, 0.02, 0.5], [1e-3, 0.1, 6, 20]))
+        P = dict(zip(names, r.x), g=0.0)
     P["rms_pct"] = 100 * float(np.sqrt(np.mean(r.fun ** 2)))
     P["vt_min"] = float(vt.min())
     P["data"] = (vt, i)
@@ -201,7 +215,7 @@ def pixels(row, P, typ, P_other, ref=None):
     d["V_driver"] = v_driver(d.I_LED.to_numpy(), vn, P)
     d["R_bond_kOhm"] = (vtot - d.V_LED - d.V_driver) / d.I_LED / 1e3
     # the bracket: the same pixels with the OTHER array's driver. Array38's shorts start at
-    # 0.8 V, so its driver below that is extrapolated; Array42's is measured to 0 V.
+    # 0.8 V, so its knee is borrowed from Array42 (SHAPE_FROM); Array42's is measured to 0 V.
     d["R_bond_other_driver_kOhm"] = ((vtot - d.V_LED - v_driver(d.I_LED.to_numpy(), vn, P_other))
                                      / d.I_LED / 1e3)
     tv, ti = typ
@@ -463,7 +477,8 @@ def main() -> int:
         L.append(f"  - {a} ({DRIVER[a]}): rms {P['rms_pct']:.2f} %, saturation slope "
                  f"{100 * P['lam']:.2f} %/V, gate term {100 * P['g']:+.2f} %/V; shorts measured "
                  f"from {P['vt_min']:.2f} V across them"
-                 + (" -- below 0.8 V the driver is extrapolated" if P["vt_min"] > 0.5 else ""))
+                 + (f" -- no data below the knee: {P['shape_from']}'s shape (V_ov, m, lam), "
+                    f"current x {P['scale']:.3f}" if "shape_from" in P else ""))
     L += ["- **Leakage:** each quadrant's open-pixel current, subtracted from the fast-scan current.",
           "- **Relative method:** R_rel = (V_tot - V_typical(I)) / I with the typical class's sweep "
           "median as V_typical (261026-0813, 261102-1703).",
