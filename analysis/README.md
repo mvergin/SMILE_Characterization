@@ -123,6 +123,8 @@ R_bond and the distance to the dark region. `bond_sweep.py`: the series resistan
 swept pixel from the slope of its own I(V), its LED anchored at its own ~1.5 uA point.
 `bond_local.py`: each pixel against the best pixels of its own 32x32 block (R_local), maps of
 position against pixel-to-pixel, and where the best pixels sit.
+`image_burnin.py`: whether the displayed image (smile_s.jpg) shows in EQE, current, R_best and
+the LED anchor of Array42, block-matched bright against dark pixels, per fast scan.
 
 ### `analyze_array.py` — the main report
 
