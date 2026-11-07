@@ -4565,8 +4565,9 @@ def plot_full_array_maps(fs, peak_iqe_ref, out_dir, plt):
 
         full_array_power.png      optical power / median, RSD in the title
         full_array_eqe.png        relative EQE (P/I) / median, RSD in the title
-        full_array_spread.png     histograms of both / median: the power spread vs efficiency
+        full_array_spread.png     histograms of all three / median: power spread vs efficiency
         full_array_peak_iqe.png   peak-IQE proxy / median (fastscan_peak_iqe_pixels), if any
+        full_array_peak_iqe_fit.png  the swept pixels' own clean ABC fits / median, if any
 
     Pixels used: P and |I| above FULL_MAP_LIVE_FRAC of their medians (dead and dim pixels
     are white). RSD = std / mean over those pixels. Returns {name: RSD %}."""
@@ -4583,6 +4584,11 @@ def plot_full_array_maps(fs, peak_iqe_ref, out_dir, plt):
             pk = pd.Series(d["iqe"].values, index=pd.MultiIndex.from_arrays([d["X"], d["Y"]]))
             vals["peak_iqe"] = (pk.reindex(pd.MultiIndex.from_arrays([X, Y])).to_numpy(),
                                 "peak IQE (fast-scan proxy) / median", "%", 1.0)
+    if isinstance(peak_iqe_ref, pd.Series):
+        # the swept pixels' own clean ABC fits: the real per-pixel IQE, on the swept subset
+        vals["peak_iqe_fit"] = (peak_iqe_ref.groupby(level=[0, 1]).median()
+                                .reindex(pd.MultiIndex.from_arrays([X, Y])).to_numpy(),
+                                "peak IQE (per-pixel fits) / median", "%", 100.0)
     rsd = {}
     cm = plt.get_cmap("viridis").copy()
     cm.set_bad("white")
@@ -4603,7 +4609,7 @@ def plot_full_array_maps(fs, peak_iqe_ref, out_dir, plt):
         plt.close(fig)
     fig, ax = plt.subplots(figsize=(7.2, 5.2))
     bins = np.linspace(0.6, 1.4, 90)
-    for name in ("power", "eqe"):
+    for name in [n for n in ("power", "eqe", "peak_iqe", "peak_iqe_fit") if n in vals]:
         val, lbl = vals[name][0], vals[name][1].split(" /")[0]
         x = val[live & np.isfinite(val)]
         ax.hist(x / np.median(x), bins=bins, histtype="step", lw=1.6,
