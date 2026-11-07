@@ -4557,6 +4557,68 @@ def plot_fastscan_peak_iqe(fs, peak_iqe_ref, out, plt):
     )
 
 
+FULL_MAP_LIVE_FRAC = 0.5    # a pixel enters the full-array maps above half the median P and I
+
+
+def plot_full_array_maps(fs, peak_iqe_ref, out_dir, plt):
+    """The full-array maps of run 261015-0015's full_array_map.png, one PNG each:
+
+        full_array_power.png      optical power / median, RSD in the title
+        full_array_eqe.png        relative EQE (P/I) / median, RSD in the title
+        full_array_spread.png     histograms of both / median: the power spread vs efficiency
+        full_array_peak_iqe.png   peak-IQE proxy / median (fastscan_peak_iqe_pixels), if any
+
+    Pixels used: P and |I| above FULL_MAP_LIVE_FRAC of their medians (dead and dim pixels
+    are white). RSD = std / mean over those pixels. Returns {name: RSD %}."""
+    P = fs["PM400_POWER_MEAN"].astype(float).abs().to_numpy()
+    I = fs["NVLED_CURR_MEAN"].astype(float).abs().to_numpy()
+    live = (P > FULL_MAP_LIVE_FRAC * np.nanmedian(P)) & (I > FULL_MAP_LIVE_FRAC * np.nanmedian(I))
+    X, Y = fs["X"].to_numpy(int), fs["Y"].to_numpy(int)
+    v = float(fs["NVLED_V"].astype(float).iloc[0]) if "NVLED_V" in fs else float("nan")
+    vals = {"power": (P, f"optical power / median", "nW", 1e9),
+            "eqe": (np.where(I > 0, P / I, np.nan), "relative EQE / median", "W/A", 1.0)}
+    if peak_iqe_ref is not None:
+        d, _ = fastscan_peak_iqe_pixels(fs, peak_iqe_ref)
+        if d is not None:
+            pk = pd.Series(d["iqe"].values, index=pd.MultiIndex.from_arrays([d["X"], d["Y"]]))
+            vals["peak_iqe"] = (pk.reindex(pd.MultiIndex.from_arrays([X, Y])).to_numpy(),
+                                "peak IQE (fast-scan proxy) / median", "%", 1.0)
+    rsd = {}
+    cm = plt.get_cmap("viridis").copy()
+    cm.set_bad("white")
+    for name, (val, lbl, unit, scale) in vals.items():
+        ok = live & np.isfinite(val)
+        x = val[ok]
+        med, rsd[name] = float(np.median(x)), float(100 * x.std() / x.mean())
+        G = np.full((512, 512), np.nan)
+        G[Y[ok], X[ok]] = x / med
+        fig, ax = plt.subplots(figsize=(7.2, 6.2))
+        im = ax.imshow(G, cmap=cm, vmin=0.7, vmax=1.3, origin="upper", interpolation="nearest")
+        fig.colorbar(im, ax=ax, fraction=0.046, label="value / array median")
+        ax.set(xlabel="X", ylabel="Y",
+               title=f"{lbl}  (median {med * scale:.3g} {unit})  RSD {rsd[name]:.1f} %\n"
+                     f"{v:+.2f} V, {int(ok.sum())} of {len(P)} pixels (white: dead or dim)")
+        fig.tight_layout()
+        fig.savefig(out_dir / f"full_array_{name}.png", dpi=150)
+        plt.close(fig)
+    fig, ax = plt.subplots(figsize=(7.2, 5.2))
+    bins = np.linspace(0.6, 1.4, 90)
+    for name in ("power", "eqe"):
+        val, lbl = vals[name][0], vals[name][1].split(" /")[0]
+        x = val[live & np.isfinite(val)]
+        ax.hist(x / np.median(x), bins=bins, histtype="step", lw=1.6,
+                label=f"{lbl}, RSD {rsd[name]:.1f} %")
+    ax.set(xlabel="value / array median", ylabel="pixels", yscale="log",
+           title=f"the {rsd['power']:.0f} % power spread is {rsd['eqe']:.0f} % efficiency "
+                 f"({v:+.2f} V)")
+    ax.legend(fontsize=9, loc="upper left")
+    ax.grid(alpha=.3)
+    fig.tight_layout()
+    fig.savefig(out_dir / "full_array_spread.png", dpi=150)
+    plt.close(fig)
+    return rsd
+
+
 def anomaly_report(
     X, Y, V, out, plt, quad=256, DETECT_SIGMA=3.0, DETECT_DEFICIT=5.0, line_sigma=4.0
 ):
@@ -4953,6 +5015,11 @@ def analyse_run(run_dir, log):
             ),
             None,
         )
+    try:
+        r = plot_full_array_maps(fs, peak_ref, out, plt)
+        log("  full-array maps: RSD " + ", ".join(f"{k} {x:.1f} %" for k, x in r.items()))
+    except Exception as e:
+        log(f"  (skipped the full-array maps: {e})")
     if peak_ref is not None:
         try:
             fs_peak = plot_fastscan_peak_iqe(
