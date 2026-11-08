@@ -4568,6 +4568,10 @@ def plot_full_array_maps(fs, peak_iqe_ref, out_dir, plt):
         full_array_spread.png     histograms of all three / median: power spread vs efficiency
         full_array_peak_iqe.png   peak-IQE proxy / median (fastscan_peak_iqe_pixels), if any
         full_array_peak_iqe_fit.png  the swept pixels' own clean ABC fits / median, if any
+        full_array_maps.csv       the plotted values per pixel: P_W, I_A, EQE_rel_W_per_A,
+                                  peak_IQE_proxy_pct, peak_IQE_fit_pct, each also as
+                                  <name>_rel (/ median over the used pixels, NaN if not
+                                  used); used = the pixels in the maps and histograms
 
     Pixels used: P and |I| above FULL_MAP_LIVE_FRAC of their medians (dead and dim pixels
     are white). RSD = std / mean over those pixels. Returns {name: RSD %}."""
@@ -4622,6 +4626,17 @@ def plot_full_array_maps(fs, peak_iqe_ref, out_dir, plt):
     fig.tight_layout()
     fig.savefig(out_dir / "full_array_spread.png", dpi=150)
     plt.close(fig)
+    # the plotted values, per pixel: raw, and / the median over the used pixels as drawn
+    tab = pd.DataFrame({"X": X, "Y": Y, "NVLED_V": v, "used": live,
+                        "P_W": P, "I_A": I})
+    raw = {"power": "P_W", "eqe": "EQE_rel_W_per_A", "peak_iqe": "peak_IQE_proxy_pct",
+           "peak_iqe_fit": "peak_IQE_fit_pct"}
+    for name, (val, _, _, scale) in vals.items():
+        if name != "power":
+            tab[raw[name]] = val * (scale if name == "peak_iqe_fit" else 1.0)
+        ok = live & np.isfinite(val)
+        tab[f"{name}_rel"] = np.where(ok, val / np.median(val[ok]), np.nan)
+    tab.to_csv(out_dir / "full_array_maps.csv", index=False, float_format="%.6g")
     return rsd
 
 
