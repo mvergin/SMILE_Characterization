@@ -125,6 +125,10 @@ swept pixel from the slope of its own I(V), its LED anchored at its own ~1.5 uA 
 position against pixel-to-pixel, and where the best pixels sit.
 `image_burnin.py`: whether the displayed image (smile_s.jpg) shows in EQE, current, R_best and
 the LED anchor of Array42, block-matched bright against dark pixels, per fast scan.
+`led_voltage_budget.py`: where a pixel's voltage goes. Transistor (model), LED junction (from
+the LED's own light) and the excess over it (barriers and series resistance), for the typical
+pixels, every swept pixel and the unbonded SGA_15 die (its IVL measurement, converted to
+`SGA_15 10um/SGA_15_10um_IVL.csv`). Writes `results/comparisons/led_voltage/` (README there).
 
 ### `analyze_array.py` — the main report
 

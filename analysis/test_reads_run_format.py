@@ -486,3 +486,21 @@ def test_bond_local_removes_a_block_offset():
     assert abs(b.block_median_kOhm.iloc[0] - a.block_median_kOhm.iloc[0] - 1) < 0.05
     assert d[d.Y == 40].R_local_kOhm.isna().all()
     assert d.edge_px.min() == 0 and int(d[(d.X == 20) & (d.Y == 10)].edge_px.iloc[0]) == 10
+
+
+def test_led_voltage_light_split_recovers_a_barrier():
+    """A junction of ideality N_R plus a known barrier and resistor: the light-referenced
+    excess returns exactly that barrier (counted from I_REF), and the barrier + resistor fit
+    returns its parameters."""
+    import led_voltage_budget as lv
+    i = np.logspace(-7, -4, 25)
+    light = 3e-3 * i
+    vj = 2.6 + lv.N_R * lv.VT * np.log(light / light[0])
+    a, ib, R = 0.08, 4e-6, 600.0
+    bar = a * np.log1p(i / ib) + i * R
+    vex = lv.light_split(i, vj + bar, light, np.ones_like(i, bool))[1]
+    want = bar - np.interp(np.log(lv.I_REF), np.log(i), bar)
+    assert np.allclose(vex, want, atol=1e-9), np.max(np.abs(vex - want))
+    m = i >= lv.I_REF
+    p = lv.fit(i[m], vex[m], "barrier + resistor")["p"]
+    assert abs(p[0] - a) < 2e-3 and abs(10 ** p[1] / ib - 1) < 0.05 and abs(p[2] - R) < 20, p
