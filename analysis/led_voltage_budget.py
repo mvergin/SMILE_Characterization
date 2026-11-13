@@ -337,7 +337,19 @@ def fig_driver(arr, P, d, model, plt):
                 arrowprops=dict(arrowstyle="->", color="0.4"))
     ax.annotate(f"saturation: a current source.\nOnly {100 * P['lam']:.1f} %/V more current\n"
                 f"(output resistance {rout / 1e6:.2f} MOhm),\nso any further voltage stays here",
-                (2.2, 88), fontsize=8, bbox=dict(boxstyle="round", fc="w", ec="0.7"))
+                (2.25, 97), fontsize=8, va="bottom", bbox=dict(boxstyle="round", fc="w", ec="0.7"))
+    fit_note = ([f"$V_{{ov}}$, m, $\\lambda$: Array42's (no data below the knee)",
+                 f"$I_{{15}}$: Array42's x {P['scale']:.3f}, fitted to the shorts, rms {P['rms_pct']:.2f} %"]
+                if "shape_from" in P else [f"fitted to the 10 best shorts: rms {P['rms_pct']:.2f} %"])
+    ax.text(2.25, 36, "\n".join(
+        [r"$I = I_{15}\,\left(1+\lambda\,(V_{ds}-5\,\mathrm{V})\right)\,\frac{x}{\left(1+x^{m}\right)^{1/m}},"
+         r"\quad x = \frac{V_{ds}}{V_{ov}}$",
+         f"$I_{{15}}$ = {P['I15'] * 1e6:.1f} uA,   $\\lambda$ = {100 * P['lam']:.2f} %/V",
+         f"$V_{{ov}}$ = {P['vov']:.3f} V,   m = {P['m']:.2f}"] + fit_note
+        + [f"on-resistance $V_{{ov}}\\,/\\,(I_{{15}}(1-5\\,\\mathrm{{V}}\\,\\lambda))$ = {ron / 1e3:.1f} kOhm,",
+           f"output resistance $1\\,/\\,(\\lambda I_{{15}})$ = {rout / 1e6:.2f} MOhm"]),
+        fontsize=8, va="bottom", ha="left", linespacing=1.5,
+        bbox=dict(boxstyle="round", fc="w", ec="0.7"))
     ax.set(xlabel="voltage across the transistor (V)", ylabel="current (uA)", xlim=(0, 5),
            ylim=(0, 150), title=f"{arr}: the pixel transistor, and where the pixel operates on it\n"
                                 "operating point = where the transistor's curve meets what the LED leaves it")
