@@ -201,9 +201,10 @@ def add_estimate(d, r):
     return d
 
 
-def per_pixel(sw, die, best, rb):
-    """Every pixel: V_LED and light at I_REF, TARGETS and GRID (log-interpolated between its
-    own sweep points), its excess there, and its V_LED against the die's at the same current.
+def per_pixel(sw, die, best, rb, i_star):
+    """Every pixel: V_LED and light at I_REF, TARGETS, GRID and i_star (the fast scan's median
+    current, for the comparison with R_best), log-interpolated between its own sweep points;
+    its excess there, and its V_LED against the die's at the same current.
     Returns the per-pixel table and the distribution over pixels at each GRID current."""
     s = sw[sw.ok & (sw.I_LED > 0)]
     s = s.assign(P=s.P.where(s.light))
@@ -238,6 +239,8 @@ def per_pixel(sw, die, best, rb):
         v, lp = at(t)
         res[f"V_ex_{tag(t)}"] = (v - v0) - N_R * VT * (lp - l0)
         res[f"V_LED_minus_die_{tag(t)}"] = v - interp_log(di, np.array([t]), dv)[0]
+    v, lp = at(i_star)
+    res["V_ex_Istar"] = (v - v0) - N_R * VT * (lp - l0)
     rows_ = []
     for t in GRID:
         v, lp = at(t)
@@ -304,6 +307,51 @@ def describe(model, r):
     return f"{model}: {s}, rms {1e3 * r['rms']:.1f} mV"
 
 
+def die_excess(die):
+    """The die's excess as measured (no fit), interpolated in ln I: its LED barrier and its
+    own resistance, fixed for the bond fits."""
+    e = die[die.light & (die.Current_A >= 0.3e-6)].sort_values("Current_A")
+    li, ve = np.log(e.Current_A.to_numpy()), e.V_ex.to_numpy()
+    return lambda i: np.interp(np.log(i), li, ve)
+
+
+def _barrier(a, lb, i):
+    return a * (np.log1p(i / 10 ** lb) - np.log1p(I_REF / 10 ** lb))
+
+
+# the pixel as the die's LED plus a bond term; D is the die's measured excess
+BOND = {
+    "die + R": (lambda D, p, i: D(i) + p[0] * (i - I_REF), [500.], ([-2e4], [5e4])),
+    "die + 2nd barrier": (lambda D, p, i: D(i) + _barrier(p[0], p[1], i), [0.05, -5.],
+                          ([0, -8], [1, -3])),
+    "k x die + R": (lambda D, p, i: p[0] * D(i) + p[1] * (i - I_REF), [1., 500.],
+                    ([0.2, -2e4], [5, 5e4])),
+}
+BOND_COL = {"die + R": NPG["tan"], "die + 2nd barrier": NPG["lilac"], "k x die + R": NPG["teal"]}
+BOND_TEXT = {"die + R": "the die's LED + a resistor (bond)",
+             "die + 2nd barrier": "the die's LED + a second barrier (oxide, Schottky)",
+             "k x die + R": "the die's barrier scaled by k + a resistor"}
+
+
+def bond_fit(D, i, v, model):
+    f, p0, bounds = BOND[model]
+    r = least_squares(lambda p: f(D, p, i) - v, p0, bounds=bounds)
+    cov = np.linalg.pinv(r.jac.T @ r.jac) * (r.fun @ r.fun) / max(1, len(i) - len(p0))
+    return dict(p=r.x, se=np.sqrt(np.abs(np.diag(cov))), rms=float(np.sqrt(np.mean(r.fun ** 2))),
+                f=lambda x, p=r.x: f(D, p, x), n=len(i))
+
+
+def describe_bond(model, r):
+    p, se = r["p"], r["se"]
+    if model == "die + R":
+        s = f"R {p[0] / 1e3:+.2f} +- {se[0] / 1e3:.2f} kOhm"
+    elif model == "die + 2nd barrier":
+        s = f"a {1e3 * p[0]:.0f} mV, I_b {10 ** p[1] * 1e6:.2g} uA"
+    else:
+        s = f"k {p[0]:.2f} +- {se[0]:.2f}, R {p[1] / 1e3:+.2f} +- {se[1] / 1e3:.2f} kOhm"
+    return f"{model}: {s}, rms {1e3 * r['rms']:.1f} mV"
+
+
 def excess_points(d):
     m = d.ok & d.light & np.isfinite(d.V_ex) & (d.I >= I_REF)
     return d.I[m].to_numpy(), d.V_ex[m].to_numpy()
@@ -346,6 +394,19 @@ def fig_driver(arr, P, d, model, plt):
         if any(abs(r.V_tot - x) < 0.01 for x in (3.2, 4.0, 5.0)):
             ax.annotate(f"{br.VLED - r.V_tot:+.1f} V", (r.V_drv_est, r.I * 1e6), xytext=(4, -11),
                         textcoords="offset points", fontsize=7, color=WHOLE[arr])
+    # where the transistor limits the current: the model inversion (the lowest voltage at
+    # which the model carries that current) against the operating point from the light
+    s = d[~d.ok & np.isfinite(d.V_drv) & np.isfinite(d.V_drv_est)].sort_values("I")
+    if len(s):
+        ax.plot(s.V_drv, s.I * 1e6, "s", ms=5.5, color=NPG["red"],
+                label="model inversion (lowest voltage at which the model carries the current): "
+                + ", ".join(f"{v:.2f}" for v in s.V_drv) + " V")
+        for _, r in s.iterrows():
+            ax.plot([r.V_drv, r.V_drv_est], [r.I * 1e6] * 2, ":", color=NPG["red"], lw=1.2)
+        r = s.iloc[-1]
+        ax.text(2.0, r.I * 1e6 - 1.0,
+                f"model inversion {r.V_drv:.2f} V, from the LED's light {r.V_drv_est:.2f} V",
+                ha="left", va="center", fontsize=7, color=NPG["red"])
     ron = P["vov"] / (P["I15"] * (1 - 5 * P["lam"]))
     rout = 1 / (P["lam"] * P["I15"])
     ax.annotate(f"linear region:\nacts like a\n{ron / 1e3:.1f} kOhm resistor", (0.22, 45), xytext=(0.6, 3),
@@ -420,6 +481,111 @@ def fig_subtraction(arr, d, P, plt):
     ax.legend(fontsize=7, loc="lower right")
     save(fig, f"00b_subtraction_{arr}.png", plt,
          "Data: " + SOURCE[arr] + " Transistor model as in 00.")
+
+
+def fig_light_inversion(arr, d, plt):
+    """How the junction voltage is read off the light: log P against the LED's voltage, the
+    ideal-junction line through the 0.6 uA point, and the excess as the horizontal gap."""
+    k = d[d.light & (d.I > 0)].sort_values("I")
+    v0, l0 = d.attrs["ref"]
+    fig, ax = plt.subplots(figsize=(8.2, 6.2))
+    pp = np.geomspace(k.P.min() * 0.5, k.P.max() * 2, 200)
+    ax.plot(v0 + N_R * VT * (np.log(pp) - l0), pp * 1e9, "-", color=NPG["teal"], lw=2,
+            label=f"ideal junction: P ~ exp(q V / {N_R} kT), {1e3 * N_R * VT * np.log(10):.1f} mV per "
+                  "decade of light, through the 0.6 uA point")
+    m = k.ok.to_numpy()
+    ax.plot(k.V_LED[m], k.P[m] * 1e9, "o", ms=6, color=SUB[arr],
+            label="measured: light against the LED's voltage (transistor subtracted)")
+    e = k[~k.ok & np.isfinite(k.V_LED_est)]
+    if len(e):
+        ax.plot(e.V_LED_est, e.P * 1e9, "o", ms=6, mfc="w", color=SUB[arr],
+                label="transistor-limited: light measured, LED voltage = junction + fitted excess")
+    for _, r in k[k.I >= 1.4e-6].iterrows():
+        vl = r.V_LED if r.ok else r.V_LED_est
+        ax.annotate("", xy=(vl, r.P * 1e9), xytext=(r.V_j, r.P * 1e9),
+                    arrowprops=dict(arrowstyle="->", color=NPG["red"], lw=1.4,
+                                    ls="-" if r.ok else ":", shrinkA=0, shrinkB=5))
+        if r.ok:
+            ax.text(vl + 0.012, r.P * 1e9, f"{1e3 * (vl - r.V_j):.0f} mV at {r.I * 1e6:.0f} uA",
+                    va="center", fontsize=7, color=NPG["red"])
+    if len(e):                                       # nearly the same light: one label for all
+        ex = 1e3 * (e.V_LED_est - e.V_j)
+        ax.text((float(e.V_j.min()) + float(e.V_LED_est.max())) / 2, float(e.P.max()) * 1e9 * 1.15,
+                f"{ex.min():.0f}-{ex.max():.0f} mV at {e.I.min() * 1e6:.0f}-{e.I.max() * 1e6:.0f} uA "
+                "(estimate)", ha="center", va="bottom", fontsize=7, color=NPG["red"])
+    ax.text(0.56, 0.60,
+            "Reading the junction voltage off the light:\n"
+            "the light depends only on the carriers in the well,\n"
+            f"  P ~ exp(q V_j / n kT), n = {N_R} (measured at nA).\n"
+            "For each point, go left at the same light to the\n"
+            "teal line: that is V_j. The LED's measured voltage\n"
+            "lies further right. The gap (red) is the excess:\n"
+            "voltage that does not raise the light.\n\n"
+            "The current is not used here, so the droop\n"
+            "does not enter (02c). Line and data meet at\n"
+            "0.6 uA by construction.",
+            transform=ax.transAxes, fontsize=7.2, family="monospace", va="top",
+            bbox=dict(boxstyle="round", fc="w", alpha=.92))
+    xmax = float(np.nanmax(np.r_[k.V_LED[m], e.V_LED_est])) if len(e) else float(k.V_LED[m].max())
+    ax.set(yscale="log", xlabel="voltage (V)", ylabel="light (nW)", xlim=(2.45, xmax + 0.2),
+           ylim=(pp.min() * 1e9, pp.max() * 1e9),
+           title=f"{arr}, median pixel: how the light gives the junction voltage")
+    ax.grid(alpha=.3, which="both")
+    ax.legend(fontsize=6.8, loc="lower right")
+    save(fig, f"02b_light_inversion_{arr}.png", plt, "Data: " + SOURCE[arr])
+
+
+def fig_droop(curves, die, plt):
+    """The droop: light per current falls on the high-current side. Top: light per current
+    relative to its peak. Bottom: what that is worth in junction voltage, i.e. the junction
+    from the light minus the junction from the current (if the light followed the current)."""
+    fig, (ax, bx) = plt.subplots(2, 1, figsize=(8.2, 8.2), sharex=True,
+                                 gridspec_kw=dict(height_ratios=[1.15, 1]))
+    sets = [(a, curves[a].loc[lambda t: t.light & (t.I >= 0.1e-6)].sort_values("I"), "I", "P", WHOLE[a])
+            for a in ARRAYS]
+    sets.append(("SGA_15 die", die[die.light & (die.Current_A >= 0.1e-6)], "Current_A", "L", DIE))
+    rows = []
+    for name, k, ic, pc_, col in sets:
+        i, eff = k[ic].to_numpy(), (k[pc_] / k[ic]).to_numpy()
+        e0 = np.exp(np.interp(np.log(I_REF), np.log(i), np.log(eff)))
+        dv = 1e3 * N_R * VT * np.log(eff / e0)
+        sty = dict(color=col, lw=1.8) if name.startswith("SGA") else dict(color=col, marker="o", ms=4)
+        ax.plot(i * 1e6, eff / eff.max(), "-", label=f"{name}: falls to {eff[-1] / eff.max():.0%} of "
+                f"its peak at {i[-1] * 1e6:.0f} uA", **sty)
+        bx.plot(i * 1e6, dv, "-", label=f"{name}: {dv.min():+.0f} to {dv.max():+.0f} mV", **sty)
+        rows.append((name, i, dv))
+    ax.set(xscale="log", ylabel="light per current, relative to its peak", ylim=(0, 1.08),
+           title="The droop: on the high-current side less of each extra uA becomes light")
+    ax.legend(fontsize=7.5, loc="lower left", bbox_to_anchor=(0.0, 0.27))
+    ax.text(0.02, 0.05,
+            "ABC picture: current ~ A n + B n^2 + C n^3 (+ leakage), light ~ B n^2,\n"
+            "and the carriers set the junction: n^2 ~ exp(q V_j / kT).\n"
+            "Droop: the C n^3 and leakage share of the current grows.\n"
+            "That lowers the light per CURRENT, not the light per JUNCTION VOLTAGE:\n"
+            "the light still measures V_j (02b).",
+            transform=ax.transAxes, fontsize=7, family="monospace", va="bottom",
+            bbox=dict(boxstyle="round", fc="w", alpha=.92))
+    bx.axhline(0, color="k", lw=.7)
+    bx.set(xscale="log", xlabel="current (uA)",
+           ylabel="junction from the light minus\njunction from the current (mV)",
+           title="What the droop is worth in junction voltage: a few mV (the excess is 100-500 mV)")
+    bx.text(0.27, 0.03,
+            f"= {N_R} kT/q ln(light per current,\n"
+            "  relative to 0.6 uA): the shift of the\n"
+            "  junction estimate if the light simply\n"
+            "  followed the current.\n"
+            "Limit: the light per carrier pair (B)\n"
+            "changes itself at the highest densities\n"
+            "(phase-space filling, field screening):\n"
+            "tens of %, i.e. 5-10 mV.",
+            transform=bx.transAxes, fontsize=7, family="monospace", va="bottom",
+            bbox=dict(boxstyle="round", fc="w", alpha=.92))
+    bx.legend(fontsize=7.5, loc="upper left")
+    for a in (ax, bx):
+        a.grid(alpha=.3, which="both")
+    save(fig, "02c_droop.png", plt, "Data: " + SOURCE["Array42"] + " " + SOURCE["Array38"] + " "
+         + die_source(die) + " Median pixels, every sweep bias with light.")
+    return rows
 
 
 def fig_iv(arr, d, db, tot, die, fsm, plt, log):
@@ -720,6 +886,45 @@ def fig_fits(name, i, v, fits_, plt, source):
     save(fig, f"09_excess_fits_{'die' if name.startswith('SGA') else name}.png", plt, "Data: " + source)
 
 
+def fig_bond_fits(arr, d, D, plt):
+    """Is the pixel the die's LED plus a bond term? The die's excess is fixed as measured;
+    only the bond term is fitted (to the median pixel's excess)."""
+    i, v = excess_points(d)
+    fits = {m: bond_fit(D, i, v, m) for m in BOND}
+    fig, (ax, rx) = plt.subplots(2, 1, figsize=(7.8, 7.6), sharex=True,
+                                 gridspec_kw=dict(height_ratios=[3, 1.4]))
+    xx = np.geomspace(I_REF, i.max(), 200)
+    ax.plot(xx * 1e6, 1e3 * D(xx), "--", color=DIE, lw=1.8, zorder=5,
+            label="SGA_15 die as measured: its LED barrier, fixed")
+    ax.plot(i * 1e6, 1e3 * v, "o", ms=7, color=WHOLE[arr], label=f"{arr}: median pixel")
+    rx.plot(i * 1e6, 1e3 * (v - D(i)), "o-", ms=4, color=DIE, lw=1.2, label="data - die alone")
+    for m, r in fits.items():
+        ax.plot(xx * 1e6, 1e3 * r["f"](xx), "-", lw=1.6, color=BOND_COL[m], label=describe_bond(m, r))
+        rx.plot(i * 1e6, 1e3 * (v - r["f"](i)), "o-", ms=3, color=BOND_COL[m])
+    rx.axhline(0, color="k", lw=.6)
+    ax.text(0.03, 0.62,
+            "Fixed: the die's excess as measured, i.e. its LED barrier\n"
+            "and its own resistance (same wafer, unbonded).\n"
+            "Fitted: only what the pixel adds or lacks:\n"
+            "  die + R:            a resistor (bump, lines, n-path)\n"
+            "  die + 2nd barrier:  a second barrier (oxide, Schottky)\n"
+            "  k x die + R:        the die's barrier scaled by k\n"
+            "                      (die to die), plus a resistor",
+            transform=ax.transAxes, fontsize=7, family="monospace", va="top",
+            bbox=dict(boxstyle="round", fc="w", alpha=.92))
+    ax.set(xscale="log", ylabel="excess voltage (mV), counted from 0.6 uA",
+           title=f"{arr}: is the pixel the die's LED plus a bond term?")
+    rx.set(xlabel="current (uA)", ylabel="data - fit (mV)")
+    for a in (ax, rx):
+        a.grid(alpha=.3, which="both")
+    ax.legend(fontsize=6.8, loc="upper left")
+    rx.legend(fontsize=7, loc="lower right")
+    save(fig, f"09_excess_fits_{arr}.png", plt,
+         "Data: " + SOURCE[arr] + " Median pixel, the points below the transistor limit. "
+         "Die: its IVL of 2023-08-18, interpolated.")
+    return fits
+
+
 def fig_window(rows, plt, die):
     fig, ax = plt.subplots(figsize=(7.8, 5.6))
     t = pd.DataFrame(rows)
@@ -778,74 +983,108 @@ def fig_cheung(curves, plt):
     return a, b
 
 
-def fig_hist(pp, die, plt):
-    fig, ax = plt.subplots(figsize=(7.8, 5.4))
+def die_at(die, t):
+    """The die's excess at current t (mV)."""
     e = die[die.light & (die.Current_A >= I_REF)]
+    return 1e3 * interp_log(e.Current_A.to_numpy(), np.array([t]), e.V_ex.to_numpy())[0]
+
+
+def fig_hist(pp, die, plt):
+    """Per pixel: how much more (or less) voltage than the unbonded die, at 20 uA."""
+    fig, ax = plt.subplots(figsize=(7.8, 5.6))
     t = 20e-6
-    dv = 1e3 * interp_log(e.Current_A.to_numpy(), np.array([t]), e.V_ex.to_numpy())[0]
+    dv = die_at(die, t)
     for arr in ARRAYS:
-        s = 1e3 * pp[arr][f"V_ex_{tag(t)}"].dropna()
-        sb = 1e3 * pp[arr].loc[pp[arr].best, f"V_ex_{tag(t)}"].dropna()
-        ax.hist(s.clip(0, 600), bins=150, histtype="step", lw=1.6, color=WHOLE[arr],
-                label=f"{arr}: {len(s)} pixels, median {s.median():.0f} mV, "
-                      f"25-75 % {s.quantile(.25):.0f}-{s.quantile(.75):.0f}")
+        s = 1e3 * pp[arr][f"V_ex_{tag(t)}"].dropna() - dv
+        sb = 1e3 * pp[arr].loc[pp[arr].best, f"V_ex_{tag(t)}"].dropna() - dv
+        ax.hist(s.clip(-150, 450), bins=150, histtype="step", lw=1.6, color=WHOLE[arr],
+                label=f"{arr}: {len(s)} pixels, median {s.median():+.0f} mV "
+                      f"(25-75 %: {s.quantile(.25):+.0f} to {s.quantile(.75):+.0f})")
         ax.axvline(sb.median(), color=WHOLE[arr], ls="--", lw=1.2,
-                   label=f"{arr}: median of the best 2 %, {sb.median():.0f} mV")
-    ax.axvline(dv, color=DIE, lw=2, label=f"SGA_15 die: {dv:.0f} mV")
-    ax.set(xlabel=f"excess voltage at {t * 1e6:g} uA (mV), clipped to 0-600", ylabel="pixels",
-           yscale="log", title="Excess voltage per swept pixel at 20 uA, against the die")
+                   label=f"{arr}: median of its best 2 %, {sb.median():+.0f} mV")
+    ax.axvline(0, color=DIE, lw=2, label=f"0 = the unbonded SGA_15 die (its excess: {dv:.0f} mV)")
+    ax.set(xlabel=f"excess voltage at {t * 1e6:g} uA minus the die's (mV), clipped to -150..450",
+           ylabel="pixels", yscale="log",
+           title="Per swept pixel: how much more voltage than the unbonded die, at 20 uA\n"
+                 "excess = voltage that does not raise the light (02b); < 0: less than the die, "
+                 "> 0: bonding adds")
+    ax.title.set_fontsize(10)
     ax.grid(alpha=.3)
-    ax.legend(fontsize=7.5)
+    ax.legend(fontsize=7.2, loc="upper right")
     save(fig, "12_excess_per_pixel.png", plt, "Data: " + SOURCE["Array42"] + " " + SOURCE["Array38"]
          + " " + die_source(die))
 
 
-def fig_map(arr, p, plt, B=16):
+def fig_map(arr, p, dv, plt, B=16):
+    """Where the pixels need more (red) or less (blue) than the unbonded die, at 20 uA."""
     col = f"V_ex_{tag(20e-6)}"
     s = p.dropna(subset=[col])
     g = s.groupby([s.Y // B, s.X // B])[col]
     blk = g.median()[g.size() >= 5]
     img = np.full((512 // B, 512 // B), np.nan)
-    img[blk.index.get_level_values(0), blk.index.get_level_values(1)] = 1e3 * blk.to_numpy()
+    img[blk.index.get_level_values(0), blk.index.get_level_values(1)] = 1e3 * blk.to_numpy() - dv
     resid = 1e3 * (s[col] - s.set_index([s.Y // B, s.X // B]).index.map(blk).to_numpy())
-    cm = plt.get_cmap("magma").copy()
+    cm = plt.get_cmap("RdBu_r").copy()
     cm.set_bad("0.8")
-    lo, hi = np.nanpercentile(img, [2, 98])
-    fig, ax = plt.subplots(figsize=(7.4, 6.6))
-    im = ax.imshow(img, cmap=cm, vmin=lo, vmax=hi, extent=(-.5, 511.5, 511.5, -.5),
+    lim = float(np.nanpercentile(np.abs(img), 90))    # the edge blocks saturate; their tail is in 12
+    fig, ax = plt.subplots(figsize=(7.4, 6.8))
+    im = ax.imshow(img, cmap=cm, vmin=-lim, vmax=lim, extent=(-.5, 511.5, 511.5, -.5),
                    interpolation="nearest")
-    fig.colorbar(im, ax=ax, label=f"median excess at 20 uA in {B}x{B} blocks (mV)", fraction=.046)
+    fig.colorbar(im, ax=ax, extend="both", fraction=.046,
+                 label=f"pixel minus die at 20 uA: median in {B}x{B} blocks (mV)")
     bq = np.nanpercentile(img, [10, 90])
-    rq = np.nanpercentile(resid, [25, 75, 10, 90])
+    rq = np.nanpercentile(resid, [25, 75])
     ax.set(xlabel="X", ylabel="Y",
-           title=f"{arr}: excess voltage at 20 uA, {len(s)} swept pixels (grey: none)\n"
-                 f"blocks 10-90 % {bq[0]:.0f}-{bq[1]:.0f} mV; pixel minus its block: "
-                 f"25-75 % {rq[0]:+.0f} to {rq[1]:+.0f}, 10-90 % {rq[2]:+.0f} to {rq[3]:+.0f} mV")
+           title=f"{arr}: excess at 20 uA minus the unbonded die's ({dv:.0f} mV)\n"
+                 f"blue: less than the die, red: more. Blocks 10-90 %: {bq[0]:+.0f} to {bq[1]:+.0f} mV;\n"
+                 f"a pixel against its block: {rq[0]:+.0f} to {rq[1]:+.0f} mV (25-75 %). "
+                 f"{len(s)} swept pixels, grey: none")
     ax.title.set_fontsize(9)
-    save(fig, f"13_excess_map_{arr}.png", plt, "Data: " + SOURCE[arr])
+    save(fig, f"13_excess_map_{arr}.png", plt, "Data: " + SOURCE[arr] + " " + die_source_short())
 
 
-def fig_vs_rbest(pp, plt):
-    fig, ax = plt.subplots(figsize=(7.8, 5.6))
-    col = f"V_ex_{tag(20e-6)}"
-    for arr in ARRAYS:
-        s = pp[arr].dropna(subset=[col, "R_best_kOhm"])
-        q = pd.qcut(s.R_best_kOhm, 20, duplicates="drop")
-        g = s.groupby(q, observed=True)
-        x = g.R_best_kOhm.median()
-        y = 1e3 * g[col].median()
-        lo, hi = 1e3 * g[col].quantile(.25), 1e3 * g[col].quantile(.75)
-        r = s.R_best_kOhm.corr(s[col], method="spearman")
-        ax.errorbar(x, y, yerr=[y - lo, hi - y], fmt="o-", ms=4, capsize=2, color=WHOLE[arr],
-                    label=f"{arr}: {len(s)} pixels, Spearman {r:.2f}")
-    ax.set(xscale="symlog", xlabel="R_best: series resistance above the array's best pixels (kOhm, 20 bins)",
-           ylabel="excess voltage at 20 uA (mV; median, 25-75 %)",
-           title="Does the excess voltage follow the per-pixel resistance R_best?")
+def die_source_short():
+    return "Die: SGA_15 10 um, IVL of 2023-08-18."
+
+
+def fig_vs_rbest(arr, p, i_star, plt):
+    """Two methods, one quantity: R_best from the fast scan (LED anchored at 1.5 uA, the array's
+    best pixels as reference) against the sweep's excess above the best pixels, per current."""
+    s = p.dropna(subset=["V_ex_Istar", "R_best_kOhm"])
+    ref = float(s.loc[s.best, "V_ex_Istar"].median())
+    y = ((s.V_ex_Istar - ref) / i_star / 1e3).to_numpy()
+    x = s.R_best_kOhm.to_numpy()
+    fig, ax = plt.subplots(figsize=(7.4, 6.8))
+    ax.scatter(x, y, s=2, alpha=.08, color=WHOLE[arr], lw=0, rasterized=True)
+    ax.plot([], [], "o", ms=4, alpha=.6, color=WHOLE[arr], label=f"{len(s)} swept pixels")
+    q = pd.qcut(pd.Series(x), 25, duplicates="drop")
+    g = pd.DataFrame({"x": x, "y": y}).groupby(q.values, observed=True)
+    ax.plot(g.x.median(), g.y.median(), "o-", ms=4, color="k", lw=1.2,
+            label="median in 25 bins of R_best")
+    lo = float(min(np.nanquantile(x, .002), np.nanquantile(y, .002)))
+    hi = float(max(np.nanquantile(x, .998), np.nanquantile(y, .998)))
+    ax.plot([lo, hi], [lo, hi], "--", color=NPG["red"], lw=1.4, label="1:1")
+    rho = pd.Series(x).corr(pd.Series(y), method="spearman")
+    body = (x > np.nanquantile(x, .05)) & (x < np.nanquantile(x, .95))
+    ax.text(0.03, 0.97,
+            f"Spearman {rho:.2f}\n"
+            f"sweep minus fast scan, 5-95 % of R_best: median {np.nanmedian((y - x)[body]):+.2f} kOhm\n\n"
+            "x: fast scan at -1.40 V, LED anchored at 1.5 uA (bond_resistance.py)\n"
+            f"y: sweep, junction from the light, at {i_star * 1e6:.0f} uA\n"
+            "both: above the array's best 2 %, per current",
+            transform=ax.transAxes, fontsize=7.2, family="monospace", va="top",
+            bbox=dict(boxstyle="round", fc="w", alpha=.92))
+    ax.set_xscale("symlog", linthresh=1)
+    ax.set_yscale("symlog", linthresh=1)
+    ax.set(xlim=(lo, hi), ylim=(lo, hi),
+           xlabel="R_best from the fast scan (kOhm)",
+           ylabel=f"(excess - best pixels' excess) / {i_star * 1e6:.0f} uA from the sweep (kOhm)",
+           title=f"{arr}: two methods, one quantity\n"
+                 "the fast scan's R_best against the sweep's light-based excess")
     ax.grid(alpha=.3, which="both")
-    ax.legend(fontsize=8)
-    save(fig, "14_excess_vs_Rbest.png", plt,
-         "Data: excess from " + SOURCE["Array42"] + " " + SOURCE["Array38"]
-         + " R_best: the same runs' fast scans at -1.40 V (bond_resistance.py).")
+    ax.legend(fontsize=7.5, loc="lower right")
+    save(fig, f"14_Rbest_vs_sweep_{arr}.png", plt,
+         "Data: " + SOURCE[arr] + f" R_best: its fast scan at -1.40 V (bond_resistance.py).")
 
 
 # ---- main ---------------------------------------------------------------------------------
@@ -857,7 +1096,7 @@ def main() -> int:
     plt = aa._plt()
     drv = {a: br.fit_driver(a) for a in ARRAYS}
     die = load_die()
-    curves, bests, tots, pp, gs = {}, {}, {}, {}, {}
+    curves, bests, tots, pp, gs, istar = {}, {}, {}, {}, {}, {}
     for a in ARRAYS:
         print(f"{a}: loading the sweep ...", flush=True)
         rb = pd.read_csv(br.OUT / "pixels" / f"{br.REFERENCE_RUN[a]}_m1p40V.csv").set_index(["X", "Y"])
@@ -865,7 +1104,8 @@ def main() -> int:
         best = br.best_reference(a, rb.I_LED)[2]
         curves[a] = curve(sw, drv[a])
         bests[a] = curve(sw, drv[a], best)
-        pp[a], gs[a] = per_pixel(sw, die, best, rb)
+        istar[a] = float(rb.I_LED.median())          # the fast scan's median current at -1.40 V
+        pp[a], gs[a] = per_pixel(sw, die, best, rb, istar[a])
         SOURCE[a] = (f"{a}: NVLED sweep {br.REFERENCE_RUN[a]}, {sw.attrs['n_pixels']} pixels "
                      f"(best 2 %: {len(best)}; {sw.attrs['n_latched']} latched pixels and "
                      f"{sw.attrs['n_lit_ref']} partly lit references left out).")
@@ -914,27 +1154,45 @@ def main() -> int:
     for a in ARRAYS:
         pp[a].to_csv(OUT / f"per_pixel_{a}.csv", index=False, float_format="%.5g")
 
+    # the pixel as the die's LED plus a bond term (die's excess fixed as measured)
+    D = die_excess(die)
+    brows = []
+    for a in ARRAYS:
+        for d, px in ((curves[a], "median"), (bests[a], "best 2 %")):
+            i, v = excess_points(d)
+            for m in BOND:
+                r = bond_fit(D, i, v, m)
+                brows.append(dict(array=a, pixels=px, model=m, n=r["n"], rms_mV=1e3 * r["rms"],
+                                  **{f"p{k}": x for k, x in enumerate(r["p"])},
+                                  **{f"se{k}": x for k, x in enumerate(r["se"])}))
+                print(f"  {a} {px}: {describe_bond(m, r)}")
+    pd.DataFrame(brows).to_csv(OUT / "fits_bond.csv", index=False, float_format="%.5g")
+
+    dv20 = die_at(die, 20e-6)
     for a in ARRAYS:
         fig_driver(a, drv[a], curves[a], models[a], plt)
         fig_subtraction(a, curves[a], drv[a], plt)
+        fig_light_inversion(a, curves[a], plt)
         fig_iv(a, curves[a], bests[a], tots[a], die, fsm, plt, log=True)
         fig_iv(a, curves[a], bests[a], tots[a], die, fsm, plt, log=False)
         fig_budget(a, curves[a], plt)
         fig_r_vs_v(a, curves[a], drv[a], plt)
-        fig_map(a, pp[a], plt)
+        fig_bond_fits(a, curves[a], D, plt)
+        fig_map(a, pp[a], dv20, plt)
+        fig_vs_rbest(a, pp[a], istar[a], plt)
+    for name, i_, dvv in fig_droop(curves, die, plt):
+        print(f"  droop, {name}: junction from the light minus from the current "
+              f"{dvv.min():+.1f} to {dvv.max():+.1f} mV over {i_.min() * 1e6:.1f}-{i_.max() * 1e6:.0f} uA")
     fig_ideality(curves, die, plt)
     fig_dvdi(curves, die, drv, plt)
     fig_minus_die(gs, die, plt)
     fig_excess(gs, die, plt)
-    for name in ("SGA_15 die",) + ARRAYS:
-        i, v = xy[name]
-        src = die_source(die) if name.startswith("SGA") else SOURCE[name] + " Median pixel."
-        fig_fits(name, i, v, {m: fits_[(name, m)] for m in MODELS}, plt, src)
+    i, v = xy["SGA_15 die"]
+    fig_fits("SGA_15 die", i, v, {m: fits_[("SGA_15 die", m)] for m in MODELS}, plt, die_source(die))
     fig_window(wrows, plt, die)
     a, b = fig_cheung(curves, plt)
     print(f"die Cheung fit 0.35-0.9 mA: intercept {a:.3f} V (n {a / VT:.1f}), slope {b:.0f} Ohm")
     fig_hist(pp, die, plt)
-    fig_vs_rbest(pp, plt)
     for a in ARRAYS:
         for d, name in ((curves[a], "all pixels"), (bests[a], "best 2 %")):
             print(f"\n{a}, {name}:")
