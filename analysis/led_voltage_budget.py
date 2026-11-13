@@ -73,7 +73,23 @@ FASTSCANS = {"Array42": [("261108-1227_Array42_ROI_(0, 0, 511, 511)_FASTSCAN", -
              "Array38": [("261026-0813_Array38_ROI_(0, 0, 511, 511)", -1.4),
                          ("261029-1028_Array38_ROI_(0, 0, 511, 511)_FASTSCAN", -2.2),
                          ("261029-1028_Array38_ROI_(0, 0, 511, 511)_FASTSCAN", -3.2)]}
+# Leakage tests: a few pixels lit and off (own quadrant enabled) at NVLED 0, -0.2, -0.4 V,
+# where the sweeps took no leakage reference (leak_ref_skip_above_v -0.7 / -0.45)
+LEAKTEST = {"Array42": "261102-1240_Array42_CAPACITANCE_Leakmatrix",
+            "Array38": "261025-1950_Array38_CAPACITANCE_Leakmatrix"}
 SOURCE = {}                  # per array: the data line printed under its figures
+
+
+def leak_test(arr):
+    """Per bias: the LED's current as lit minus off of the same pixel (mean over the tested
+    pixels, standard error from their spread), and the leakage itself (the pixel off)."""
+    d = pd.read_csv(run_path(LEAKTEST[arr]) / "leakmatrix.csv")
+    p = d.pivot_table(index=["v", "x", "y"], columns="state", values="NVLED_CURR_MEAN",
+                      aggfunc="first").abs()
+    g = (p.lit_own - p.off_own).groupby(level="v")
+    return pd.DataFrame({"V_tot": br.VLED - g.mean().index.to_numpy(), "I_led": g.mean().to_numpy(),
+                         "se": (g.std() / np.sqrt(g.count())).to_numpy(), "n": g.count().to_numpy(),
+                         "I_off": p.off_own.groupby(level="v").mean().to_numpy()})
 
 
 def tag(i):
@@ -360,6 +376,52 @@ def fig_driver(arr, P, d, model, plt):
          " Above ~100 uA the LED's voltage is its junction (from its light) plus the fitted excess.")
 
 
+def fig_subtraction(arr, d, P, plt):
+    """How the transistor is subtracted: at every sweep point of the median pixel an arrow
+    from V_tot to V_tot - V_transistor(I), its length the transistor's voltage."""
+    k = d[(d.I > 1e-6) & np.isfinite(d.V_LED_est)].sort_values("V_tot")
+    ok = k.ok.to_numpy()
+    fig, ax = plt.subplots(figsize=(8.4, 6.2))
+    ax.plot(k.V_tot, k.I * 1e6, "-o", ms=6, color=WHOLE[arr], label="whole pixel: V_tot (median pixel)")
+    j = int(np.flatnonzero(ok)[-1])
+    ax.plot(k.V_LED_est[:j + 1], k.I[:j + 1] * 1e6, "-s", ms=6, color=SUB[arr],
+            label="transistor subtracted: V_tot - V_transistor(I), model (00)")
+    ax.plot(k.V_LED_est[j:], k.I[j:] * 1e6, ":s", ms=6, mfc="w", color=SUB[arr],
+            label="where the transistor limits the current: LED = junction (light) + fitted excess,\n"
+                  "transistor = V_tot - LED")
+    for _, r in k.iterrows():
+        ax.annotate("", xy=(r.V_LED_est, r.I * 1e6), xytext=(r.V_tot, r.I * 1e6),
+                    arrowprops=dict(arrowstyle="->", color=NPG["lilac"], lw=1.6, shrinkA=4, shrinkB=4))
+        if r.V_drv_est > 0.06:
+            on = r.V_drv_est > 0.16                       # long arrow: the label sits on it
+            ax.text((r.V_tot + r.V_LED_est) / 2, r.I * 1e6 + (0 if on else 2.2),
+                    f"{1e3 * r.V_drv_est:.0f} mV", ha="center", va="center" if on else "bottom",
+                    fontsize=7.5, color=NPG["navy"], zorder=5,
+                    bbox=dict(boxstyle="round,pad=0.15", fc="w", ec="none", alpha=.9))
+    ron = P["vov"] / (P["I15"] * (1 - 5 * P["lam"]))
+    top = k.iloc[-1]
+    ax.text(0.585, 0.66,
+            "arrows: the transistor's voltage\n"
+            "at that current\n\n"
+            f"below ~100 uA: like a {ron / 1e3:.1f} kOhm\n"
+            "resistor, the arrows grow with I\n\n"
+            "above ~110 uA: a current source.\n"
+            f"The current stops near {top.I * 1e6:.0f} uA, and\n"
+            "every further volt of V_tot goes\n"
+            f"into it ({top.V_drv_est:.2f} V of {top.V_tot:.1f} V at {br.VLED - top.V_tot:+.1f} V)\n\n"
+            "The subtracted curve is the LED's\n"
+            "own I-V: it ends where the current\n"
+            f"ends, {top.V_LED_est:.2f} V at {top.I * 1e6:.0f} uA",
+            transform=ax.transAxes, fontsize=7, family="monospace", va="top",
+            bbox=dict(boxstyle="round", fc="w", alpha=.92))
+    ax.set(xlabel="voltage (V)", ylabel="current (uA)", xlim=(2.55, 5.1), ylim=(0, 135),
+           title=f"{arr}: how the transistor is subtracted")
+    ax.grid(alpha=.3)
+    ax.legend(fontsize=7, loc="lower right")
+    save(fig, f"00b_subtraction_{arr}.png", plt,
+         "Data: " + SOURCE[arr] + " Transistor model as in 00.")
+
+
 def fig_iv(arr, d, db, tot, die, fsm, plt, log):
     fig, ax = plt.subplots(figsize=(7.8, 6))
     if log:
@@ -388,9 +450,22 @@ def fig_iv(arr, d, db, tot, die, fsm, plt, log):
             label="whole pixel, full-array fast scans: median")
     ax.plot(die.Voltage_V, die.Current_A * 1e6, "-", color=DIE, lw=1.4, label=DIE_LABEL)
     if log:
-        ax.set(yscale="log", ylim=(1e-5, 400), xlim=(1.8, 5.1))
-        ax.annotate("below ~2.45 V the LED's own current is\nfar under the CMOS leakage: the leakage\n"
-                    "reference was measured from NVLED -0.7 V on", (1.85, 5e-3), fontsize=7, color="0.4")
+        lt = leak_test(arr)
+        ax.plot(lt.V_tot, lt.I_off * 1e6, "x", ms=8, mew=1.6, color="0.45",
+                label=f"leakage test: the pixel off = CMOS leakage ({lt.n.iloc[0]} pixels)")
+        sig = lt.I_led > 2 * lt.se
+        if sig.any():
+            ax.errorbar(lt.V_tot[sig], lt.I_led[sig] * 1e6, yerr=lt.se[sig] * 1e6, fmt="*", ms=11,
+                        color=WHOLE[arr], capsize=3,
+                        label="leakage test: lit - off, same pixel (LED current)")
+        if (~sig).any():
+            ul = (lt.I_led.clip(lower=0) + 2 * lt.se)[~sig]
+            ax.plot(lt.V_tot[~sig], ul * 1e6, "v", ms=8, mfc="w", color=WHOLE[arr],
+                    label="leakage test: upper limit (lit - off not resolved, 2 sigma)")
+        ax.set(yscale="log", ylim=(1e-5, 400), xlim=(1.75, 5.1))
+        ax.annotate(f"the sweep took its leakage reference from NVLED {br.VLED - d.V_tot.min():+.1f} V on;\n"
+                    f"below that the leakage test resolves ~{2e9 * lt.se.median():.1f} nA (2 sigma)",
+                    (1.8, 2.5e-3), fontsize=7, color="0.4")
     else:
         ax.set(ylim=(0, 135), xlim=(2.6, 5.1))
     ax.set(xlabel="voltage (V)", ylabel="LED current, leakage subtracted (uA)",
@@ -841,6 +916,7 @@ def main() -> int:
 
     for a in ARRAYS:
         fig_driver(a, drv[a], curves[a], models[a], plt)
+        fig_subtraction(a, curves[a], drv[a], plt)
         fig_iv(a, curves[a], bests[a], tots[a], die, fsm, plt, log=True)
         fig_iv(a, curves[a], bests[a], tots[a], die, fsm, plt, log=False)
         fig_budget(a, curves[a], plt)
