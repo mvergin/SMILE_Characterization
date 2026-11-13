@@ -129,6 +129,9 @@ the LED anchor of Array42, block-matched bright against dark pixels, per fast sc
 the LED's own light) and the excess over it (barriers and series resistance), for the typical
 pixels, every swept pixel and the unbonded SGA_15 die (its IVL measurement, converted to
 `SGA_15 10um/SGA_15_10um_IVL.csv`). Writes `results/comparisons/led_voltage/` (README there).
+`led_voltage_dense.py` (after `led_voltage_budget.py`): the same method on the dense Array42 run
+`261113-1356` (400 pixels, 0.05 V steps): checks against 1703, all models on the median pixel,
+the fit-window test, and per-pixel k and R against 1703 (figures 18, 18b, 19).
 
 ### `analyze_array.py` — the main report
 

@@ -52,7 +52,12 @@ N_R = 1.07                   # optical ideality at nA (Array42 1.06-1.08, Array3
 I_REF = 0.6e-6               # the excess is counted from here
 CAP_FRAC = 0.7               # the transistor's model drop is trusted below 70 % of its capacity
 REF_TOL = 1.3                # leakage reference within 1.3 x its bias's median
-LATCH = 1.05                 # sweep / fast-scan current at -1.4 V above this: a latched driver
+LATCH = 1.05                 # sweep / fast-scan current at -1.4 V above this ...
+LATCH_A = 5e-6               # ... AND at least this much more: a latched second driver. A latch
+                             # adds another pixel's current (Array42 1703: median +19 uA). Without
+                             # the absolute cut, 7888 of Array38's 9580 flagged pixels were
+                             # degraded pixels whose sweep reads 1-4 uA (5-15 %) above their
+                             # fast scan, not latches.
 TARGETS = (1.5e-6, 5e-6, 20e-6)
 GRID = np.geomspace(0.8e-6, 100e-6, 19)
 DPI = 300
@@ -142,13 +147,15 @@ def load_die():
     return d
 
 
-def load_sweep_points(arr, P, rb):
+def load_sweep_points(arr, P, rb, run=None):
     """Every swept pixel and bias, without the two artefacts, transistor subtracted. Returns
-    the points with a leakage reference, and the median total current at every bias."""
-    sw = pc.load_sweep(br.REPO / "results" / br.SWEEP[arr])
+    the points with a leakage reference, and the median total current at every bias.
+    run: another sweep of the array (a results/ folder name); default its reference sweep.
+    rb: the same pixels' fast-scan current at -1.40 V (I_LED), for the latch check."""
+    sw = pc.load_sweep(br.REPO / "results" / (run or br.SWEEP[arr]))
     s14 = sw[sw.V.round(3) == -1.4].set_index(["X", "Y"]).I_LED
-    ratio = s14 / rb.I_LED.reindex(s14.index)
-    latched = ratio.index[ratio > LATCH]
+    f14 = rb.I_LED.reindex(s14.index)
+    latched = s14.index[(s14 > LATCH * f14) & (s14 - f14 >= LATCH_A)]
     sw = sw[~pd.MultiIndex.from_arrays([sw.X, sw.Y]).isin(latched)]
     tot = sw.groupby("V").I_tot.median()                    # every bias, reference or not
     ref_med = sw.groupby("V").I_ref.transform("median")
@@ -380,6 +387,66 @@ def excess_points(d):
     return d.I[m].to_numpy(), d.V_ex[m].to_numpy()
 
 
+# ---- the terms each fit adds up (09, 17b, 18b) --------------------------------------------------
+# term: (symbol, legend(p), colour, V(D, p, I)), every term 0 at I_REF. D is the fixed, measured
+# curve: the die's excess (09, 18) or the reference pixels' (17).
+def _res(k):
+    return ("R (I - I0)", lambda p: f"resistor: R {p[k] / 1e3:+.2f} kOhm", NPG["tan"],
+            lambda D, p, i: p[k] * (i - I_REF))
+
+
+def _bar(ka, kb, what="barrier", col=NPG["lilac"]):
+    return ("a g(I)", lambda p: f"{what}: a {1e3 * p[ka]:.0f} mV, I_b {10 ** p[kb] * 1e6:.2g} uA", col,
+            lambda D, p, i: p[ka] * _g(i, p[kb]))
+
+
+def _fixed(sym, what, k=None):
+    """The measured curve D as it is (k None), or scaled by p[k]."""
+    if k is None:
+        return (sym, lambda p: f"{what} (fixed)", "0.45", lambda D, p, i: D(i))
+    return (f"k {sym}", lambda p: f"{what} x k, k {p[k]:.2f}", NPG["teal"], lambda D, p, i: p[k] * D(i))
+
+
+_DIE, _REF = ("V_die(I)", "the die's excess"), ("V_ref(I)", "the reference pixels' excess")
+PARTS = {
+    "barrier + resistor": [_bar(0, 1), _res(2)],
+    "die + R": [_fixed(*_DIE), _res(0)],
+    "die + 2nd barrier": [_fixed(*_DIE), _bar(0, 1, "2nd barrier", NPG["red"])],
+    "k x die + R": [_fixed(*_DIE, k=0), _res(1)],
+    "+ resistor": [_fixed(*_REF), _res(0)],
+    "+ 2nd barrier": [_fixed(*_REF), _bar(0, 1, "2nd barrier", NPG["red"])],
+    "+ 2nd barrier + resistor": [_fixed(*_REF), _bar(0, 1, "2nd barrier", NPG["red"]), _res(2)],
+    "reference barrier x k + resistor": [_fixed(*_REF),
+                                         ("(k - 1) V_ref(I)", lambda p: f"(k - 1) x the reference, k {p[0]:.2f}",
+                                          NPG["teal"], lambda D, p, i: (p[0] - 1) * D(i)), _res(1)],
+    # led_voltage_dense.py (18b)
+    "die x k + resistor": [_fixed(*_DIE, k=0), _res(1)],
+    "die + 2nd barrier + resistor": [_fixed(*_DIE), _bar(0, 1, "2nd barrier", NPG["red"]), _res(2)],
+    "die x k + 2nd barrier + resistor": [_fixed(*_DIE, k=0), _bar(1, 2, "2nd barrier", NPG["red"]), _res(3)],
+}
+
+
+def plot_parts(ax, i, v, model, r, D):
+    """One fit split into its terms over a linear current axis: the data, each term on its own
+    (dashed), and their sum (solid, = the fit)."""
+    xx = np.linspace(I_REF, i.max(), 300)
+    terms = PARTS[model]
+    ax.plot(i * 1e6, 1e3 * v, "o", ms=4.5, mfc="none", mew=1.2, color="k", label="data")
+    for sym, lab, col, f in terms:
+        ax.plot(xx * 1e6, 1e3 * f(D, r["p"], xx), "--", lw=1.8, color=col, label=f"{lab(r['p'])}:  {sym}")
+    ax.plot(xx * 1e6, 1e3 * sum(f(D, r["p"], xx) for *_, f in terms), "-", lw=1.5, color="k",
+            label="sum of the terms = the fit")
+    ax.axhline(0, color="k", lw=.6)
+    syms = [s for s, *_ in terms]
+    eq = "V_ex(I) = " + " + ".join(syms)
+    if "a g(I)" in syms:
+        eq += "\ng(I) = ln(1 + I/I_b) - ln(1 + I0/I_b)"
+    ax.set(xlabel="current (uA)", ylabel="voltage (mV), 0 at I0 = 0.6 uA")
+    ax.set_title(f"{model}: rms {1e3 * r['rms']:.1f} mV\n{eq}", fontsize=8.5, loc="left")
+    ax.legend(fontsize=6.8, loc="upper left")
+    ax.grid(alpha=.3)
+
+
 # ---- figures ----------------------------------------------------------------------------------
 def footer(fig, text):
     fig.text(0.01, 0.005, text, fontsize=6, color="0.35", va="bottom", ha="left", wrap=True)
@@ -398,63 +465,62 @@ def die_source(die):
 
 
 def fig_driver(arr, P, d, model, plt):
-    fig, ax = plt.subplots(figsize=(7.8, 5.8))
-    vv = np.linspace(0, 5, 501)
+    """The transistor over current: the voltage it needs to carry I (the model, inverted), and
+    the voltage it gets at each sweep bias (V_tot minus what the LED takes)."""
+    fig, ax = plt.subplots(figsize=(8.2, 6.2))
     vt, i = P["data"]
-    ax.plot(vt - i * br.R_SHORT, i * 1e6, "o", ms=2.5, color="0.6",
+    ax.plot(i * 1e6, vt - i * br.R_SHORT, "o", ms=2.5, color="0.6",
             label=f"{arr}'s 10 best shorts, their own path removed")
-    ax.plot(vv, br.f15(vv, 0.0, P) * 1e6, "-", color="k", lw=1.8,
-            label="transistor model, all four on (code 15)"
+    ii = np.linspace(0.1e-6, 140e-6, 1400)
+    vds = br.v_driver(ii, 0.0, P)
+    ax.plot(ii * 1e6, vds, "-", color="k", lw=1.8,
+            label="transistor model V_ds(I), all four on (code 15)"
             + (f": Array42's shape, current x {P['scale']:.3f}" if "shape_from" in P else ""))
-    ii = np.linspace(1e-6, 124e-6, 400)
+    il = np.linspace(1e-6, 124e-6, 400)
     for vt_, c in zip((3.2, 4.0, 5.0), (NPG["teal"], NPG["lilac"], NPG["brown"])):
-        ax.plot(vt_ - model(ii), ii * 1e6, "--", color=c, lw=1.3,
-                label=f"what the LED leaves the transistor at NVLED {br.VLED - vt_:+.1f} V")
+        ax.plot(il * 1e6, vt_ - model(il), "--", color=c, lw=1.3,
+                label=f"what the LED leaves it at NVLED {br.VLED - vt_:+.1f} V: V_tot - V_LED(I)")
     k = d[d.I > 0.5e-6]
-    ax.plot(k.V_drv_est, k.I * 1e6, "o", ms=6, mfc="w", mew=1.5, color=WHOLE[arr],
+    ax.plot(k.I * 1e6, k.V_drv_est, "o", ms=6, mfc="w", mew=1.5, color=WHOLE[arr],
             label="operating point of the median pixel at each sweep bias")
     for _, r in k.iterrows():
         if any(abs(r.V_tot - x) < 0.01 for x in (3.2, 4.0, 5.0)):
-            ax.annotate(f"{br.VLED - r.V_tot:+.1f} V", (r.V_drv_est, r.I * 1e6), xytext=(4, -11),
+            ax.annotate(f"{br.VLED - r.V_tot:+.1f} V", (r.I * 1e6, r.V_drv_est), xytext=(-30, 2),
                         textcoords="offset points", fontsize=7, color=WHOLE[arr])
     # where the transistor limits the current: the model inversion (the lowest voltage at
     # which the model carries that current) against the operating point from the light
     s = d[~d.ok & np.isfinite(d.V_drv) & np.isfinite(d.V_drv_est)].sort_values("I")
     if len(s):
-        ax.plot(s.V_drv, s.I * 1e6, "s", ms=5.5, color=NPG["red"],
-                label="model inversion (lowest voltage at which the model carries the current): "
+        ax.plot(s.I * 1e6, s.V_drv, "s", ms=5.5, color=NPG["red"],
+                label="model inversion (lowest voltage at which the model carries I): "
                 + ", ".join(f"{v:.2f}" for v in s.V_drv) + " V")
         for _, r in s.iterrows():
-            ax.plot([r.V_drv, r.V_drv_est], [r.I * 1e6] * 2, ":", color=NPG["red"], lw=1.2)
-        r = s.iloc[-1]
-        ax.text(2.0, r.I * 1e6 - 1.0,
-                f"model inversion {r.V_drv:.2f} V, from the LED's light {r.V_drv_est:.2f} V",
-                ha="left", va="center", fontsize=7, color=NPG["red"])
+            ax.plot([r.I * 1e6] * 2, [r.V_drv, r.V_drv_est], ":", color=NPG["red"], lw=1.2)
     ron = P["vov"] / (P["I15"] * (1 - 5 * P["lam"]))
     rout = 1 / (P["lam"] * P["I15"])
-    ax.annotate(f"linear region:\nacts like a\n{ron / 1e3:.1f} kOhm resistor", (0.22, 45), xytext=(0.6, 3),
-                fontsize=8, bbox=dict(boxstyle="round", fc="w", ec="0.7"),
+    ax.annotate(f"linear region: V_ds = R_on I,\nR_on = {ron / 1e3:.1f} kOhm", (40, 40e-6 * ron),
+                xytext=(14, 1.15), fontsize=8, bbox=dict(boxstyle="round", fc="w", ec="0.7"),
                 arrowprops=dict(arrowstyle="->", color="0.4"))
-    ax.annotate(f"saturation: a current source.\nOnly {100 * P['lam']:.1f} %/V more current\n"
-                f"(output resistance {rout / 1e6:.2f} MOhm),\nso any further voltage stays here",
-                (2.25, 97), fontsize=8, va="bottom", bbox=dict(boxstyle="round", fc="w", ec="0.7"))
+    ax.text(118, 2.9, f"saturation: near its limit\n(~{P['I15'] * 1e6:.0f} uA) V_ds shoots up:\n"
+            f"a current source, {100 * P['lam']:.1f} %/V\n({rout / 1e6:.2f} MOhm). It takes\n"
+            "whatever the LED does not.", fontsize=8, ha="right", va="bottom",
+            bbox=dict(boxstyle="round", fc="w", ec="0.7"))
     fit_note = ([f"$V_{{ov}}$, m, $\\lambda$: Array42's (no data below the knee)",
                  f"$I_{{15}}$: Array42's x {P['scale']:.3f}, fitted to the shorts, rms {P['rms_pct']:.2f} %"]
                 if "shape_from" in P else [f"fitted to the 10 best shorts: rms {P['rms_pct']:.2f} %"])
-    ax.text(2.25, 36, "\n".join(
-        [r"$I = I_{15}\,\left(1+\lambda\,(V_{ds}-5\,\mathrm{V})\right)\,\frac{x}{\left(1+x^{m}\right)^{1/m}},"
-         r"\quad x = \frac{V_{ds}}{V_{ov}}$",
-         f"$I_{{15}}$ = {P['I15'] * 1e6:.1f} uA,   $\\lambda$ = {100 * P['lam']:.2f} %/V",
-         f"$V_{{ov}}$ = {P['vov']:.3f} V,   m = {P['m']:.2f}"] + fit_note
-        + [f"on-resistance $V_{{ov}}\\,/\\,(I_{{15}}(1-5\\,\\mathrm{{V}}\\,\\lambda))$ = {ron / 1e3:.1f} kOhm,",
-           f"output resistance $1\\,/\\,(\\lambda I_{{15}})$ = {rout / 1e6:.2f} MOhm"]),
-        fontsize=8, va="bottom", ha="left", linespacing=1.5,
-        bbox=dict(boxstyle="round", fc="w", ec="0.7"))
-    ax.set(xlabel="voltage across the transistor (V)", ylabel="current (uA)", xlim=(0, 5),
-           ylim=(0, 150), title=f"{arr}: the pixel transistor, and where the pixel operates on it\n"
-                                "operating point = where the transistor's curve meets what the LED leaves it")
+    ax.text(2, 4.95, "\n".join(
+        [r"$V_{ds}(I) = V_{ov}\,\frac{u}{\left(1-u^{m}\right)^{1/m}},\quad"
+         r"u = \frac{I}{I_{15}\,\left(1+\lambda\,(V_{ds}-5\,\mathrm{V})\right)}$",
+         r"(the inverse of $I = I_{15}(1+\lambda(V_{ds}-5\,\mathrm{V}))\,x/(1+x^m)^{1/m}$, $x = V_{ds}/V_{ov}$;"
+         "\nimplicit through the small $\\lambda$ term, solved numerically)",
+         f"$I_{{15}}$ = {P['I15'] * 1e6:.1f} uA,   $\\lambda$ = {100 * P['lam']:.2f} %/V,   "
+         f"$V_{{ov}}$ = {P['vov']:.3f} V,   m = {P['m']:.2f}"] + fit_note),
+        fontsize=7.6, va="top", ha="left", linespacing=1.45, bbox=dict(boxstyle="round", fc="w", ec="0.7"))
+    ax.set(xlabel="current (uA)", ylabel="voltage across the transistor (V)", xlim=(0, 140),
+           ylim=(0, 5.05), title=f"{arr}: the pixel transistor over current, and where the pixel operates\n"
+                                 "operating point = where the transistor's curve meets what the LED leaves it")
     ax.grid(alpha=.3)
-    ax.legend(fontsize=6.5, loc="lower right")
+    ax.legend(fontsize=6.4, loc="upper left", bbox_to_anchor=(0, 0.765))
     save(fig, f"00_transistor_{arr}.png", plt,
          f"Data: transistor IV of {arr}'s shorts ({br.DRIVER[arr]}); " + SOURCE[arr] +
          " Above ~100 uA the LED's voltage is its junction (from its light) plus the fitted excess.")
@@ -466,40 +532,36 @@ def fig_subtraction(arr, d, P, plt):
     k = d[(d.I > 1e-6) & np.isfinite(d.V_LED_est)].sort_values("V_tot")
     ok = k.ok.to_numpy()
     fig, ax = plt.subplots(figsize=(8.4, 6.2))
-    ax.plot(k.V_tot, k.I * 1e6, "-o", ms=6, color=WHOLE[arr], label="whole pixel: V_tot (median pixel)")
+    ax.plot(k.I * 1e6, k.V_tot, "-o", ms=6, color=WHOLE[arr], label="whole pixel: V_tot(I) (median pixel)")
     j = int(np.flatnonzero(ok)[-1])
-    ax.plot(k.V_LED_est[:j + 1], k.I[:j + 1] * 1e6, "-s", ms=6, color=SUB[arr],
-            label="transistor subtracted: V_tot - V_transistor(I), model (00)")
-    ax.plot(k.V_LED_est[j:], k.I[j:] * 1e6, ":s", ms=6, mfc="w", color=SUB[arr],
-            label="where the transistor limits the current: LED = junction (light) + fitted excess,\n"
-                  "transistor = V_tot - LED")
+    ax.plot(k.I[:j + 1] * 1e6, k.V_LED_est[:j + 1], "-s", ms=6, color=SUB[arr],
+            label="transistor subtracted: V_LED(I) = V_tot(I) - V_ds(I), model (00)")
+    ax.plot(k.I[j:] * 1e6, k.V_LED_est[j:], ":s", ms=6, mfc="w", color=SUB[arr],
+            label="where the transistor limits the current: V_LED = junction (light) + fitted excess,\n"
+                  "V_ds = V_tot - V_LED")
     for _, r in k.iterrows():
-        ax.annotate("", xy=(r.V_LED_est, r.I * 1e6), xytext=(r.V_tot, r.I * 1e6),
+        ax.annotate("", xy=(r.I * 1e6, r.V_LED_est), xytext=(r.I * 1e6, r.V_tot),
                     arrowprops=dict(arrowstyle="->", color=NPG["lilac"], lw=1.6, shrinkA=4, shrinkB=4))
         if r.V_drv_est > 0.06:
-            on = r.V_drv_est > 0.16                       # long arrow: the label sits on it
-            ax.text((r.V_tot + r.V_LED_est) / 2, r.I * 1e6 + (0 if on else 2.2),
-                    f"{1e3 * r.V_drv_est:.0f} mV", ha="center", va="center" if on else "bottom",
-                    fontsize=7.5, color=NPG["navy"], zorder=5,
+            ax.text(r.I * 1e6 - 1.2, (r.V_tot + r.V_LED_est) / 2, f"{1e3 * r.V_drv_est:.0f} mV",
+                    ha="right", va="center", fontsize=7.5, color=NPG["navy"], zorder=5,
                     bbox=dict(boxstyle="round,pad=0.15", fc="w", ec="none", alpha=.9))
     ron = P["vov"] / (P["I15"] * (1 - 5 * P["lam"]))
     top = k.iloc[-1]
-    ax.text(0.585, 0.66,
-            "arrows: the transistor's voltage\n"
-            "at that current\n\n"
-            f"below ~100 uA: like a {ron / 1e3:.1f} kOhm\n"
-            "resistor, the arrows grow with I\n\n"
-            "above ~110 uA: a current source.\n"
-            f"The current stops near {top.I * 1e6:.0f} uA, and\n"
-            "every further volt of V_tot goes\n"
-            f"into it ({top.V_drv_est:.2f} V of {top.V_tot:.1f} V at {br.VLED - top.V_tot:+.1f} V)\n\n"
-            "The subtracted curve is the LED's\n"
-            "own I-V: it ends where the current\n"
-            f"ends, {top.V_LED_est:.2f} V at {top.I * 1e6:.0f} uA",
-            transform=ax.transAxes, fontsize=7, family="monospace", va="top",
+    ax.text(0.03, 0.97,
+            "arrows: the transistor's voltage V_ds(I)\n\n"
+            f"below ~100 uA: V_ds = R_on I, R_on {ron / 1e3:.1f} kOhm:\n"
+            "the arrows grow in proportion to I\n\n"
+            "near the limit: a current source.\n"
+            f"The current stops near {top.I * 1e6:.0f} uA, and every\n"
+            "further volt of V_tot goes into it\n"
+            f"({top.V_drv_est:.2f} V of {top.V_tot:.1f} V at NVLED {br.VLED - top.V_tot:+.1f} V)\n\n"
+            "V_LED(I) is the LED's own curve: at\n"
+            f"{top.I * 1e6:.0f} uA it needs {top.V_LED_est:.2f} V, whatever V_tot is",
+            transform=ax.transAxes, fontsize=7.2, family="monospace", va="top",
             bbox=dict(boxstyle="round", fc="w", alpha=.92))
-    ax.set(xlabel="voltage (V)", ylabel="current (uA)", xlim=(2.55, 5.1), ylim=(0, 135),
-           title=f"{arr}: how the transistor is subtracted")
+    ax.set(xlabel="current (uA)", ylabel="voltage (V)", xlim=(0, 130), ylim=(2.55, 5.1),
+           title=f"{arr}: how the transistor is subtracted, at each current")
     ax.grid(alpha=.3)
     ax.legend(fontsize=7, loc="lower right")
     save(fig, f"00b_subtraction_{arr}.png", plt,
@@ -511,50 +573,44 @@ def fig_light_inversion(arr, d, plt):
     ideal-junction line through the 0.6 uA point, and the excess as the horizontal gap."""
     k = d[d.light & (d.I > 0)].sort_values("I")
     v0, l0 = d.attrs["ref"]
-    fig, ax = plt.subplots(figsize=(8.2, 6.2))
-    pp = np.geomspace(k.P.min() * 0.5, k.P.max() * 2, 200)
-    ax.plot(v0 + N_R * VT * (np.log(pp) - l0), pp * 1e9, "-", color=NPG["teal"], lw=2,
-            label=f"ideal junction: P ~ exp(q V / {N_R} kT), {1e3 * N_R * VT * np.log(10):.1f} mV per "
-                  "decade of light, through the 0.6 uA point")
+    fig, ax = plt.subplots(figsize=(8.4, 6.4))
     m = k.ok.to_numpy()
-    ax.plot(k.V_LED[m], k.P[m] * 1e9, "o", ms=6, color=SUB[arr],
-            label="measured: light against the LED's voltage (transistor subtracted)")
+    vl = np.where(m, k.V_LED, k.V_LED_est)
+    ax.plot(k.I[m] * 1e6, k.V_LED[m], "o-", ms=6, color=SUB[arr],
+            label="V_LED(I): measured, transistor subtracted")
     e = k[~k.ok & np.isfinite(k.V_LED_est)]
     if len(e):
-        ax.plot(e.V_LED_est, e.P * 1e9, "o", ms=6, mfc="w", color=SUB[arr],
-                label="transistor-limited: light measured, LED voltage = junction + fitted excess")
-    for _, r in k[k.I >= 1.4e-6].iterrows():
-        vl = r.V_LED if r.ok else r.V_LED_est
-        ax.annotate("", xy=(vl, r.P * 1e9), xytext=(r.V_j, r.P * 1e9),
-                    arrowprops=dict(arrowstyle="->", color=NPG["red"], lw=1.4,
-                                    ls="-" if r.ok else ":", shrinkA=0, shrinkB=5))
-        if r.ok:
-            ax.text(vl + 0.012, r.P * 1e9, f"{1e3 * (vl - r.V_j):.0f} mV at {r.I * 1e6:.0f} uA",
-                    va="center", fontsize=7, color=NPG["red"])
-    if len(e):                                       # nearly the same light: one label for all
-        ex = 1e3 * (e.V_LED_est - e.V_j)
-        ax.text((float(e.V_j.min()) + float(e.V_LED_est.max())) / 2, float(e.P.max()) * 1e9 * 1.15,
-                f"{ex.min():.0f}-{ex.max():.0f} mV at {e.I.min() * 1e6:.0f}-{e.I.max() * 1e6:.0f} uA "
-                "(estimate)", ha="center", va="bottom", fontsize=7, color=NPG["red"])
-    ax.text(0.56, 0.60,
-            "Reading the junction voltage off the light:\n"
-            "the light depends only on the carriers in the well,\n"
-            f"  P ~ exp(q V_j / n kT), n = {N_R} (measured at nA).\n"
-            "For each point, go left at the same light to the\n"
-            "teal line: that is V_j. The LED's measured voltage\n"
-            "lies further right. The gap (red) is the excess:\n"
-            "voltage that does not raise the light.\n\n"
-            "The current is not used here, so the droop\n"
-            "does not enter (02c). Only light ratios enter:\n"
-            "the fraction of the light collected cancels,\n"
-            "as long as it does not change with current.\n"
-            "Line and data meet at 0.6 uA by construction.",
+        ax.plot(e.I * 1e6, e.V_LED_est, "o:", ms=6, mfc="w", color=SUB[arr],
+                label="transistor-limited: V_LED = junction + fitted excess (estimate)")
+    ax.plot(k.I * 1e6, k.V_j, "s-", ms=5, color=NPG["teal"], lw=2,
+            label="V_j(I): the junction, from the LED's light at that current")
+    ii = np.geomspace(k.I.min(), k.I.max(), 200)
+    ax.plot(ii * 1e6, v0 + N_R * VT * np.log(ii / I_REF), "--", color=NPG["teal"], lw=1,
+            label="for comparison: V_j if the light simply followed the current (02c)")
+    for (_, r), v_ in zip(k.iterrows(), vl):
+        if r.I >= 1.4e-6 and np.isfinite(v_):
+            ax.annotate("", xy=(r.I * 1e6, v_), xytext=(r.I * 1e6, r.V_j),
+                        arrowprops=dict(arrowstyle="->", color=NPG["red"], lw=1.4,
+                                        ls="-" if r.ok else ":", shrinkA=0, shrinkB=4))
+            if r.ok and r.I >= 4e-6:
+                ax.text(r.I * 1e6 * 1.06, (r.V_j + v_) / 2, f"{1e3 * (v_ - r.V_j):.0f} mV",
+                        va="center", fontsize=7, color=NPG["red"])
+    ax.text(0.03, 0.97,
+            "The junction voltage from the light, at each current:\n"
+            "  the light depends only on the carriers in the wells,\n"
+            f"  P ~ exp(q V_j / n kT), n = {N_R} (measured at nA), so\n"
+            r"  V_j(I) = V_LED(I_0) + n kT/q ln( P(I) / P(I_0) )" "\n"
+            "  (63.7 mV per decade of light, I_0 = 0.6 uA)\n\n"
+            "  V_ex(I) = V_LED(I) - V_j(I): the excess (red arrows),\n"
+            "  the voltage that does not raise the light.\n\n"
+            "Only light RATIOS enter: the fraction collected cancels.\n"
+            "The current enters only as the x-axis, so the droop\n"
+            "does not bias V_j (02c).",
             transform=ax.transAxes, fontsize=7.2, family="monospace", va="top",
             bbox=dict(boxstyle="round", fc="w", alpha=.92))
-    xmax = float(np.nanmax(np.r_[k.V_LED[m], e.V_LED_est])) if len(e) else float(k.V_LED[m].max())
-    ax.set(yscale="log", xlabel="voltage (V)", ylabel="light (nW)", xlim=(2.45, xmax + 0.2),
-           ylim=(pp.min() * 1e9, pp.max() * 1e9),
-           title=f"{arr}, median pixel: how the light gives the junction voltage")
+    ax.set(xscale="log", xlabel="current (uA)", ylabel="voltage (V)",
+           ylim=(2.45, float(np.nanmax(vl)) + 0.1),
+           title=f"{arr}, median pixel: the junction voltage from the light, and the excess over it")
     ax.grid(alpha=.3, which="both")
     ax.legend(fontsize=6.8, loc="lower right")
     save(fig, f"02b_light_inversion_{arr}.png", plt, "Data: " + SOURCE[arr])
@@ -614,96 +670,97 @@ def fig_droop(curves, die, plt):
 
 
 def fig_iv(arr, d, db, tot, die, fsm, plt, log):
+    """V(I) of the pixel, whole and with the transistor subtracted, over current."""
     fig, ax = plt.subplots(figsize=(7.8, 6))
     if log:
-        ax.plot(br.VLED - tot.index.to_numpy(), tot.to_numpy() * 1e6, "-", color="0.7", lw=2,
+        ax.plot(tot.to_numpy() * 1e6, br.VLED - tot.index.to_numpy(), "-", color="0.7", lw=2,
                 label="total current, CMOS leakage included (every bias)")
         m = br.LV < 2.25
-        ax.plot(br.LV[m], br.LI[m] * 1e6, "--", color=DIE, lw=.9)
-    ax.plot(d.V_tot, d.I * 1e6, "-o", ms=3.5, color=WHOLE[arr], label="whole pixel (V_tot): median")
+        ax.plot(br.LI[m] * 1e6, br.LV[m], "--", color=DIE, lw=.9)
+    ax.plot(d.I * 1e6, d.V_tot, "-o", ms=3.5, color=WHOLE[arr], label="whole pixel V_tot(I): median")
     if not log:
-        ax.fill_between(d.V_tot, d.I_q1 * 1e6, d.I_q3 * 1e6, color=WHOLE[arr], alpha=.15, lw=0,
-                        label="whole pixel: 25-75 % of the pixels")
-    ax.plot(db.V_tot, db.I * 1e6, "--", color=WHOLE[arr], lw=1.3, label="whole pixel: the best 2 %")
+        ax.fill_betweenx(d.V_tot, d.I_q1 * 1e6, d.I_q3 * 1e6, color=WHOLE[arr], alpha=.15, lw=0,
+                         label="whole pixel: 25-75 % of the pixels")
+    ax.plot(db.I * 1e6, db.V_tot, "--", color=WHOLE[arr], lw=1.3, label="whole pixel: the best 2 %")
     k = d[d.ok & (d.I > 0)]
-    ax.plot(k.V_LED, k.I * 1e6, "-s", ms=3.5, color=SUB[arr], label="transistor subtracted: median")
+    ax.plot(k.I * 1e6, k.V_LED, "-s", ms=3.5, color=SUB[arr],
+            label="transistor subtracted V_LED(I) = V_tot(I) - V_ds(I): median")
     e = d[~d.ok & np.isfinite(d.V_LED_est)]
     if len(e):
-        ax.plot(np.r_[k.V_LED.iloc[-1], e.V_LED_est], np.r_[k.I.iloc[-1], e.I] * 1e6, ":s", ms=4,
+        ax.plot(np.r_[k.I.iloc[-1], e.I] * 1e6, np.r_[k.V_LED.iloc[-1], e.V_LED_est], ":s", ms=4,
                 mfc="w", color=SUB[arr],
-                label="transistor subtracted, where it limits the current\n(LED = junction from its light + fitted excess)")
+                label="transistor subtracted, where it limits the current\n(V_LED = junction from its light + fitted excess)")
     kb = db[db.ok & (db.I > 0)]
     eb = db[~db.ok & np.isfinite(db.V_LED_est)]
-    ax.plot(np.r_[kb.V_LED, eb.V_LED_est], np.r_[kb.I, eb.I] * 1e6, "--", color=SUB[arr], lw=1.3,
+    ax.plot(np.r_[kb.I, eb.I] * 1e6, np.r_[kb.V_LED, eb.V_LED_est], "--", color=SUB[arr], lw=1.3,
             label="transistor subtracted: the best 2 %")
     f = fsm[fsm["array"] == arr]
-    ax.plot(f.V_tot, f.I * 1e6, "D", mfc="none", ms=8, color=WHOLE[arr],
+    ax.plot(f.I * 1e6, f.V_tot, "D", mfc="none", ms=8, color=WHOLE[arr],
             label="whole pixel, full-array fast scans: median")
-    ax.plot(die.Voltage_V, die.Current_A * 1e6, "-", color=DIE, lw=1.4, label=DIE_LABEL)
+    ax.plot(die.Current_A * 1e6, die.Voltage_V, "-", color=DIE, lw=1.4, label=DIE_LABEL)
     if log:
         lt = leak_test(arr)
-        ax.plot(lt.V_tot, lt.I_off * 1e6, "x", ms=8, mew=1.6, color="0.45",
+        ax.plot(lt.I_off * 1e6, lt.V_tot, "x", ms=8, mew=1.6, color="0.45",
                 label=f"leakage test: the pixel off = CMOS leakage ({lt.n.iloc[0]} pixels)")
         sig = lt.I_led > 2 * lt.se
         if sig.any():
-            ax.errorbar(lt.V_tot[sig], lt.I_led[sig] * 1e6, yerr=lt.se[sig] * 1e6, fmt="*", ms=11,
+            ax.errorbar(lt.I_led[sig] * 1e6, lt.V_tot[sig], xerr=lt.se[sig] * 1e6, fmt="*", ms=11,
                         color=WHOLE[arr], capsize=3,
                         label="leakage test: lit - off, same pixel (LED current)")
         if (~sig).any():
             ul = (lt.I_led.clip(lower=0) + 2 * lt.se)[~sig]
-            ax.plot(lt.V_tot[~sig], ul * 1e6, "v", ms=8, mfc="w", color=WHOLE[arr],
+            ax.plot(ul * 1e6, lt.V_tot[~sig], "<", ms=8, mfc="w", color=WHOLE[arr],
                     label="leakage test: upper limit (lit - off not resolved, 2 sigma)")
-        ax.set(yscale="log", ylim=(1e-5, 400), xlim=(1.75, 5.1))
-        ax.annotate(f"the sweep took its leakage reference from NVLED {br.VLED - d.V_tot.min():+.1f} V on;\n"
-                    f"below that the leakage test resolves ~{2e9 * lt.se.median():.1f} nA (2 sigma)",
-                    (1.8, 2.5e-3), fontsize=7, color="0.4")
+        ax.set(xscale="log", xlim=(1e-5, 400), ylim=(1.75, 5.1))
+        ax.text(2e-5, 3.3, f"the sweep took its leakage reference from NVLED "
+                f"{br.VLED - d.V_tot.min():+.1f} V on;\nbelow that the leakage test resolves "
+                f"~{2e9 * lt.se.median():.1f} nA (2 sigma)", fontsize=7, color="0.4")
     else:
-        ax.set(ylim=(0, 135), xlim=(2.6, 5.1))
-    ax.set(xlabel="voltage (V)", ylabel="LED current, leakage subtracted (uA)",
-           title=f"{arr}: I-V of the pixel, whole and with the transistor subtracted")
+        ax.set(xlim=(0, 135), ylim=(2.6, 5.1))
+    ax.set(xlabel="LED current, leakage subtracted (uA)", ylabel="voltage (V)",
+           title=f"{arr}: the pixel over current, whole and with the transistor subtracted")
     ax.grid(alpha=.3, which="both")
-    ax.legend(fontsize=6.5, loc="lower right")
+    ax.legend(fontsize=6.5, loc="upper left")
     save(fig, f"{'01_iv_log' if log else '02_iv_linear'}_{arr}.png", plt,
          "Data: " + SOURCE[arr] + " Fast scans: " + ", ".join(sorted(set(f.run))) + ". " + die_source(die))
 
 
 def fig_budget(arr, d, plt):
-    k = d[d.light & np.isfinite(d.V_LED_est)].sort_values("V_tot")
-    x0 = k.V_tot.iloc[0]
-    xl = np.linspace(1.8, x0, 30)[:-1]                   # no measurable current: all on the junction
-    x = np.r_[xl, k.V_tot.to_numpy()]
-    vj = np.r_[xl, np.minimum(k.V_j.to_numpy(), k.V_LED_est.to_numpy())]
-    led = np.r_[xl, k.V_LED_est.to_numpy()]
-    sat = np.r_[np.zeros(len(xl), bool), ~k.ok.to_numpy()]
+    """Where the voltage goes, at each current: V_tot(I) = V_j(I) + V_ex(I) + V_ds(I)."""
+    k = d[d.light & np.isfinite(d.V_LED_est) & (d.I > 0)].sort_values("I")
+    x = k.I.to_numpy() * 1e6
+    vt = k.V_tot.to_numpy()
+    vj = np.minimum(k.V_j.to_numpy(), k.V_LED_est.to_numpy())
+    led = k.V_LED_est.to_numpy()
+    sat = ~k.ok.to_numpy()
     fig, ax = plt.subplots(figsize=(8, 6))
-    ax.fill_between(x, 0, vj, color=NPG["teal"], alpha=.75, lw=0, label="LED junction (from its own light)")
+    ax.fill_between(x, 0, vj, color=NPG["teal"], alpha=.75, lw=0, label="V_j(I): LED junction (from its own light)")
     ax.fill_between(x, vj, led, color=NPG["red"], alpha=.75, lw=0,
-                    label="excess: barrier + series resistance (LED, bump, lines)")
-    ax.fill_between(x, led, x, color=NPG["lilac"], alpha=.75, lw=0, label="transistor")
+                    label="V_ex(I): excess, barrier + series resistance (LED, bump, lines)")
+    ax.fill_between(x, led, vt, color=NPG["lilac"], alpha=.75, lw=0, label="V_ds(I): transistor")
     if sat.any():
         j = np.flatnonzero(sat)[0] - 1
-        ax.fill_between(x[j:], led[j:], x[j:], facecolor="none", hatch="//", edgecolor="0.25", lw=0,
+        ax.fill_between(x[j:], led[j:], vt[j:], facecolor="none", hatch="//", edgecolor="0.25", lw=0,
                         label="transistor saturated: it limits the current and takes the rest")
-    ax.plot(x, x, "k-", lw=1)
-    lines = ["NVLED   V_tot      I      junction    excess        transistor"]
-    for vt in (3.0, 3.2, 3.4, 4.0, 5.0):
-        i = np.argmin(np.abs(k.V_tot.to_numpy() - vt))
+    ax.plot(x, vt, "k-o", ms=3, lw=1, label="V_tot(I) = V_j + V_ex + V_ds (each sweep bias)")
+    lines = ["NVLED      I      junction    excess        transistor"]
+    for vv in (3.0, 3.2, 3.4, 4.0, 5.0):
+        i = np.argmin(np.abs(k.V_tot.to_numpy() - vv))
         r = k.iloc[i]
-        if abs(r.V_tot - vt) > 0.01:
+        if abs(r.V_tot - vv) > 0.01:
             continue
         ex, drv = r.V_LED_est - r.V_j, r.V_tot - r.V_LED_est
-        lines.append(f"{br.VLED - r.V_tot:+.1f} V  {r.V_tot:.1f} V  {r.I * 1e6:5.1f} uA  "
+        lines.append(f"{br.VLED - r.V_tot:+.1f} V  {r.I * 1e6:5.1f} uA  "
                      f"{r.V_j:.2f} V {100 * r.V_j / r.V_tot:3.0f} %  {1e3 * ex:4.0f} mV {100 * ex / r.V_tot:3.0f} %  "
                      f"{1e3 * drv:5.0f} mV {100 * drv / r.V_tot:3.0f} %")
-    ax.text(0.02, 0.97, "\n".join(lines), transform=ax.transAxes, fontsize=6.6, family="monospace",
+    ax.text(0.02, 0.98, "\n".join(lines), transform=ax.transAxes, fontsize=6.6, family="monospace",
             va="top", bbox=dict(boxstyle="round", fc="w", alpha=.92))
-    ax.annotate("below ~2.5 V almost no current flows:\nall of V_tot is across the LED junction",
-                (1.85, 0.25), fontsize=7.5, color="w")
-    sec = ax.secondary_xaxis("top", functions=(lambda v: br.VLED - v, lambda n: br.VLED - n))
-    sec.set_xlabel("NVLED (V)")
-    ax.set(xlabel="V_tot = VLED - NVLED (V)", ylabel="voltage (V)", xlim=(1.8, x.max()),
-           ylim=(0, 5.2), title=f"{arr}, median pixel: where the voltage goes")
-    ax.legend(fontsize=7, loc="lower right")
+    ax.set(xlabel="current (uA)", ylabel="voltage (V)", xlim=(0, 130), ylim=(0, 6.4),
+           title=f"{arr}, median pixel: where the voltage goes, at each current\n"
+                 "near ~110 uA the current stops rising: the transistor saturates and takes "
+                 "every further volt")
+    ax.title.set_fontsize(10)
+    ax.legend(fontsize=6.8, loc="upper right")
     save(fig, f"03_voltage_budget_{arr}.png", plt,
          "Data: " + SOURCE[arr] + " Junction: V_LED(0.6 uA) + 1.07 kT/q ln(P/P(0.6 uA)). Hatched: the "
          "transistor's model cannot give its drop; the LED is its junction plus the fitted excess (09).")
@@ -801,28 +858,34 @@ def fig_dvdi(curves, die, drv, plt):
 
 def fig_r_vs_v(arr, d, P, plt):
     k = d[d.ok & (d.I > 0.1e-6)].sort_values("I")
-    i, x = k.I.to_numpy(), mid(k.V_tot.to_numpy())
+    i = k.I.to_numpy()
     fig, ax = plt.subplots(figsize=(7.8, 5.8))
-    ax.plot(x, np.diff(k.V_tot) / np.diff(i) / 1e3, "-o", ms=4, color="0.5", lw=1, label="whole pixel")
-    ax.plot(x, np.diff(k.V_LED) / np.diff(i) / 1e3, "-s", ms=4, color=SUB[arr], lw=1.2,
-            label="transistor subtracted: LED (junction still in) + bump + lines")
-    e = (k.I.to_numpy() >= I_REF) & k.light.to_numpy()
-    ax.plot(mid(k.V_tot.to_numpy()[e]), np.diff(k.V_ex.to_numpy()[e]) / np.diff(i[e]) / 1e3, "-^",
-            ms=6, lw=2.4, color=WHOLE[arr],
-            label="excess: the LED junction removed via its light (barrier + series R)")
+    ax.plot(mid(i) * 1e6, np.diff(k.V_tot) / np.diff(i) / 1e3, "-o", ms=4, color="0.5", lw=1,
+            label="whole pixel: dV_tot/dI")
+    ax.plot(mid(i) * 1e6, np.diff(k.V_LED) / np.diff(i) / 1e3, "-s", ms=4, color=SUB[arr], lw=1.2,
+            label="transistor subtracted: dV_LED/dI (junction still in)")
+    e = (i >= I_REF) & k.light.to_numpy()
+    ax.plot(mid(i[e]) * 1e6, np.diff(k.V_ex.to_numpy()[e]) / np.diff(i[e]) / 1e3, "-^",
+            ms=6, lw=2.4, color=WHOLE[arr], label="excess: dV_ex/dI (junction removed via its light)")
+    ii = np.geomspace(0.1e-6, 100e-6, 100)
+    ax.plot(ii * 1e6, N_R * VT / ii / 1e3, ":", color="k", lw=1.2,
+            label="ideal junction alone: dV/dI = n kT/(q I), n 1.07")
     ron = P["vov"] / (P["I15"] * (1 - 5 * P["lam"])) / 1e3
     ax.axhline(ron, color=NPG["lilac"], ls="--", lw=1.2, label=f"for scale: the transistor's on-resistance ({ron:.1f} kOhm)")
     ax.axhline(0.27, color=NPG["brown"], ls=":", lw=1.2,
                label="for scale: the die's own series R (270 Ohm, its Cheung fit)")
-    sec = ax.secondary_xaxis("top", functions=(lambda v: br.VLED - v, lambda n: br.VLED - n))
-    sec.set_xlabel("NVLED (V)")
-    ax.set(xlabel="V_tot (V)", ylabel="dV/dI between neighbouring sweep points (kOhm)",
-           yscale="log", ylim=(0.1, 300),
-           title=f"{arr}: the 'series resistance' at each voltage\n"
-                 "the junction-free excess still falls 5x: not a resistor")
+    ax.text(0.03, 0.04,
+            "A resistor: dV/dI = R, flat.\n"
+            "A barrier a ln(1 + I/I_b): dV/dI = a/(I + I_b), falls as 1/I above I_b.",
+            transform=ax.transAxes, fontsize=7.5, family="monospace", va="bottom",
+            bbox=dict(boxstyle="round", fc="w", alpha=.92))
+    ax.set(xscale="log", yscale="log", xlabel="current (uA)",
+           ylabel="dV/dI between neighbouring sweep points (kOhm)", ylim=(0.1, 300),
+           title=f"{arr}: the differential resistance at each current\n"
+                 "the junction-free excess still falls with current: not a resistor")
     ax.grid(alpha=.3, which="both")
     ax.legend(fontsize=7, loc="upper right")
-    save(fig, f"06_resistance_vs_voltage_{arr}.png", plt,
+    save(fig, f"06_resistance_vs_current_{arr}.png", plt,
          "Data: " + SOURCE[arr] + " Median pixel; transistor-limited points left out.")
 
 
@@ -893,8 +956,11 @@ def fig_excess(gs, die, plt):
 
 
 def fig_fits(name, i, v, fits_, plt, source, note=""):
-    fig, (ax, rx) = plt.subplots(2, 1, figsize=(7.8, 7.2), sharex=True,
-                                 gridspec_kw=dict(height_ratios=[3, 1.3]))
+    fig = plt.figure(figsize=(14.5, 7.4))
+    gs = fig.add_gridspec(2, 2, height_ratios=[3, 1.3], width_ratios=[1.1, 1])
+    ax = fig.add_subplot(gs[0, 0])
+    rx = fig.add_subplot(gs[1, 0], sharex=ax)
+    plot_parts(fig.add_subplot(gs[:, 1]), i, v, "barrier + resistor", fits_["barrier + resistor"], None)
     if note:
         ax.text(0.03, 0.62, note, transform=ax.transAxes, fontsize=7, family="monospace", va="top",
                 bbox=dict(boxstyle="round", fc="w", alpha=.92))
@@ -919,8 +985,12 @@ def fig_bond_fits(arr, d, D, plt):
     only the bond term is fitted (to the median pixel's excess)."""
     i, v = excess_points(d)
     fits = {m: bond_fit(D, i, v, m) for m in BOND}
-    fig, (ax, rx) = plt.subplots(2, 1, figsize=(7.8, 7.6), sharex=True,
-                                 gridspec_kw=dict(height_ratios=[3, 1.4]))
+    fig = plt.figure(figsize=(15, 10.5))
+    gs = fig.add_gridspec(3, 2, width_ratios=[1.2, 1])
+    ax = fig.add_subplot(gs[:2, 0])
+    rx = fig.add_subplot(gs[2, 0], sharex=ax)
+    for k, (m, r) in enumerate(fits.items()):
+        plot_parts(fig.add_subplot(gs[k, 1]), i, v, m, r, D)
     xx = np.geomspace(I_REF, i.max(), 200)
     ax.plot(xx * 1e6, 1e3 * D(xx), "--", color=DIE, lw=1.8, zorder=5,
             label="SGA_15 die as measured: its LED barrier, fixed")
@@ -1333,10 +1403,18 @@ def fig_second_barrier(groups, c42, plt):
     x.set_title("(d) The four models fitted to the most degraded group", fontsize=11, loc="left")
     x.legend(fontsize=6.8, loc="upper left")
     x.grid(alpha=.3)
-    save(fig, "17_second_barrier_explained.png", plt,
-         "Data: " + SOURCE["Array38"] + f" Groups: share of dark pixels (open, short, dark_conducting "
-         f"in the same run's fast scan) within {DEAD_WIN} x {DEAD_WIN} px; each group's median pixel per "
-         "sweep bias, below the transistor limit. Array42: " + SOURCE["Array42"])
+    src = ("Data: " + SOURCE["Array38"] + f" Groups: share of dark pixels (open, short, dark_conducting "
+           f"in the same run's fast scan) within {DEAD_WIN} x {DEAD_WIN} px; each group's median pixel per "
+           "sweep bias, below the transistor limit.")
+    save(fig, "17_second_barrier_explained.png", plt, src + " Array42: " + SOURCE["Array42"])
+    # 17b: the four models of (d) split into their terms, on the group's whole excess
+    fig, ax = plt.subplots(2, 2, figsize=(14, 10.5))
+    for x, model in zip(ax.flat, SECOND):
+        plot_parts(x, i, d + r, model, fit_second(model, i, d, r), ref)
+    fig.suptitle(f"Array38, {name} dead neighbours ({n} px): each model of 17(d) split into its terms\n"
+                 f"V_ref: Array38's healthiest pixels (< 10 % dead, {n0} px), measured and fixed",
+                 fontsize=11)
+    save(fig, "17b_second_barrier_terms.png", plt, src)
     t = pd.DataFrame(rows)
     t.to_csv(OUT / "fits_second_barrier.csv", index=False, float_format="%.5g")
     return t

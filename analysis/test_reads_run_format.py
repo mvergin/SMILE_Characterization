@@ -451,14 +451,6 @@ def test_pixel_fits_are_cached_and_parallel_fits_match():
         assert abs(f["peak_IQE"] - serial["peak_IQE"]) < 1e-12, (xy, f["peak_IQE"])
 
 
-if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print(f"ok  {name}")
-    print("all contract checks passed")
-
-
 def test_bond_resistance_inversions_round_trip():
     """v_led reads the SGA_15 table back at its own points; v_driver inverts f15, and
     returns NaN for a current the driver cannot carry."""
@@ -504,3 +496,28 @@ def test_led_voltage_light_split_recovers_a_barrier():
     m = i >= lv.I_REF
     p = lv.fit(i[m], vex[m], "barrier + resistor")["p"]
     assert abs(p[0] - a) < 2e-3 and abs(10 ** p[1] / ib - 1) < 0.05 and abs(p[2] - R) < 20, p
+
+
+def test_led_voltage_terms_add_up_to_each_model():
+    """The terms plotted in 09, 17b and 18b add up to the model that was fitted."""
+    import led_voltage_budget as lv
+    import led_voltage_dense as ld
+    i = np.geomspace(lv.I_REF, 90e-6, 30)
+    D = lambda x: 0.1 * (np.log1p(x / 3e-6) - np.log1p(lv.I_REF / 3e-6))
+    seen = set()
+    for fam, call in ((lv.MODELS, lambda f, p: f(p, i)), (lv.BOND, lambda f, p: f(D, p, i)),
+                      (lv.SECOND, lambda f, p: D(i) + f(p, i, D(i))), (ld.MODELS, lambda f, p: f(D, p, i))):
+        for m, (f, p0, _) in fam.items():
+            if m in lv.PARTS:
+                p = np.array(p0, float)
+                assert np.allclose(sum(t(D, p, i) for *_, t in lv.PARTS[m]), call(f, p), atol=1e-12), m
+                seen.add(m)
+    assert seen == set(lv.PARTS), set(lv.PARTS) - seen
+
+
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"ok  {name}")
+    print("all contract checks passed")
