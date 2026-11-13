@@ -201,7 +201,7 @@ def add_estimate(d, r):
     return d
 
 
-def per_pixel(sw, die, best, rb, i_star):
+def per_pixel(sw, die, best, rb, i_star, D):
     """Every pixel: V_LED and light at I_REF, TARGETS, GRID and i_star (the fast scan's median
     current, for the comparison with R_best), log-interpolated between its own sweep points;
     its excess there, and its V_LED against the die's at the same current.
@@ -241,6 +241,29 @@ def per_pixel(sw, die, best, rb, i_star):
         res[f"V_LED_minus_die_{tag(t)}"] = v - interp_log(di, np.array([t]), dv)[0]
     v, lp = at(i_star)
     res["V_ex_Istar"] = (v - v0) - N_R * VT * (lp - l0)
+    # per pixel, over its own points from I_REF to the transistor limit: the die-anchored fit
+    # V_ex = k D(I) + R (I - I_REF). Linear in k and R, so solved exactly (normal equations).
+    # k: the barrier against the die's (1 = the same); R: the extra ohmic part
+    ii = np.exp(lni)
+    vex = (vl - v0[:, None]) - N_R * VT * (lnp - l0[:, None])
+    m = np.isfinite(vex) & np.isfinite(ii) & (ii >= I_REF)
+    dd_ = np.where(m, D(np.where(m, ii, I_REF)), 0.0)
+    xx = np.where(m, ii - I_REF, 0.0)
+    yy = np.where(m, vex, 0.0)
+    sdd, sdx, sxx = (dd_ * dd_).sum(1), (dd_ * xx).sum(1), (xx * xx).sum(1)
+    sdy, sxy = (dd_ * yy).sum(1), (xx * yy).sum(1)
+    det = sdd * sxx - sdx ** 2
+    nfit = m.sum(1)
+    good = (nfit >= 4) & (det > 0)
+    with np.errstate(all="ignore"):
+        k = np.where(good, (sdy * sxx - sxy * sdx) / det, np.nan)
+        rr = np.where(good, (sdd * sxy - sdx * sdy) / det, np.nan)
+        fit_res = np.where(m, yy - (k[:, None] * dd_ + rr[:, None] * xx), np.nan)
+        rms = np.sqrt(np.nanmean(fit_res ** 2, axis=1))
+    res["k_barrier"] = k
+    res["R_extra_kOhm"] = rr / 1e3
+    res["fit_rms_mV"] = 1e3 * rms
+    res["n_fit"] = nfit
     rows_ = []
     for t in GRID:
         v, lp = at(t)
@@ -522,8 +545,10 @@ def fig_light_inversion(arr, d, plt):
             "lies further right. The gap (red) is the excess:\n"
             "voltage that does not raise the light.\n\n"
             "The current is not used here, so the droop\n"
-            "does not enter (02c). Line and data meet at\n"
-            "0.6 uA by construction.",
+            "does not enter (02c). Only light ratios enter:\n"
+            "the fraction of the light collected cancels,\n"
+            "as long as it does not change with current.\n"
+            "Line and data meet at 0.6 uA by construction.",
             transform=ax.transAxes, fontsize=7.2, family="monospace", va="top",
             bbox=dict(boxstyle="round", fc="w", alpha=.92))
     xmax = float(np.nanmax(np.r_[k.V_LED[m], e.V_LED_est])) if len(e) else float(k.V_LED[m].max())
@@ -867,9 +892,12 @@ def fig_excess(gs, die, plt):
          + SOURCE["Array38"] + " " + die_source(die))
 
 
-def fig_fits(name, i, v, fits_, plt, source):
+def fig_fits(name, i, v, fits_, plt, source, note=""):
     fig, (ax, rx) = plt.subplots(2, 1, figsize=(7.8, 7.2), sharex=True,
                                  gridspec_kw=dict(height_ratios=[3, 1.3]))
+    if note:
+        ax.text(0.03, 0.62, note, transform=ax.transAxes, fontsize=7, family="monospace", va="top",
+                bbox=dict(boxstyle="round", fc="w", alpha=.92))
     ax.plot(i * 1e6, 1e3 * v, "ko", ms=4, label="data")
     xx = np.logspace(np.log10(I_REF), np.log10(i.max()), 200)
     for model, r in fits_.items():
@@ -1043,6 +1071,81 @@ def fig_map(arr, p, dv, plt, B=16):
     save(fig, f"13_excess_map_{arr}.png", plt, "Data: " + SOURCE[arr] + " " + die_source_short())
 
 
+def fig_barrier_maps(arr, p, plt, B=16):
+    """Where the barrier (k, against the die's) and the extra resistor (R) sit: the per-pixel
+    die-anchored fits as 16x16 block medians, side by side."""
+    from matplotlib.colors import Normalize, TwoSlopeNorm
+    s = p.dropna(subset=["k_barrier", "R_extra_kOhm"])
+    fig, ax = plt.subplots(1, 2, figsize=(13.8, 6.4))
+    for x, col, lab, norm, cmap in (
+            (ax[0], "k_barrier", "barrier k (1 = the die's)", TwoSlopeNorm(1.0, 0.3, 1.7), "RdBu_r"),
+            (ax[1], "R_extra_kOhm", "extra resistor R (kOhm)", Normalize(0, 5), "magma")):
+        g = s.groupby([s.Y // B, s.X // B])[col]
+        blk = g.median()[g.size() >= 5]
+        img = np.full((512 // B, 512 // B), np.nan)
+        img[blk.index.get_level_values(0), blk.index.get_level_values(1)] = blk.to_numpy()
+        cm = plt.get_cmap(cmap).copy()
+        cm.set_bad("0.8")
+        im = x.imshow(img, cmap=cm, norm=norm, extent=(-.5, 511.5, 511.5, -.5), interpolation="nearest")
+        fig.colorbar(im, ax=x, fraction=.046, extend="both", label=f"{lab}, median in {B}x{B} blocks")
+        q = s[col].quantile([.1, .5, .9])
+        x.set(xlabel="X", ylabel="Y",
+              title=f"{lab}: median {q[.5]:.2f}, 10-90 % of the pixels {q[.1]:.2f} to {q[.9]:.2f}")
+        x.title.set_fontsize(9.5)
+    fig.suptitle(f"{arr}: each pixel fitted as the die's barrier x k plus a resistor R\n"
+                 "(its own sweep points from 0.6 uA to the transistor limit; grey: none)", fontsize=11)
+    save(fig, f"15_barrier_and_resistor_map_{arr}.png", plt,
+         "Data: " + SOURCE[arr] + f" {len(s)} pixels; per-pixel fit: median {s.n_fit.median():.0f} "
+         f"points, rms {s.fit_rms_mV.median():.1f} mV. R carries +-0.5 kOhm from the transistor model.")
+
+
+DEAD_WIN = 33                # px: the neighbourhood whose share of dead pixels is counted
+
+
+def fig_vs_dark(arr, p, ref, plt):
+    """Does the barrier or the resistor grow where more pixels have died? Per-pixel k and R
+    against the share of dark pixels (open, short, dark_conducting in the same run's fast scan)
+    in a DEAD_WIN x DEAD_WIN window around the pixel. The dead pixels are scattered through the
+    live area (~20 % in Array38's best corner), so the distance to the nearest one is 1 px for
+    nearly every pixel and says nothing; the local share does."""
+    import bond_failure as bf
+    from scipy.ndimage import uniform_filter
+    cls = bf.classes(br.SWEEP[arr], -1.4)
+    dark = np.zeros((512, 512), bool)
+    idx = cls[cls.isin(bf.DARK)].index
+    dark[idx.get_level_values("Y"), idx.get_level_values("X")] = True
+    frac = uniform_filter(dark.astype(float), size=DEAD_WIN, mode="nearest")
+    s = p.dropna(subset=["k_barrier", "R_extra_kOhm"]).copy()
+    s["dead"] = 100 * frac[s.Y.to_numpy(), s.X.to_numpy()]
+    bins = np.arange(0, 101, 10)
+    g = s.groupby(pd.cut(s.dead, bins, include_lowest=True), observed=True)
+    labels = [f"{max(iv.left, 0):.0f}-{iv.right:.0f}" for iv in g.size().index]
+    fig, (ax, bx) = plt.subplots(2, 1, figsize=(7.8, 7.8), sharex=True)
+    for x, col, lab, refv, die_v in ((ax, "k_barrier", "barrier k (1 = the die's)", ref["k"], 1.0),
+                                     (bx, "R_extra_kOhm", "extra resistor R (kOhm)", ref["R"], None)):
+        med, q1, q3 = g[col].median(), g[col].quantile(.25), g[col].quantile(.75)
+        xs = np.arange(len(med))
+        x.errorbar(xs, med, yerr=[med - q1, q3 - med], fmt="o-", ms=5, capsize=3, color=WHOLE[arr],
+                   label=f"{arr}: median, 25-75 % of the pixels")
+        x.axhline(refv, color=WHOLE["Array42"], ls=":", lw=1.4, label=f"Array42, all pixels: {refv:.2f}")
+        if die_v is not None:
+            x.axhline(die_v, color=DIE, lw=1, label="the unbonded die")
+        x.set(ylabel=lab)
+        x.grid(alpha=.3)
+        x.legend(fontsize=7.5, loc="upper right")
+    for xi, n in zip(np.arange(len(g.size())), g.size()):
+        ax.annotate(f"{n}", (xi, ax.get_ylim()[0]), xytext=(0, 3), textcoords="offset points",
+                    ha="center", fontsize=6.5, color="0.4")
+    bx.set_xticks(np.arange(len(labels)), labels)
+    bx.set(xlabel=f"dead pixels in the {DEAD_WIN} x {DEAD_WIN} px around the pixel (%); "
+                  "grey numbers: pixels per bin")
+    ax.set_title(f"{arr}: does the barrier or the resistor grow where more pixels have died?",
+                 fontsize=10.5)
+    save(fig, f"16_barrier_and_resistor_vs_dark_{arr}.png", plt,
+         "Data: " + SOURCE[arr] + " Dark: open, short or dark_conducting in the same run's fast scan "
+         "at -1.40 V. R carries +-0.5 kOhm from the transistor model.")
+
+
 def die_source_short():
     return "Die: SGA_15 10 um, IVL of 2023-08-18."
 
@@ -1097,6 +1200,7 @@ def main() -> int:
     drv = {a: br.fit_driver(a) for a in ARRAYS}
     die = load_die()
     curves, bests, tots, pp, gs, istar = {}, {}, {}, {}, {}, {}
+    D = die_excess(die)                              # the die's excess as measured
     for a in ARRAYS:
         print(f"{a}: loading the sweep ...", flush=True)
         rb = pd.read_csv(br.OUT / "pixels" / f"{br.REFERENCE_RUN[a]}_m1p40V.csv").set_index(["X", "Y"])
@@ -1105,7 +1209,7 @@ def main() -> int:
         curves[a] = curve(sw, drv[a])
         bests[a] = curve(sw, drv[a], best)
         istar[a] = float(rb.I_LED.median())          # the fast scan's median current at -1.40 V
-        pp[a], gs[a] = per_pixel(sw, die, best, rb, istar[a])
+        pp[a], gs[a] = per_pixel(sw, die, best, rb, istar[a], D)
         SOURCE[a] = (f"{a}: NVLED sweep {br.REFERENCE_RUN[a]}, {sw.attrs['n_pixels']} pixels "
                      f"(best 2 %: {len(best)}; {sw.attrs['n_latched']} latched pixels and "
                      f"{sw.attrs['n_lit_ref']} partly lit references left out).")
@@ -1155,7 +1259,6 @@ def main() -> int:
         pp[a].to_csv(OUT / f"per_pixel_{a}.csv", index=False, float_format="%.5g")
 
     # the pixel as the die's LED plus a bond term (die's excess fixed as measured)
-    D = die_excess(die)
     brows = []
     for a in ARRAYS:
         for d, px in ((curves[a], "median"), (bests[a], "best 2 %")):
@@ -1180,6 +1283,12 @@ def main() -> int:
         fig_bond_fits(a, curves[a], D, plt)
         fig_map(a, pp[a], dv20, plt)
         fig_vs_rbest(a, pp[a], istar[a], plt)
+        fig_barrier_maps(a, pp[a], plt)
+    ref42 = {"k": float(pp["Array42"].k_barrier.median()), "R": float(pp["Array42"].R_extra_kOhm.median())}
+    fig_vs_dark("Array38", pp["Array38"], ref42, plt)
+    for a in ARRAYS:
+        q = pp[a][["k_barrier", "R_extra_kOhm", "fit_rms_mV", "n_fit"]].describe(percentiles=[.1, .5, .9])
+        print(f"  {a} per-pixel fits:\n{q.round(3).to_string()}")
     for name, i_, dvv in fig_droop(curves, die, plt):
         print(f"  droop, {name}: junction from the light minus from the current "
               f"{dvv.min():+.1f} to {dvv.max():+.1f} mV over {i_.min() * 1e6:.1f}-{i_.max() * 1e6:.0f} uA")
@@ -1187,11 +1296,18 @@ def main() -> int:
     fig_dvdi(curves, die, drv, plt)
     fig_minus_die(gs, die, plt)
     fig_excess(gs, die, plt)
-    i, v = xy["SGA_15 die"]
-    fig_fits("SGA_15 die", i, v, {m: fits_[("SGA_15 die", m)] for m in MODELS}, plt, die_source(die))
     fig_window(wrows, plt, die)
     a, b = fig_cheung(curves, plt)
     print(f"die Cheung fit 0.35-0.9 mA: intercept {a:.3f} V (n {a / VT:.1f}), slope {b:.0f} Ohm")
+    i, v = xy["SGA_15 die"]
+    rb_ = fits_[("SGA_15 die", "barrier + resistor")]
+    fig_fits("SGA_15 die", i, v, {m: fits_[("SGA_15 die", m)] for m in MODELS}, plt, die_source(die),
+             note=("The resistor here: the die's excess (junction removed via\n"
+                   f"the light) over 0.6-{i.max() * 1e6:.0f} uA gives R {rb_['p'][2] / 1e3:.2f} kOhm.\n"
+                   f"Cheung on its IV sweep at 0.35-0.85 mA (11): {b:.0f} Ohm, n {a / VT:.1f};\n"
+                   "its own analysis: 270 Ohm, n 10.4. The light ends at 3.6 V\n"
+                   "(0.42 mA), so this fit cannot reach that range. Below it\n"
+                   "the barrier still curves, and R depends on the range (10)."))
     fig_hist(pp, die, plt)
     for a in ARRAYS:
         for d, name in ((curves[a], "all pixels"), (bests[a], "best 2 %")):
