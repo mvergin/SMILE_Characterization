@@ -1100,23 +1100,42 @@ def fig_barrier_maps(arr, p, plt, B=16):
 
 
 DEAD_WIN = 33                # px: the neighbourhood whose share of dead pixels is counted
+DEAD_GROUPS = [0, 10, 20, 30, 50, 100]   # % dead neighbours: the groups of figure 17
 
 
-def fig_vs_dark(arr, p, ref, plt):
-    """Does the barrier or the resistor grow where more pixels have died? Per-pixel k and R
-    against the share of dark pixels (open, short, dark_conducting in the same run's fast scan)
-    in a DEAD_WIN x DEAD_WIN window around the pixel. The dead pixels are scattered through the
-    live area (~20 % in Array38's best corner), so the distance to the nearest one is 1 px for
-    nearly every pixel and says nothing; the local share does."""
+def dead_map(arr):
+    """Share of dark pixels (open, short, dark_conducting in the same run's fast scan at
+    -1.40 V) in the DEAD_WIN x DEAD_WIN px around each pixel, in %, as a 512 x 512 map."""
     import bond_failure as bf
     from scipy.ndimage import uniform_filter
     cls = bf.classes(br.SWEEP[arr], -1.4)
     dark = np.zeros((512, 512), bool)
     idx = cls[cls.isin(bf.DARK)].index
     dark[idx.get_level_values("Y"), idx.get_level_values("X")] = True
-    frac = uniform_filter(dark.astype(float), size=DEAD_WIN, mode="nearest")
+    return 100 * uniform_filter(dark.astype(float), size=DEAD_WIN, mode="nearest")
+
+
+def dead_groups(sw, P, dm):
+    """The median pixel of each DEAD_GROUPS group of swept pixels: {label: (n, curve)}."""
+    px = pd.MultiIndex.from_arrays([sw.X, sw.Y]).unique()
+    fr = dm[px.get_level_values(1).to_numpy(), px.get_level_values(0).to_numpy()]
+    codes = np.digitize(fr, DEAD_GROUPS[1:-1])
+    out = {}
+    for k, (lo, hi) in enumerate(zip(DEAD_GROUPS[:-1], DEAD_GROUPS[1:])):
+        sel = px[codes == k]
+        if len(sel) >= 200:
+            out[f"{lo}-{hi} %"] = (len(sel), curve(sw, P, sel))
+    return out
+
+
+def fig_vs_dark(arr, p, ref, dm, plt):
+    """Does the barrier or the resistor grow where more pixels have died? Per-pixel k and R
+    against the share of dark pixels (open, short, dark_conducting in the same run's fast scan)
+    in a DEAD_WIN x DEAD_WIN window around the pixel. The dead pixels are scattered through the
+    live area (~20 % in Array38's best corner), so the distance to the nearest one is 1 px for
+    nearly every pixel and says nothing; the local share does."""
     s = p.dropna(subset=["k_barrier", "R_extra_kOhm"]).copy()
-    s["dead"] = 100 * frac[s.Y.to_numpy(), s.X.to_numpy()]
+    s["dead"] = dm[s.Y.to_numpy(), s.X.to_numpy()]
     bins = np.arange(0, 101, 10)
     g = s.groupby(pd.cut(s.dead, bins, include_lowest=True), observed=True)
     labels = [f"{max(iv.left, 0):.0f}-{iv.right:.0f}" for iv in g.size().index]
@@ -1144,6 +1163,183 @@ def fig_vs_dark(arr, p, ref, plt):
     save(fig, f"16_barrier_and_resistor_vs_dark_{arr}.png", plt,
          "Data: " + SOURCE[arr] + " Dark: open, short or dark_conducting in the same run's fast scan "
          "at -1.40 V. R carries +-0.5 kOhm from the transistor model.")
+
+
+def _g(i, lb):
+    """The barrier term, counted from I_REF: ln(1 + I/I_b) - ln(1 + I_REF/I_b), I_b = 10**lb."""
+    return np.log1p(i / 10 ** lb) - np.log1p(I_REF / 10 ** lb)
+
+
+# what degradation adds to a reference pixel's excess r(I): delta(I) = model(p, I, r(I))
+SECOND = {
+    "+ resistor": (lambda p, i, r: p[0] * (i - I_REF), [1e3], ([-5e4], [5e4])),
+    "+ 2nd barrier": (lambda p, i, r: p[0] * _g(i, p[1]), [0.1, -5.0], ([0, -8], [2, -2])),
+    "+ 2nd barrier + resistor": (lambda p, i, r: p[0] * _g(i, p[1]) + p[2] * (i - I_REF),
+                                 [0.1, -5.0, 1e3], ([0, -8, -5e4], [2, -2, 5e4])),
+    "reference barrier x k + resistor": (lambda p, i, r: (p[0] - 1) * r + p[1] * (i - I_REF),
+                                         [1.2, 1e3], ([0, -5e4], [5, 5e4])),
+}
+SECOND_COL = {"+ resistor": NPG["tan"], "+ 2nd barrier": NPG["red"],
+              "+ 2nd barrier + resistor": NPG["navy"], "reference barrier x k + resistor": NPG["teal"]}
+
+
+def fit_second(model, i, d, r):
+    f, p0, bounds = SECOND[model]
+    res = least_squares(lambda p: f(p, i, r) - d, p0, bounds=bounds)
+    cov = np.linalg.pinv(res.jac.T @ res.jac) * (res.fun @ res.fun) / max(1, len(i) - len(p0))
+    return dict(p=res.x, se=np.sqrt(np.abs(np.diag(cov))), n=len(i),
+                rms=float(np.sqrt(np.mean(res.fun ** 2))), f=lambda x, rr, p=res.x: f(p, x, rr))
+
+
+def describe_second(model, r):
+    p, se = r["p"], r["se"]
+    if model == "+ resistor":
+        s = f"R {p[0] / 1e3:.2f} kOhm"
+    elif model == "+ 2nd barrier":
+        s = f"a {1e3 * p[0]:.0f} mV, I_b {10 ** p[1] * 1e6:.2g} uA"
+    elif model == "+ 2nd barrier + resistor":
+        s = (f"a {1e3 * p[0]:.0f} +- {1e3 * se[0]:.0f} mV, I_b {10 ** p[1] * 1e6:.2g} uA "
+             f"(x/ {10 ** se[1]:.2g}), R {p[2] / 1e3:.2f} +- {se[2] / 1e3:.2f} kOhm")
+    else:
+        s = f"k {p[0]:.2f}, R {p[1] / 1e3:.2f} kOhm"
+    return f"{model}: {s}; rms {1e3 * r['rms']:.1f} mV"
+
+
+def fig_second_barrier(groups, c42, plt):
+    """Figure 17: what the 'second barrier' is, which equation is assumed and fitted, and what
+    Array38's data give. Reference: its healthiest pixels (< 10 % dead neighbours), which look
+    like Array42 (k 0.72 against 0.70), so delta(I) is what degradation added."""
+    from matplotlib.patches import FancyBboxPatch
+    names = list(groups)
+    n0, g0 = groups[names[0]]
+    i0, v0 = excess_points(g0)
+    i0, v0 = np.r_[I_REF, i0], np.r_[0.0, v0]          # by definition 0 at I_REF
+    ref = lambda i: np.interp(np.log(i), np.log(i0), v0, left=np.nan, right=np.nan)
+    fig, ax = plt.subplots(2, 2, figsize=(15.5, 12.5))
+    # (a) the model
+    x = ax[0, 0]
+    x.axis("off")
+    boxes = [("junction", "V_j from the light (02b)\nmakes the light", NPG["teal"]),
+             ("reference barrier", "V_ref(I): measured, FIXED\n(die, or healthy pixels)", "0.45"),
+             ("2nd barrier", "a ln(1 + I/I_b)\nFITTED: a, I_b", NPG["red"]),
+             ("resistor", "R I\nFITTED: R", NPG["tan"])]
+    for k, (title, text, col) in enumerate(boxes):
+        x0 = 0.02 + k * 0.245
+        x.add_patch(FancyBboxPatch((x0, 0.70), 0.2, 0.2, boxstyle="round,pad=0.01", fc="w", ec=col,
+                                   lw=2.2, transform=x.transAxes))
+        x.text(x0 + 0.1, 0.86, title, ha="center", va="center", fontsize=9.5, weight="bold",
+               color=col, transform=x.transAxes)
+        x.text(x0 + 0.1, 0.76, text, ha="center", va="center", fontsize=7.5, transform=x.transAxes)
+        if k < len(boxes) - 1:
+            x.annotate("", xy=(x0 + 0.245, 0.80), xytext=(x0 + 0.205, 0.80), xycoords="axes fraction",
+                       arrowprops=dict(arrowstyle="-", lw=2, color="0.3"))
+    x.text(0.5, 0.97, "in series, the same current I through all four", ha="center", fontsize=9,
+           transform=x.transAxes, color="0.3")
+    x.text(0.0, 0.60,
+           r"$V_{LED}(I) = V_j(I) + V_{ref}(I) + a\,\left[\ln(1+I/I_b) - \ln(1+I_0/I_b)\right]"
+           r" + R\,(I - I_0)$", fontsize=12, transform=x.transAxes)
+    x.text(0.0, 0.52,
+           "I_0 = 0.6 uA: every excess term is counted from there (the excess is 0 at I_0).\n\n"
+           "The 2nd barrier: an element that conducts I = I_b (exp(V/a) - 1), like a contact or\n"
+           "an interface that carriers cross by thermionic emission or tunnelling:\n"
+           "  - below I_b it acts like a resistor, R_0 = a / I_b\n"
+           "  - above I_b it adds only a per e-fold of current (log-like, as the LED's own barrier)\n"
+           "  - a: its log slope (26 mV for an ideal thermionic barrier, more for tunnelling)\n\n"
+           "The alternative 'k' model has no new element: V_ex = k V_ref(I) + R (I - I_0),\n"
+           "i.e. more (k > 1) or less (k < 1) of the reference's own barrier.\n\n"
+           "Fitted per curve: a, I_b and/or R (and k), least squares on the excess.",
+           fontsize=8.6, family="monospace", va="top", transform=x.transAxes)
+    x.set_title("(a) The assumed model", fontsize=11, loc="left")
+    # (b) the shape of a barrier against a resistor
+    x = ax[0, 1]
+    ii = np.linspace(0, 100e-6, 400)
+    a_ = 0.1
+    for ib, col in zip((1e-6, 5e-6, 20e-6, 100e-6), (NPG["teal"], NPG["lilac"], NPG["red"], NPG["brown"])):
+        x.plot(ii * 1e6, 1e3 * a_ * np.log1p(ii / ib), "-", lw=2, color=col,
+               label=f"barrier, a 100 mV, I_b {ib * 1e6:g} uA (R_0 = a/I_b = {a_ / ib / 1e3:.0f} kOhm)")
+    x.plot(ii * 1e6, 1e3 * 1e3 * ii, "--", lw=1.6, color="k", label="resistor, 1 kOhm")
+    x.axvspan(I_REF * 1e6, 90, color="0.92", zorder=0, label="the pixels' usable range, 0.6-90 uA")
+    x.text(97, 20, "I_b >> range:\nstraight,\nlike R", ha="right", fontsize=8, color=NPG["brown"])
+    x.text(14, 300, "I_b << range: bends early,\nthe LED barrier's own shape", fontsize=8,
+           color=NPG["teal"])
+    x.set(xlabel="current (uA)", ylabel="voltage across the element (mV)", xlim=(0, 100), ylim=(0, 500))
+    x.set_title("(b) A barrier is only distinguishable from a resistor\n"
+                "if it bends inside the measured range", fontsize=11, loc="left")
+    x.legend(fontsize=7.2, loc="upper left")
+    x.grid(alpha=.3)
+    # (c) Array38's data, by dead neighbours
+    x = ax[1, 0]
+    cols = [NPG["navy"], NPG["teal"], NPG["salmon"], NPG["red"], NPG["darkred"]]
+    rows = []
+    fits_c = {}
+    for name, col in zip(names[1:], cols[1:]):
+        n, g = groups[name]
+        i, v = excess_points(g)
+        r = ref(i)
+        m = np.isfinite(r)
+        i, v, r = i[m], v[m], r[m]
+        d = v - r
+        f2 = fit_second("+ 2nd barrier", i, d, r)
+        fits_c[name] = (i, d, r, n)
+        x.plot(i * 1e6, 1e3 * d, "o", ms=6, color=col,
+               label=f"{name} dead neighbours ({n} px): 2nd barrier a {1e3 * f2['p'][0]:.0f} mV, "
+                     f"I_b {10 ** f2['p'][1] * 1e6:.2g} uA")
+        xx = np.linspace(I_REF, i.max(), 200)
+        x.plot(xx * 1e6, 1e3 * f2["f"](xx, ref(xx)), "-", color=col, lw=1.3)
+        for model in SECOND:
+            rr = fit_second(model, i, d, r)
+            rows.append(dict(group=name, n=n, model=model, rms_mV=1e3 * rr["rms"],
+                             **{f"p{k}": p for k, p in enumerate(rr["p"])},
+                             **{f"se{k}": s for k, s in enumerate(rr["se"])}))
+    i42, v42 = excess_points(c42)
+    r42 = ref(i42)
+    m = np.isfinite(r42)
+    x.plot(i42[m] * 1e6, 1e3 * (v42[m] - r42[m]), "s--", ms=5, color="0.5", lw=1,
+           label="Array42, median pixel (for comparison)")
+    x.axhline(0, color="k", lw=.8)
+    x.set(xlabel="current (uA)", ylabel="excess minus the reference's (mV)", xlim=(0, 92))
+    x.set_title(f"(c) Array38: what degradation added, by the share of dead pixels nearby\n"
+                f"reference: its healthiest pixels (< 10 % dead within {DEAD_WIN} px, {n0} px); "
+                "lines: the 2nd-barrier fit", fontsize=10, loc="left")
+    x.legend(fontsize=7, loc="upper left")
+    x.grid(alpha=.3)
+    # (d) all four models on the most degraded group
+    x = ax[1, 1]
+    name = names[-1]
+    i, d, r, n = fits_c[name]
+    x.plot(i * 1e6, 1e3 * d, "o", ms=8, color=cols[len(names) - 1], label=f"{name} dead neighbours, {n} px")
+    xx = np.linspace(I_REF, i.max(), 200)
+    three = None
+    for model in SECOND:
+        rr = fit_second(model, i, d, r)
+        if model == "+ 2nd barrier + resistor":
+            three = rr
+        x.plot(xx * 1e6, 1e3 * rr["f"](xx, ref(xx)), "-", lw=1.8, color=SECOND_COL[model],
+               label=describe_second(model, rr))
+    x.axhline(0, color="k", lw=.8)
+    rs = fit_second("+ resistor", i, d, r)
+    x.text(0.98, 0.04,
+           f"{len(i)} measured points. A resistor alone misses by {1e3 * rs['rms']:.0f} mV rms:\n"
+           "the added voltage bends inside the range, so it is barrier-like.\n"
+           f"With barrier AND resistor free, R comes out NEGATIVE\n"
+           f"({three['p'][2] / 1e3:.2f} +- {three['se'][2] / 1e3:.2f} kOhm), which is unphysical: no resistor\n"
+           "is added, and the extra bends slightly more than one log term.\n"
+           "A new barrier and more of the reference's own barrier (k)\n"
+           "fit equally well: 'barrier, not resistor' is clear, which\n"
+           "barrier it is, is not.",
+           transform=x.transAxes, fontsize=7.3, family="monospace", ha="right", va="bottom",
+           bbox=dict(boxstyle="round", fc="w", alpha=.92))
+    x.set(xlabel="current (uA)", ylabel="excess minus the reference's (mV)", xlim=(0, 92))
+    x.set_title("(d) The four models fitted to the most degraded group", fontsize=11, loc="left")
+    x.legend(fontsize=6.8, loc="upper left")
+    x.grid(alpha=.3)
+    save(fig, "17_second_barrier_explained.png", plt,
+         "Data: " + SOURCE["Array38"] + f" Groups: share of dark pixels (open, short, dark_conducting "
+         f"in the same run's fast scan) within {DEAD_WIN} x {DEAD_WIN} px; each group's median pixel per "
+         "sweep bias, below the transistor limit. Array42: " + SOURCE["Array42"])
+    t = pd.DataFrame(rows)
+    t.to_csv(OUT / "fits_second_barrier.csv", index=False, float_format="%.5g")
+    return t
 
 
 def die_source_short():
@@ -1210,6 +1406,9 @@ def main() -> int:
         bests[a] = curve(sw, drv[a], best)
         istar[a] = float(rb.I_LED.median())          # the fast scan's median current at -1.40 V
         pp[a], gs[a] = per_pixel(sw, die, best, rb, istar[a], D)
+        if a == "Array38":                           # figure 17: groups by dead neighbours
+            dm38 = dead_map(a)
+            groups38 = dead_groups(sw, drv[a], dm38)
         SOURCE[a] = (f"{a}: NVLED sweep {br.REFERENCE_RUN[a]}, {sw.attrs['n_pixels']} pixels "
                      f"(best 2 %: {len(best)}; {sw.attrs['n_latched']} latched pixels and "
                      f"{sw.attrs['n_lit_ref']} partly lit references left out).")
@@ -1285,7 +1484,12 @@ def main() -> int:
         fig_vs_rbest(a, pp[a], istar[a], plt)
         fig_barrier_maps(a, pp[a], plt)
     ref42 = {"k": float(pp["Array42"].k_barrier.median()), "R": float(pp["Array42"].R_extra_kOhm.median())}
-    fig_vs_dark("Array38", pp["Array38"], ref42, plt)
+    fig_vs_dark("Array38", pp["Array38"], ref42, dm38, plt)
+    t17 = fig_second_barrier(groups38, curves["Array42"], plt)
+    print("  second barrier (Array38, against its healthiest pixels):")
+    for _, r in t17.iterrows():
+        print(f"    {r.group:>9s} {r.model:34s} rms {r.rms_mV:5.1f} mV  p0 {r.p0:.4g}  p1 {r.get('p1', np.nan):.4g}"
+              f"  p2 {r.get('p2', np.nan):.4g}")
     for a in ARRAYS:
         q = pp[a][["k_barrier", "R_extra_kOhm", "fit_rms_mV", "n_fit"]].describe(percentiles=[.1, .5, .9])
         print(f"  {a} per-pixel fits:\n{q.round(3).to_string()}")
