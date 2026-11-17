@@ -114,11 +114,12 @@ Not per run: `python analysis/method_maps.py` runs every code cell of the method
 (`results/comparisons/led_voltage/led_voltage_method.ipynb`, not in git) and uses what it
 defines. It writes the transistor the notebook derives (the best short, path removed,
 interpolated; Array38 scaled) to `results/comparisons/drivers/` (`transistor.csv`/`.json`/`.png`,
-`README.md`), the file `bond_resistance.py` reads. Then it fits every model of the notebook's
-section 9 to every pixel of each array's full sweep and writes the maps of the winning model, R2,
-I_b and the slope to `results/comparisons/bond_resistance/models/`. It first checks that it gives
-the notebook's own numbers for the notebook's Array38 pixels. With joblib, 3 worker processes
-(~45 min), else serial. `--replot` redraws the figures from the CSVs only.
+`README.md`), the file `bond_resistance.py` reads. Then it fits the models A, B and G2 of the
+notebook's section 9 (`MODELS`) to every pixel of each array's full sweep and writes the maps of the
+winning model, R2, I_b and the slope, with the models' equations, to
+`results/comparisons/bond_resistance/models/`. It first checks that it gives the notebook's own
+numbers for the notebook's Array38 pixels. With joblib, 3 worker processes (~35 min), else serial.
+`--replot` redraws the figures from the CSVs only.
 
 ### `bond_resistance.py` — the bond resistance of every pixel, over time
 
