@@ -15,9 +15,10 @@ Writes
   results/comparisons/bond_resistance/models/: the models of MODELS (A, B, G2) fitted to every pixel of each
       array's full sweep (SWEEPS), exactly as the notebook fits its six pixels, and the winner among them.
       <array>_models.csv (one row per pixel); models_<array>.png (the winner: A grey, G2 by its I_b, B by its
-      second barrier, and where B wins); R2_<array>.png (R2 of each winner, the hue its model); G2_<array>.png
-      (G2's I_b and slope on every pixel, the fit quality); absolute_vs_relative.png (the absolute extra against
-      R_best and R_local); summary.md. Every map names the models' equations at its foot.
+      second barrier, and where B wins); R2_<array>.png (R2 of each winner on one scale, grey on its limit);
+      R2_Beff_<array>.png (the same with B's effective resistance at 30 uA); G2_<array>.png (G2's I_b and slope
+      on every pixel, the fit quality); absolute_vs_relative.png (the absolute extra against R_best and R_local);
+      summary.md. Every map names the models' equations at its foot.
 """
 from __future__ import annotations
 
@@ -64,6 +65,8 @@ VIOLET = ["#e3defa", "#b3a8f0", "#8576e4", "#6250d6", "#3d2f9c"]
 SKIPPED, NOT_SWEPT = "#e1e0d9", "#ffffff"
 DIVERGING = ["#184f95", "#5598e7", "#f0efec", "#e66767", "#a8302f"]
 RAMP = {"A": GREY[1:], "B": ORANGE[1:], SHIFT: BLUE[1:]}           # per model: its colours from light to dark
+WARM = ["#fff3c4", "#f9c46b", "#ec8a3a", "#c4502a", "#842a2a", "#3b1530"]   # resistance, light yellow to dark
+LIMIT = "#b9b8b0"                                                     # a parameter on its limit
 
 
 def notebook():
@@ -445,36 +448,71 @@ def fig_models(arr, d, info, plt):
     finish(fig, info, f"models_{arr}.png", plt)
 
 
-def fig_r2(arr, d, info, plt):
-    """R2 of each pixel's best model. Left: every pixel, its hue the model (blue the die's-barrier model, grey A,
-    orange B), its shade R2, one scale for all. Right: the model-free resistance, the measured extra at -1.4 V over
-    the current, block medians: R2 of B is not comparable (it sits on -R_die where B's barrier takes the voltage)."""
-    from matplotlib.cm import ScalarMappable
-    from matplotlib.colors import Normalize, to_rgba
+def kohm_ticks(cb, norm):
+    """Plain ticks for a kOhm colour bar on a symlog scale, at least 5 % of the bar apart."""
+    nice = [-1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 7, 10, 15, 20, 30, 50, 100]
+    t = []
+    ends = (np.ceil(norm.vmin * 10) / 10, np.floor(norm.vmax * 10) / 10)          # rounded inward: on the bar
+    for v in [ends[0], *(v for v in nice if ends[0] < v < ends[1]), ends[1]]:
+        if not t or norm(v) - norm(t[-1]) > 0.05:
+            t.append(v)
+    cb.set_ticks(t)
+    cb.set_ticklabels([f"{v:g}" for v in t])
+    cb.ax.minorticks_off()
+
+
+def fig_r2(arr, d, info, plt, eff=False):
+    """The resistance of each pixel's winning model on one scale (A, B and G2 alike), with a black line where the
+    die's-barrier model stops winning most of a block. Left every pixel, right block medians.
+    eff=False: R2. A pixel whose R2 sits on its lower limit (-R_die) is grey: a fit stopped at a bound.
+    eff=True: B pixels show B's effective resistance at I_MAP, R2 + a2 / (I_MAP + I_b2), its barrier included."""
+    from matplotlib.colors import SymLogNorm, to_rgba
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
     lk, fit = look(d), d[d.best.notna()]
-    r2 = fit.best_R2 / 1e3
-    norm = Normalize(*np.nanpercentile(r2, [5, 95]))
-    col = np.zeros((len(fit), 4))
-    for m in MODELS:
-        s = fit.best.eq(m).to_numpy()
-        col[s] = cmap(RAMP[m], m)(norm(r2[s].clip(norm.vmin, norm.vmax)))
+    r = (fit.best_R2 / 1e3).to_numpy(copy=True)
+    B = fit.best.eq("B").to_numpy()
+    if eff:
+        r[B] = (fit.B_R2[B] + fit.B_a2[B] / (I_MAP + 10 ** fit.B_lgIb2[B])).to_numpy() / 1e3
+        stuck = np.zeros(len(fit), bool)
+    else:
+        stuck = fit.best_limit.fillna("").str.contains("R2 low").to_numpy()
+    lo, hi = np.nanpercentile(r[~stuck], [2, 98])
+    # linear below 1 kOhm (a quarter of a decade wide, so the few values near -R_die don't take half the bar), log above
+    norm = SymLogNorm(linthresh=1.0, linscale=0.25, vmin=lo, vmax=hi, base=10)
+    cm = cmap(WARM, "r")
+    col = np.tile(to_rgba(LIMIT), (len(fit), 1))
+    col[~stuck] = cm(norm(np.clip(r[~stuck], lo, hi)))
     rgba = image(fit, col, lk["gap"])
     rgba[np.isnan(rgba[..., 0])] = to_rgba(NOT_SWEPT)
-    fig, (ax, bx) = plt.subplots(1, 2, figsize=(17, 7.6), gridspec_kw=dict(width_ratios=[1.3, 1]))
-    show(ax, rgba, f"{arr}: R2 of each pixel's best model; the hue marks the model")
-    for m in MODELS[::-1]:
-        n = fit.best.eq(m).sum()
-        cb = fig.colorbar(ScalarMappable(norm, cmap(RAMP[m], m)), ax=ax, shrink=0.8, pad=0.015, aspect=35, extend="both")
-        cb.set_label(f"{m} best ({n}, {100 * n / len(fit):.0f} %): R2 (kOhm)", fontsize=8)
-    r14 = fit.extra14_mV / fit.I14_uA                                 # mV / uA = kOhm, whichever model
-    im = show(bx, blocks(image(fit, r14), lk["B"]), f"{arr}: the measured extra at -1.4 V over the current, (V_ex - V_die) / I,\n"
-              f"{lk['B']} x {lk['B']} px block medians: model-free, so B pixels compare with the rest",
-              cmap=cmap(VIOLET, "R14"), norm=Normalize(*np.nanpercentile(r14, [5, 95])))
-    fig.colorbar(im, ax=bx, shrink=0.8, extend="both", label="(V_ex - V_die) / I at -1.4 V (kOhm)")
-    fig.suptitle(f"{arr}, sweep {info['run'][:11]}: R2, the resistance on top of the die's {info['R_D'] / 1e3:.2f} kOhm, "
-                 f"median {r2.median():.2f} kOhm\nWhere B wins, R2 often sits on its lower limit (-R_die): its barrier "
-                 "then carries the resistance" + lk["note"].replace("; ", "\n"), fontsize=9.5)
-    finish(fig, info, f"R2_{arr}.png", plt)
+    share = blocks(image(fit, fit.best.eq(SHIFT).astype(float)), BLOCK, np.nanmean, min_n=5)   # the G2 share per block
+    xs = np.arange(N // BLOCK) * BLOCK + BLOCK / 2 - 0.5
+    what = (f"R2 of A and {SHIFT}, and for B its effective resistance at {I_MAP * 1e6:.0f} uA, R2 + a2 / (I + I_b2)"
+            if eff else f"R2 of each pixel's winner (A, B or {SHIFT})")
+    fig, (ax, bx) = plt.subplots(1, 2, figsize=(16, 8.4))
+    show(ax, rgba, f"{arr}: {what}")
+    im = show(bx, blocks(image(fit[~stuck], r[~stuck]), lk["B"]), f"{arr}: the same, {lk['B']} x {lk['B']} px block medians"
+              + (" (grey pixels left out)" if stuck.any() else ""), cmap=cm, norm=norm)
+    line = np.nanmin(share) < 0.5 < np.nanmax(share)
+    if line:
+        for a in (ax, bx):
+            a.contour(xs, xs, share, levels=[0.5], colors="#0b0b0b", linewidths=1.6)
+    handles = [Line2D([], [], color="#0b0b0b", lw=1.6 if line else 0,
+                      label=f"{SHIFT} wins in half of a {BLOCK} x {BLOCK} px block (inside the line: more)" if line else
+                      f"no line: {SHIFT} wins in more than half of every {BLOCK} x {BLOCK} px block")]
+    if stuck.any():
+        handles.insert(0, Patch(color=LIMIT, label=f"R2 on its lower limit -R_die ({stuck.sum()} pixels, "
+                                                   f"{100 * stuck.mean():.1f} %): a fit stopped at a bound"))
+    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.07), fontsize=8, frameon=False)
+    for a in (ax, bx):
+        cb = fig.colorbar(im, ax=a, shrink=0.8, extend="both", label="kOhm on top of the die's resistance")
+        kohm_ticks(cb, norm)
+    fig.suptitle(f"{arr}, sweep {info['run'][:11]}: the resistance on top of the die's {info['R_D'] / 1e3:.2f} kOhm, "
+                 "one scale for all models (log above 1 kOhm, linear below)"
+                 + ("\nwhere B's barrier carries the resistance, its own R2 sits on or near -R_die: the effective "
+                    "resistance includes the barrier" if eff else "")
+                 + lk["note"].replace("; ", "\n"), fontsize=9.5)
+    finish(fig, info, f"R2_Beff_{arr}.png" if eff else f"R2_{arr}.png", plt)
 
 
 def fig_shift(arr, d, info, a_band, plt):
@@ -633,8 +671,10 @@ def summary(nb, dd, infos, comp):
           f"{S}_Ib_ratio, {S}_dPhi_meV, " + ("G2_a_ratio, " if S == "G2" else "") + "B_Ib2_uA, B_n_b, B_V_map_mV, B_Phi_eV.",
           f"- `models_<array>.png`: the best model per pixel: A grey, {S} blue by I_b / I_b,die, B orange by its second "
           f"barrier at {I_MAP * 1e6:.0f} uA; right, the share of B per {BLOCK} x {BLOCK} block.",
-          f"- `R2_<array>.png`: R2 of each pixel's best model, the hue its model ({S} blue, A grey, B orange), and the "
-          "model-free (V_ex - V_die) / I at -1.4 V in blocks. Where B wins, R2 often sits on its lower limit (-R_die): its barrier carries the resistance.",
+          f"- `R2_<array>.png`: R2 of each pixel's winner (A, B or {S}) on one scale, grey where R2 sits on its lower "
+          f"limit (-R_die), a black line where {S} stops winning most of a {BLOCK} x {BLOCK} block; right, block medians.",
+          f"- `R2_Beff_<array>.png`: the same, but B pixels show B's effective resistance at {I_MAP * 1e6:.0f} uA, "
+          "R2 + a2 / (I + I_b2): where B's barrier carries the resistance, its own R2 sits on or near -R_die.",
           f"- `{S}_<array>.png`: {S} fitted to every pixel: its I_b, " + ("its slope, " if S == "G2" else "")
           + "and the rms of the best model.",
           "- `absolute_vs_relative.png`: the absolute excess against R_best and R_local.",
@@ -670,10 +710,11 @@ def main() -> int:
         P = export_transistor(nb, plt)
         print(f"drivers: R_short {P['R_short_Ohm'] / 1e3:.2f} kOhm, f_38 {P['f']['Array38']:.3f}, knee {P['V_knee_V']:.3f} V")
     OUT.mkdir(parents=True, exist_ok=True)
+    plt.rcParams["axes.grid"] = False            # the notebook turns grids on; maps need none
     dd, infos = {}, (json.loads((OUT / "fits_info.json").read_text()) if replot else {})
     for arr in SWEEPS:
         if replot:
-            d = pd.read_csv(OUT / f"{arr}_models.csv")
+            d = pd.read_csv(OUT / f"{arr}_models.csv", low_memory=False)
         else:
             d, info = pixel_fits(nb, arr)
             infos[arr] = dict(info, rms_factor=nb["RMS_FACTOR"])
@@ -684,6 +725,7 @@ def main() -> int:
         dd[arr], info = d, dict(infos[arr], eqs=equations(nb), R_D=nb["R_D"])
         fig_models(arr, d, info, plt)
         fig_r2(arr, d, info, plt)
+        fig_r2(arr, d, info, plt, eff=True)
         fig_shift(arr, d, info, nb["A_BAND"], plt)
     comp = fig_absolute_vs_relative(dd, plt)
     print("\n".join(summary(nb, dd, infos, comp)))
