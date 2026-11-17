@@ -468,14 +468,11 @@ def fig_driver(arr, P, d, model, plt):
     """The transistor over current: the voltage it needs to carry I (the model, inverted), and
     the voltage it gets at each sweep bias (V_tot minus what the LED takes)."""
     fig, ax = plt.subplots(figsize=(8.2, 6.2))
-    vt, i = P["data"]
-    ax.plot(i * 1e6, vt - i * br.R_SHORT, "o", ms=2.5, color="0.6",
-            label=f"{arr}'s 10 best shorts, their own path removed")
     ii = np.linspace(0.1e-6, 140e-6, 1400)
     vds = br.v_driver(ii, 0.0, P)
     ax.plot(ii * 1e6, vds, "-", color="k", lw=1.8,
-            label="transistor model V_ds(I), all four on (code 15)"
-            + (f": Array42's shape, current x {P['scale']:.3f}" if "shape_from" in P else ""))
+            label="transistor V_ds(I), code 15: the best short, its path removed (drivers/transistor.csv)"
+            + ("" if arr == "Array42" else ", Array42's scaled"))
     il = np.linspace(1e-6, 124e-6, 400)
     for vt_, c in zip((3.2, 4.0, 5.0), (NPG["teal"], NPG["lilac"], NPG["brown"])):
         ax.plot(il * 1e6, vt_ - model(il), "--", color=c, lw=1.3,
@@ -496,26 +493,16 @@ def fig_driver(arr, P, d, model, plt):
                 + ", ".join(f"{v:.2f}" for v in s.V_drv) + " V")
         for _, r in s.iterrows():
             ax.plot([r.I * 1e6] * 2, [r.V_drv, r.V_drv_est], ":", color=NPG["red"], lw=1.2)
-    ron = P["vov"] / (P["I15"] * (1 - 5 * P["lam"]))
-    rout = 1 / (P["lam"] * P["I15"])
-    ax.annotate(f"linear region: V_ds = R_on I,\nR_on = {ron / 1e3:.1f} kOhm", (40, 40e-6 * ron),
+    ron = br.r_on(P)
+    ax.annotate(f"linear region: V_ds = R_on I,\nR_on = {ron / 1e3:.1f} kOhm at 20 uA", (40, 40e-6 * ron),
                 xytext=(14, 1.15), fontsize=8, bbox=dict(boxstyle="round", fc="w", ec="0.7"),
                 arrowprops=dict(arrowstyle="->", color="0.4"))
-    ax.text(118, 2.9, f"saturation: near its limit\n(~{P['I15'] * 1e6:.0f} uA) V_ds shoots up:\n"
-            f"a current source, {100 * P['lam']:.1f} %/V\n({rout / 1e6:.2f} MOhm). It takes\n"
-            "whatever the LED does not.", fontsize=8, ha="right", va="bottom",
+    ax.text(118, 2.9, f"saturation: near its limit\n(~{P['i'].max() * 1e6:.0f} uA) V_ds shoots up:\n"
+            "a current source. It takes\nwhatever the LED does not.", fontsize=8, ha="right", va="bottom",
             bbox=dict(boxstyle="round", fc="w", ec="0.7"))
-    fit_note = ([f"$V_{{ov}}$, m, $\\lambda$: Array42's (no data below the knee)",
-                 f"$I_{{15}}$: Array42's x {P['scale']:.3f}, fitted to the shorts, rms {P['rms_pct']:.2f} %"]
-                if "shape_from" in P else [f"fitted to the 10 best shorts: rms {P['rms_pct']:.2f} %"])
-    ax.text(2, 4.95, "\n".join(
-        [r"$V_{ds}(I) = V_{ov}\,\frac{u}{\left(1-u^{m}\right)^{1/m}},\quad"
-         r"u = \frac{I}{I_{15}\,\left(1+\lambda\,(V_{ds}-5\,\mathrm{V})\right)}$",
-         r"(the inverse of $I = I_{15}(1+\lambda(V_{ds}-5\,\mathrm{V}))\,x/(1+x^m)^{1/m}$, $x = V_{ds}/V_{ov}$;"
-         "\nimplicit through the small $\\lambda$ term, solved numerically)",
-         f"$I_{{15}}$ = {P['I15'] * 1e6:.1f} uA,   $\\lambda$ = {100 * P['lam']:.2f} %/V,   "
-         f"$V_{{ov}}$ = {P['vov']:.3f} V,   m = {P['m']:.2f}"] + fit_note),
-        fontsize=7.6, va="top", ha="left", linespacing=1.45, bbox=dict(boxstyle="round", fc="w", ec="0.7"))
+    ax.text(2, 4.95, "V_ds(I): the measured curve of the best short (M1-M4 + M5, code 15),\n"
+            "its own path removed, interpolated. No model (drivers/README.md).",
+            fontsize=7.6, va="top", ha="left", linespacing=1.45, bbox=dict(boxstyle="round", fc="w", ec="0.7"))
     ax.set(xlabel="current (uA)", ylabel="voltage across the transistor (V)", xlim=(0, 140),
            ylim=(0, 5.05), title=f"{arr}: the pixel transistor over current, and where the pixel operates\n"
                                  "operating point = where the transistor's curve meets what the LED leaves it")
@@ -546,7 +533,7 @@ def fig_subtraction(arr, d, P, plt):
             ax.text(r.I * 1e6 - 1.2, (r.V_tot + r.V_LED_est) / 2, f"{1e3 * r.V_drv_est:.0f} mV",
                     ha="right", va="center", fontsize=7.5, color=NPG["navy"], zorder=5,
                     bbox=dict(boxstyle="round,pad=0.15", fc="w", ec="none", alpha=.9))
-    ron = P["vov"] / (P["I15"] * (1 - 5 * P["lam"]))
+    ron = br.r_on(P)
     top = k.iloc[-1]
     ax.text(0.03, 0.97,
             "arrows: the transistor's voltage V_ds(I)\n\n"
@@ -870,7 +857,7 @@ def fig_r_vs_v(arr, d, P, plt):
     ii = np.geomspace(0.1e-6, 100e-6, 100)
     ax.plot(ii * 1e6, N_R * VT / ii / 1e3, ":", color="k", lw=1.2,
             label="ideal junction alone: dV/dI = n kT/(q I), n 1.07")
-    ron = P["vov"] / (P["I15"] * (1 - 5 * P["lam"])) / 1e3
+    ron = br.r_on(P) / 1e3
     ax.axhline(ron, color=NPG["lilac"], ls="--", lw=1.2, label=f"for scale: the transistor's on-resistance ({ron:.1f} kOhm)")
     ax.axhline(0.27, color=NPG["brown"], ls=":", lw=1.2,
                label="for scale: the die's own series R (270 Ohm, its Cheung fit)")

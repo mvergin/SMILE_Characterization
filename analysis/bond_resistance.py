@@ -11,12 +11,11 @@ Per pixel, at a fast-scan bias NVLED (V_tot = VLED - NVLED across the pixel):
 - V_LED: the measured I(V) of a 10 um SGA_15 micro-LED (Array38 and Array42 are from wafer
   SGA_15), `SGA_15 10um/SGA_15_10um_IV.csv`, interpolated in log I. It carries the LED's own
   series resistance (270 Ohm, the device's rser plot), so R_bond is what remains.
-- V_driver: the drive transistor at code 15, a smooth-knee model fitted to each array's
-  10 best shorts (their own series path, 2.7 kOhm, removed: the code-1/code-15 split of
-  261105-1024). Array42's shorts reach 0 V across them (261105-1024). Array38's start at
-  0.8 V (261029-0836), above the knee: free, the fit invented a near-vertical rise below it
-  (V_ov 0.07 V, 0.02 V at 27 uA). So Array38 takes Array42's measured shape (V_ov, m, lam),
-  scaled by one factor I15 fitted to its own shorts (SHAPE_FROM).
+- V_driver: the transistor stack (M1-M4 and M5) at code 15, the measured curve of the best
+  short with its own path removed, interpolated: results/comparisons/drivers/transistor.csv,
+  written by method_maps.py from the method notebook (section 3). Array38 has no shorts data
+  below 0.8 V and takes Array42's curve scaled to its own best short. No model since
+  2026-11-17 (before: a smooth-knee fit to the 10 best shorts).
 - I: the fast-scan current minus its quadrant's leakage (classify_pixels' I_leak_A).
 - V_typical: the typical class's median I(V) from the array's no-caps sweep (261026-0813,
   261102-1703).
@@ -38,12 +37,12 @@ Writes results/comparisons/bond_resistance/:
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import least_squares
 
 import analyze_array as aa
 import driver_stats as ds
@@ -51,26 +50,17 @@ import driver_stats as ds
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "results" / "comparisons" / "bond_resistance"
 LED_CSV = REPO / "SGA_15 10um" / "SGA_15_10um_IV.csv"
+TRANSISTOR = REPO / "results" / "comparisons" / "drivers" / "transistor"   # .csv: the curve, .json: its numbers
 VLED = 1.8
-# The shorts' own series path. At low voltage the shorts' resistance per code is
-# R_on(code 1)/weight + 2.72 kOhm (261105-1024), but the code-independent 2.72 kOhm holds
-# two things: the short path, and the driver's source resistance R_src shared by its four
-# PMOS, which every LED pixel has too. The design widths (6.8, 2.59, 1.2, 0.54 um, L 2 um)
-# fit the shorts' code currents only with both a narrow-width offset (dW 0.18 um) and a
-# shared source resistance, R_src / V_ov = 885 /A (Array42); V_ov = 2 I_sat R_on = 1.13 V
-# (code 1 and code 15 agree), so R_src = 1.0 kOhm. Only the rest is the short's own path;
-# R_src stays in the driver. Array38 has no low-voltage shorts: same path assumed.
-R_SRC = 1.0e3
-R_SHORT = 2.72e3 - R_SRC
+# the best short's own path, removed from the shorts to get the transistor (method notebook, 3e)
+_J = TRANSISTOR.with_suffix(".json")
+R_SHORT = json.loads(_J.read_text())["R_short_Ohm"] if _J.exists() else np.nan
 I_MIN = 1e-6
 DRIVER = {"Array42": "261105-1024_Array42_PIXELS_Transistoriv",
           "Array38": "261029-0836_Array38_PIXELS_Transistoriv"}
 SWEEP = {"Array42": "261102-1703_Array42_ROI_(0, 0, 511, 511)",
          "Array38": "261026-0813_Array38_ROI_(0, 0, 511, 511)"}
 REFERENCE_RUN = {"Array42": "261102-1703", "Array38": "261026-0813"}
-# arrays whose shorts have no data below the knee borrow the knee of an array that has;
-# same design, drivers within ~3 %
-SHAPE_FROM = {"Array38": "Array42"}
 
 
 # ---- LED, driver, typical pixel ---------------------------------------------------------
@@ -88,54 +78,26 @@ def v_led(i):
 
 
 def f15(vds, vn, P):
-    x = np.clip(vds, 0, None) / P["vov"]
-    return (P["I15"] * (1 + P["g"] * (vn - 3.2)) * (1 + P["lam"] * (vds - 5.0))
-            * x / (1 + x ** P["m"]) ** (1 / P["m"]))
+    """Current of the transistor stack at code 15 with V_ds across it (vn: unused, the PMOS
+    source sits at VLED, so NVLED does not change the gate drive)."""
+    return np.interp(np.clip(vds, 0, None), P["vds"], P["i"])
 
 
 def fit_driver(arr):
-    """Code-15 driver of the array's 10 best shorts, the short path removed: each point
-    (V_tot, I) becomes (V_ds = V_tot - I R_SHORT, I)."""
-    p = ds.load(ds.R / DRIVER[arr])[0]
-    q = p.loc[p[(15, -3.2)].nlargest(10).index]
-    volts = sorted(v for b, v in p.columns if b == 15)
-    vt = np.array([VLED - v for v in volts])
-    i = np.array([float((q[(15, v)] - q[(0, v)]).median()) for v in volts])
-    keep = vt > 0.02
-    vt, i = vt[keep], i[keep]
-    vds, vn = vt - i * R_SHORT, vt - VLED
-    # The drivers are PMOS with the source at VLED (1.8 V in every run): the gate drive does
-    # not see NVLED, so the gate term g is 0, not a fit parameter. Free, it took +3.2 %/V
-    # (Array42) and -3.3 %/V (Array38), compensating the saturation slope.
-    if arr in SHAPE_FROM:
-        S = fit_driver(SHAPE_FROM[arr])
-        shape = {k: S[k] for k in ("lam", "vov", "m")}
-
-        def res(x):
-            return f15(vds, vn, dict(shape, I15=x[0], g=0.0)) / i - 1
-        r = least_squares(res, [S["I15"]])
-        P = dict(shape, I15=float(r.x[0]), g=0.0, shape_from=SHAPE_FROM[arr],
-                 scale=float(r.x[0] / S["I15"]))
-    else:
-        names = ["I15", "lam", "vov", "m"]
-
-        def res(x):
-            return f15(vds, vn, dict(zip(names, x), g=0.0)) / i - 1
-        r = least_squares(res, [i.max(), 0.02, 0.5, 2.0],
-                          bounds=([1e-5, 0.0, 0.02, 0.5], [1e-3, 0.1, 6, 20]))
-        P = dict(zip(names, r.x), g=0.0)
-    P["rms_pct"] = 100 * float(np.sqrt(np.mean(r.fun ** 2)))
-    P["vt_min"] = float(vt.min())
-    P["data"] = (vt, i)
-    return P
+    """The array's transistor at code 15 from drivers/transistor.csv: the best short's measured
+    curve, its own path removed (Array38: Array42's, scaled to its own best short). No fit."""
+    t = pd.read_csv(TRANSISTOR.with_suffix(".csv"))
+    return dict(vds=t.V_ds_V.to_numpy(), i=np.maximum.accumulate(t[f"I_{arr}_A"].to_numpy()), array=arr)
 
 
 def v_driver(i, vn, P):
-    """V_ds at which the driver carries i at gate drive vn; NaN above what it can."""
-    grid = np.linspace(0, 6, 6001)
-    fi = np.maximum.accumulate(f15(grid, vn, P))
-    v = np.interp(i, fi, grid, right=np.nan)
-    return np.where(i < fi[-1] * 0.999, v, np.nan)
+    """V_ds at which the transistor carries i; NaN above the highest measured current."""
+    return np.interp(i, P["i"], P["vds"], right=np.nan)
+
+
+def r_on(P, i=20e-6):
+    """The transistor's resistance V_ds / I in its linear region, at 20 uA."""
+    return float(v_driver(i, 0.0, P)) / i
 
 
 def typical_curve(arr):
@@ -214,8 +176,7 @@ def pixels(row, P, typ, P_other, ref=None):
     d["V_LED"] = v_led(d.I_LED.to_numpy())
     d["V_driver"] = v_driver(d.I_LED.to_numpy(), vn, P)
     d["R_bond_kOhm"] = (vtot - d.V_LED - d.V_driver) / d.I_LED / 1e3
-    # the bracket: the same pixels with the OTHER array's driver. Array38's shorts start at
-    # 0.8 V, so its knee is borrowed from Array42 (SHAPE_FROM); Array42's is measured to 0 V.
+    # the bracket: the same pixels with the OTHER array's transistor (the two differ by f_38)
     d["R_bond_other_driver_kOhm"] = ((vtot - d.V_LED - v_driver(d.I_LED.to_numpy(), vn, P_other))
                                      / d.I_LED / 1e3)
     tv, ti = typ
@@ -279,9 +240,8 @@ def main() -> int:
         print(f"{a} best-pixel reference: {len(bi)} pixels, {len(anc)} anchored; curve "
               + ", ".join(f"{u:.3f} V at {i * 1e6:.1f} uA" for i, u in zip(ci, cu)))
     for a, P in drv.items():
-        print(f"{a} driver (10 best shorts, code 15, short path {R_SHORT / 1e3:.2f} kOhm removed): "
-              f"rms {P['rms_pct']:.2f} %, lam {100 * P['lam']:.2f} %/V, g {100 * P['g']:+.2f} %/V, "
-              f"data from {P['vt_min']:.2f} V across the short")
+        print(f"{a} transistor ({TRANSISTOR.name}.csv, best short, path {R_SHORT / 1e3:.2f} kOhm removed): "
+              f"{1e3 * float(v_driver(20e-6, 0, P)):.0f} mV at 20 uA, {P['i'].max() * 1e6:.0f} uA at most")
     rows, data = [], {}
     for _, r in runs.iterrows():
         other = next(k for k in DRIVER if k != r["array"])
@@ -436,12 +396,9 @@ def main() -> int:
     for a, x in zip(DRIVER, ax):
         ii = np.logspace(-6, np.log10(1.3e-4), 200)
         x.plot(v_led(ii), ii * 1e6, color="tab:blue", label="LED, SGA_15 10 um (measured)")
-        for vb, ls in ((-1.35, "-"), (-1.4, "--")):
-            x.plot(v_driver(ii, -vb, drv[a]), ii * 1e6, ls=ls, color="tab:red",
-                   label=f"driver code 15 at NVLED {vb:+.2f} V (model, short path removed)")
-        vt_d, i_d = drv[a]["data"]
-        x.plot(vt_d - i_d * R_SHORT, i_d * 1e6, ".", ms=3, color="tab:red", alpha=0.5,
-               label=f"10 best shorts, V_tot - I x {R_SHORT / 1e3:.2f} kOhm")
+        x.plot(v_driver(ii, 0, drv[a]), ii * 1e6, color="tab:red",
+               label=f"transistor, code 15: the best short, path {R_SHORT / 1e3:.2f} kOhm removed"
+                     + ("" if a == "Array42" else " (Array42's, scaled)"))
         tv, ti = typ[a]
         x.plot(tv, ti * 1e6, "o-", ms=3, color="k", label="typical pixel, whole (sweep median)")
         x.set_xlim(0, 4.0)
@@ -470,16 +427,12 @@ def main() -> int:
           "270 Ohm (`SGA_15 10um rser.bmp`). Not the same die: at 1.5 uA, where driver and bond "
           "drops are negligible, it needs ~50 mV more than our bonded typical pixel (sweep "
           "261102-1703). That sets the zero of R_bond to ~+-1.3 kOhm at 38 uA.",
-          f"- **Driver:** code 15, the 10 best shorts of each array with their own series path "
-          f"({R_SHORT / 1e3:.2f} kOhm, from the code dependence of 261105-1024) removed, fitted "
-          f"with a smooth-knee model (I15 (1 + g (V_n - 3.2)) (1 + lam (V_ds - 5)) x / (1 + x^m)^(1/m)):"]
-    for a, P in drv.items():
-        L.append(f"  - {a} ({DRIVER[a]}): rms {P['rms_pct']:.2f} %, saturation slope "
-                 f"{100 * P['lam']:.2f} %/V, gate term {100 * P['g']:+.2f} %/V; shorts measured "
-                 f"from {P['vt_min']:.2f} V across them"
-                 + (f" -- no data below the knee: {P['shape_from']}'s shape (V_ov, m, lam), "
-                    f"current x {P['scale']:.3f}" if "shape_from" in P else ""))
-    L += ["- **Leakage:** each quadrant's open-pixel current, subtracted from the fast-scan current.",
+          f"- **Transistor:** code 15, M1-M4 and M5: the measured curve of the best short with its own "
+          f"path ({R_SHORT / 1e3:.2f} kOhm) removed, interpolated, no model (`../drivers/transistor.csv`, "
+          f"`../drivers/README.md`). Array38 has no shorts data below 0.8 V: Array42's curve, scaled to "
+          f"Array38's best short. The best short is the closest to a bare transistor, so the pixels' "
+          f"transistors are at least this good: V_driver is a lower limit, R_bond an upper one.",
+          "- **Leakage:** each quadrant's open-pixel current, subtracted from the fast-scan current.",
           "- **Relative method:** R_rel = (V_tot - V_typical(I)) / I with the typical class's sweep "
           "median as V_typical (261026-0813, 261102-1703).",
           "- **Errors to quote with the results:** runs on the 10 mA range (Array38, July) have "

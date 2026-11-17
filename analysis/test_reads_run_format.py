@@ -452,12 +452,13 @@ def test_pixel_fits_are_cached_and_parallel_fits_match():
 
 
 def test_bond_resistance_inversions_round_trip():
-    """v_led reads the SGA_15 table back at its own points; v_driver inverts f15, and
-    returns NaN for a current the driver cannot carry."""
+    """v_led reads the SGA_15 table back at its own points; v_driver inverts f15 (the
+    interpolated transistor curve), and returns NaN for a current it cannot carry."""
     import bond_resistance as br
     k = len(br.LV) // 2
     assert abs(float(br.v_led(np.array([br.LI[k]]))[0]) - br.LV[k]) < 1e-9
-    P = dict(I15=130e-6, g=0.0, lam=0.02, vov=0.5, m=2.0)
+    grid = np.arange(0, 5.0, 0.025)
+    P = dict(vds=grid, i=130e-6 * np.tanh(grid / 0.5) * (1 + 0.02 * grid))
     for vds in (0.05, 0.3, 1.0, 2.5):
         i = float(br.f15(np.array([vds]), 3.2, P)[0])
         assert abs(float(br.v_driver(np.array([i]), 3.2, P)[0]) - vds) < 2e-3, vds

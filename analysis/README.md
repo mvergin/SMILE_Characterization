@@ -108,13 +108,26 @@ local spread, spread per code against 1/sqrt(weight), code linearity, saturation
 and the current spread of LED pixels (the sweep their pixel list came from) against
 their drivers' at every bias.
 
+### `method_maps.py` — the method notebook on whole arrays
+
+Not per run: `python analysis/method_maps.py` runs every code cell of the method notebook
+(`results/comparisons/led_voltage/led_voltage_method.ipynb`, not in git) and uses what it
+defines. It writes the transistor the notebook derives (the best short, path removed,
+interpolated; Array38 scaled) to `results/comparisons/drivers/` (`transistor.csv`/`.json`/`.png`,
+`README.md`), the file `bond_resistance.py` reads. Then it fits every model of the notebook's
+section 9 to every pixel of each array's full sweep and writes the maps of the winning model, R2,
+I_b and the slope to `results/comparisons/bond_resistance/models/`. It first checks that it gives
+the notebook's own numbers for the notebook's Array38 pixels. With joblib, 3 worker processes
+(~45 min), else serial. `--replot` redraws the figures from the CSVs only.
+
 ### `bond_resistance.py` — the bond resistance of every pixel, over time
 
 Not per run: `python analysis/bond_resistance.py` reads the usable fast scans listed in
 `results/comparisons/bond_resistance/fastscan_runs.csv` and writes the per-pixel bond
 resistance next to it: R_bond = (V_tot - V_LED - V_driver) / I, with the SGA_15 LED's
-measured I(V) (`SGA_15 10um/SGA_15_10um_IV.csv`, not in git) and a driver fitted to each
-array's 10 best shorts, plus the relative version against the typical pixel's sweep curve.
+measured I(V) (`SGA_15 10um/SGA_15_10um_IV.csv`, not in git) and the measured transistor
+(`results/comparisons/drivers/transistor.csv`, from `method_maps.py`; no model since 2026-11-17),
+plus the relative version against the typical pixel's sweep curve.
 Median over time, cumulative distributions, maps, the subtraction overview, and the change
 per pixel between scans against its resistance.
 
@@ -125,7 +138,7 @@ swept pixel from the slope of its own I(V), its LED anchored at its own ~1.5 uA 
 position against pixel-to-pixel, and where the best pixels sit.
 `image_burnin.py`: whether the displayed image (smile_s.jpg) shows in EQE, current, R_best and
 the LED anchor of Array42, block-matched bright against dark pixels, per fast scan.
-`led_voltage_budget.py`: where a pixel's voltage goes. Transistor (model), LED junction (from
+`led_voltage_budget.py`: where a pixel's voltage goes. Transistor (measured curve), LED junction (from
 the LED's own light) and the excess over it (barriers and series resistance), for the typical
 pixels, every swept pixel and the unbonded SGA_15 die (its IVL measurement, converted to
 `SGA_15 10um/SGA_15_10um_IVL.csv`). Writes `results/comparisons/led_voltage/` (README there).
