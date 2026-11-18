@@ -49,24 +49,29 @@ ANCHOR_MAX = 1.5     # a pixel's lowest light must lie within this factor of I0.
 N_MIN = 5            # fit points per pixel at least: two more than the most parameters a model has (B, G2)
 I_MAP = 30e-6        # B's second barrier is shown as the voltage it adds at this current (all pixels reach it)
 V_REL = -1.4         # the bias of the fast scans in bond_resistance/, for the comparison with R_best and R_local
-BLOCK = 16           # px: blocks for the share of pixels where B wins
+BLOCK = 8            # px: the blocks of the block maps (the winning model, block medians)
 N = 512              # pixels per side
 JOBS, CHUNK = 3, 1000    # worker processes and pixels per task: the fits take ~30 ms per pixel. 3, not 8: memory
 MODELS = ("A", "B", "G2")    # the models of the notebook's EXTRA fitted here, by their letter: a resistor, a second
 #                              barrier, the die's barrier with its own turn-on (G2: and its slope within A_BAND).
-#                              The winner is chosen among these with the notebook's rule. G instead of G2 also works.
 SHIFT = next(m for m in MODELS if m.startswith("G"))    # the die's-barrier model: blue in the maps
+RMS_FACTOR = 1.1     # the winner: the lowest rms, unless a model with fewer parameters comes within this factor of
+#                      it (the notebook's pick_best with this factor; the notebook itself uses 2)
 
-# colours (dataviz reference palette): blue = the die's barrier (G2), orange = B, grey = A
+# colours: blue = the die's barrier (G2), grey = A, red = B; values on a traffic light, green low to red high
 BLUE = ["#cde2fb", "#86b6ef", "#3987e5", "#256abf", "#104281", "#0d366b"]
-ORANGE = ["#fbe0d3", "#f4a77f", "#eb6834", "#c9501f", "#8f3412"]
 GREY = ["#e1e0d9", "#c3c2b7", "#898781", "#52514e", "#0b0b0b"]
-VIOLET = ["#e3defa", "#b3a8f0", "#8576e4", "#6250d6", "#3d2f9c"]
+ORANGE = ["#fbe0d3", "#f4a77f", "#eb6834", "#c9501f", "#8f3412"]    # line colour only (Array38 in transistor.png)
+MODEL_COLOR = {"A": "#898781", "B": "#c0302f", SHIFT: "#256abf"}
+TRAFFIC = "RdYlGn_r"
 SKIPPED, NOT_SWEPT = "#e1e0d9", "#ffffff"
 DIVERGING = ["#184f95", "#5598e7", "#f0efec", "#e66767", "#a8302f"]
-RAMP = {"A": GREY[1:], "B": ORANGE[1:], SHIFT: BLUE[1:]}           # per model: its colours from light to dark
-WARM = ["#fff3c4", "#f9c46b", "#ec8a3a", "#c4502a", "#842a2a", "#3b1530"]   # resistance, light yellow to dark
-LIMIT = "#b9b8b0"                                                     # a parameter on its limit
+LIMIT = "#9e9d96"                                                     # no resistor left (R2 <= 0)
+# each model's V_ex in full, the fitted parameters bold (mathtext); the die's part is fixed (notebook section 8)
+FULL = {"A": r"$V_{ex} = a_{die}\,g(I;\,I_{b,die}) + (R_{die} + \mathbf{R_2})\,(I - I_0)$",
+        "B": r"$V_{ex} = a_{die}\,g(I;\,I_{b,die}) + \mathbf{a_2}\,g(I;\,\mathbf{I_{b2}}) + (R_{die} + \mathbf{R_2})\,(I - I_0)$",
+        "G": r"$V_{ex} = a_{die}\,g(I;\,\mathbf{I_b}) + (R_{die} + \mathbf{R_2})\,(I - I_0)$",
+        "G2": r"$V_{ex} = \mathbf{a}\,g(I;\,\mathbf{I_b}) + (R_{die} + \mathbf{R_2})\,(I - I_0)$"}
 
 
 def notebook():
@@ -228,11 +233,42 @@ def subset(nb):
 
 
 def equations(nb):
-    """The fitted models as the notebook writes them, for the figures."""
-    band = f", a within +-{100 * nb['A_BAND']:.0f} % of a_die" if SHIFT == "G2" else ""
-    return ("extra = V_ex - V_die: what a pixel needs on top of the die.   g(I; I_b) = ln(1 + I/I_b) - ln(1 + I0/I_b)\n"
-            + "     ".join(f"{key(m)}: {s['eq']}" + (band if key(m) == "G2" else "") for m, s in subset(nb).items())
-            + f"\nthe winner: the simplest model (fewest parameters) within {nb['RMS_FACTOR']:g} x the lowest rms")
+    """The models in full for the figures: the fitted parameters bold, their limits, the die's fixed numbers, the rule."""
+    par = {k: v for s in subset(nb).values() for k, v in s["par"].items()}
+    lim = [r"$R_2$: " + f"{par['R2'][1] / 1e3:+.2f} to {par['R2'][2] / 1e3:.0f} kOhm"
+           + r" (lower limit $-R_{die}$: the total resistor $R_{die} + R_2$ stays $\geq 0$)"]
+    if "a2" in par:
+        lim.append(r"$a_2$: " + f"{1e3 * par['a2'][1]:.1f} mV (kT/q: n_b >= 1) to {par['a2'][2]:g} V")
+    if "a" in par:
+        lim.append(r"$a$: " + f"{1e3 * par['a'][1]:.1f} to {1e3 * par['a'][2]:.1f} mV (a_die +-{100 * nb['A_BAND']:.0f} %)")
+    lim.append(r"$I_b$, $I_{b2}$: from $I_0$ to the pixel's highest fitted current")
+    return ("\n".join([r"$V_{ex} = V_{LED} - V_j$, the voltage beyond the junction (from the light);   "
+                       r"$g(I;\,I_b) = \ln(1 + I/I_b) - \ln(1 + I_0/I_b)$;   " + f"I0 = {nb['I0'] * 1e6:.3f} uA",
+                       r"fixed, from the die: $a_{die}$ = " + f"{1e3 * nb['A_D']:.1f} mV, " + r"$I_{b,die}$ = "
+                       + f"{1e6 * 10 ** nb['LGIB_D']:.2f} uA, " + r"$R_{die}$ = " + f"{nb['R_D'] / 1e3:.2f} kOhm"
+                       + "   (fitted per pixel: bold)"]
+                      + [f"{m}:  {FULL[m]}" for m in MODELS]
+                      + ["limits:  " + ";   ".join(lim),
+                         f"the winner: the lowest rms, unless a model with fewer parameters comes within {RMS_FACTOR:g} x "
+                         "of it (fitted parameters: " + ", ".join(f"{key(m)} {len(s['par'])}" for m, s in subset(nb).items())
+                         + ")"]))
+
+
+def choose(d, nb):
+    """The winner per pixel from the rms of MODELS: the notebook's pick_best with RMS_FACTOR, for every row at once.
+    Writes best, best_rms_mV, best_limit, best_R2."""
+    ms = [key(m) for m in subset(nb)]
+    npar = np.array([len(s["par"]) for s in subset(nb).values()], float)
+    rms = d[[f"{m}_rms_mV" for m in ms]].to_numpy(float)
+    fitted = np.isfinite(rms).all(axis=1)
+    low = np.min(np.where(fitted[:, None], rms, np.inf), axis=1, keepdims=True)
+    k = np.argmin(np.where(rms <= RMS_FACTOR * low, npar * 1e9 + rms, np.inf), axis=1)   # fewest parameters, then rms
+    rows = np.arange(len(d))
+    d["best"] = np.where(fitted, np.array(ms, dtype=object)[k], None)
+    d["best_rms_mV"] = np.where(fitted, rms[rows, k], np.nan)
+    d["best_limit"] = np.where(fitted, d[[f"{m}_limit" for m in ms]].to_numpy(object)[rows, k], None)
+    d["best_R2"] = np.where(fitted, d[[f"{m}_R2" for m in ms]].to_numpy(float)[rows, k], np.nan)
+    return d
 
 
 def fit_rows(f, arr, keys, I, P, sP, V, ok, v_led, light, anchor):
@@ -264,10 +300,7 @@ def fit_rows(f, arr, keys, I, P, sP, V, ok, v_led, light, anchor):
         r14 = np.flatnonzero(np.isclose(V[a:b], V_REL) & np.isfinite(c["V_ex"]) & c["light"])
         if r14.size:                                                          # the measured extra at the fast scans' bias
             row.update(I14_uA=1e6 * c["I"][r14[0]], extra14_mV=1e3 * (c["V_ex"][r14[0]] - V_DIE(c["I"][r14[0]])))
-        add = {m: f["fit_extra"](c, spec) for m, spec in f["EXTRA"].items()}
-        best = f["pick_best"](add)
-        row.update(best=key(best), best_rms_mV=1e3 * add[best]["rms"], best_limit=add[best]["limit"],
-                   best_R2=add[best]["p"].get("R2", np.nan))
+        add = {m: f["fit_extra"](c, spec) for m, spec in f["EXTRA"].items()}      # the winner: choose()
         for m, r in add.items():
             row[f"{key(m)}_rms_mV"] = 1e3 * r["rms"]
             row.update({f"{key(m)}_{p}": v for p, v in r["p"].items()})
@@ -306,7 +339,7 @@ def pixel_fits(nb, arr, sample=None, seed=0):
                 light=(P > 5 * sP) & (I > 0))                                 # section 5
     cols["anchor"] = cols["light"] & ok & (P >= nb["ANCHOR_SIGMA"] * sP)      # eq. (11)
     # the notebook's functions travel to the worker processes with what they use (joblib pickles them)
-    f = {k: nb[k] for k in ("I0", "junction_from_light", "points", "V_DIE", "fit_extra", "pick_best")}
+    f = {k: nb[k] for k in ("I0", "junction_from_light", "points", "V_DIE", "fit_extra")}
     f["EXTRA"] = subset(nb)                                                   # only the models of MODELS
     keys = sw[["X", "Y"]].to_numpy()
     del sw                                                                    # the arrays hold all that is needed
@@ -320,7 +353,7 @@ def pixel_fits(nb, arr, sample=None, seed=0):
         parts = Parallel(n_jobs=JOBS if len(tasks) > 1 else 1, verbose=5)(delayed(fit_rows)(*t) for t in tasks)
     except ImportError:                          # ponytail: serial without joblib, ~1.5 h for both arrays
         parts = [fit_rows(*t) for t in tasks]
-    d = pd.concat(parts, ignore_index=True)
+    d = choose(pd.concat(parts, ignore_index=True), nb)
     # readable columns from the notebook's own definitions (section 9 show, eq. 21)
     VT, A_D, LGIB_D, g = nb["VT"], nb["A_D"], nb["LGIB_D"], nb["g"]
     for m in ("G", "G2"):
@@ -344,28 +377,17 @@ def cmap(colors, name):
     return LinearSegmentedColormap.from_list(name, colors)
 
 
-def image(d, values, gap=0):
-    """The values (one per row of d, or one RGBA per row) on the pixel grid, NaN where there is no pixel. gap > 0: an
-    empty pixel shows its nearest pixel within gap px, so the map of a sampled sweep reads as an area."""
+def image(d, values):
+    """The values (one per row of d, or one RGBA per row) on the pixel grid, NaN where there is no pixel."""
     img = np.full((N, N) + np.shape(values)[1:], np.nan)
     img[d.Y.to_numpy(), d.X.to_numpy()] = np.asarray(values, float)
-    if gap:
-        from scipy.ndimage import distance_transform_edt
-        dist, idx = distance_transform_edt(np.isnan(img if img.ndim == 2 else img[..., 0]), return_indices=True)
-        img = img[tuple(idx)]
-        img[dist > gap] = np.nan
     return img
 
 
 def look(d):
-    """How to draw an array: a sampled sweep (Array42's 1703 took about one pixel in five) gets its gaps filled up to
-    3 px and 16 px blocks; a sweep of every pixel of an area (Array38) gets neither and 8 px blocks."""
-    occ = np.zeros((N, N))
-    occ[d.Y.to_numpy(), d.X.to_numpy()] = 1
-    cover = occ.reshape(N // 16, 16, N // 16, 16).mean(axis=(1, 3))
-    if np.median(cover[cover > 0]) >= 0.5:
-        return dict(gap=0, B=8, note="")
-    return dict(gap=3, B=16, note=f"; the sweep took {100 * occ.mean():.0f} % of the pixels, gaps up to 3 px show the nearest one")
+    """A note for a sampled sweep (Array42's 1703 took about one pixel in five): its pixel maps are sparse."""
+    share = d[["X", "Y"]].drop_duplicates().shape[0] / N ** 2
+    return dict(B=BLOCK, note="" if share > 0.3 else f"; the sweep took {100 * share:.0f} % of the pixels")
 
 
 def blocks(img, B, stat=np.nanmedian, min_n=10):
@@ -402,38 +424,35 @@ def plain_ticks(cb, norm, n=6):
 
 
 def finish(fig, info, name, plt):
-    """The models' equations at the foot of the figure, then save."""
-    fig.text(0.01, 0.01, info["eqs"], fontsize=7.5, ha="left", va="bottom", family="monospace", color="#52514e")
-    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    """The models in full at the foot of the figure (fitted parameters bold, limits, the rule), then save."""
+    fig.text(0.01, 0.008, info["eqs"], fontsize=8, ha="left", va="bottom", color="#3a3936", linespacing=1.55)
+    fig.tight_layout(rect=(0, 0.17, 1, 1))
     fig.savefig(OUT / name, dpi=150)
     plt.close(fig)
 
 
 def fig_models(arr, d, info, plt):
-    """Left: every pixel in the colour of its best model: A grey, B by its second barrier, the die's-barrier model
-    (G2) by its turn-on I_b. Right: the share of pixels per block where B wins."""
+    """Left: every pixel in the colour of its winner: A grey, the die's-barrier model (G2) blue by its turn-on I_b,
+    B on the traffic light by its second barrier. Right: per 8 x 8 px block, the model that wins most of its pixels."""
     from matplotlib.cm import ScalarMappable
     from matplotlib.colors import Normalize, to_rgba
     from matplotlib.patches import Patch
     lk, fit = look(d), d[d.best.notna()]
     S, B, A = (d.best.eq(m).to_numpy() for m in (SHIFT, "B", "A"))
-    cs, cb = cmap(RAMP[SHIFT], SHIFT), cmap(RAMP["B"], "B")
+    cs, cb = cmap(BLUE[1:], SHIFT), plt.get_cmap(TRAFFIC)
     ns = ratio_norm(d[f"{SHIFT}_Ib_ratio"][S])
     nb_ = Normalize(0, max(1.0, float(np.nanpercentile(d.B_V_map_mV[B], 95))) if B.any() else 50)
     col = np.tile(to_rgba(SKIPPED), (len(d), 1))                     # one RGBA per pixel
     col[A] = to_rgba(GREY[2])
     col[S] = cs(ns(d[f"{SHIFT}_Ib_ratio"][S].clip(ns.vmin, ns.vmax)))
     col[B] = cb(nb_(d.B_V_map_mV[B].clip(0, nb_.vmax)))
-    ok = d.best.notna().to_numpy()
-    rgba = image(d[ok], col[ok], lk["gap"])                          # gaps take the nearest fitted pixel
-    sk = d[~ok]
-    rgba[sk.Y.to_numpy(), sk.X.to_numpy()] = to_rgba(SKIPPED)         # the unfitted ones only where they are
+    rgba = image(d, col)
     rgba[np.isnan(rgba[..., 0])] = to_rgba(NOT_SWEPT)
     pct = lambda s: f"{s.sum()}, {100 * s.sum() / len(fit):.0f} %"
     handles = [Patch(color=GREY[2], label=f"A best ({pct(A)}): the die's barrier as it is, plus R2"),
-               Patch(color=SKIPPED, label=f"not fitted: {(~ok).sum()} (no light near I0, or < {N_MIN} points)")]
-    fig, (ax, bx) = plt.subplots(1, 2, figsize=(16, 8.4), gridspec_kw=dict(width_ratios=[1.25, 1]))
-    show(ax, rgba, f"{arr}, sweep {info['run'][:11]}: the best of {', '.join(MODELS)} per pixel"
+               Patch(color=SKIPPED, label=f"not fitted: {(~d.best.notna()).sum()} (no light near I0, or < {N_MIN} points)")]
+    fig, (ax, bx) = plt.subplots(1, 2, figsize=(16, 9.6), gridspec_kw=dict(width_ratios=[1.25, 1]))
+    show(ax, rgba, f"{arr}, sweep {info['run'][:11]}: the winner of {', '.join(MODELS)} per pixel"
          + lk["note"].replace("; ", "\n"))
     cbs = fig.colorbar(ScalarMappable(ns, cs), ax=ax, shrink=0.8, pad=0.01, extend="both")
     cbs.set_label(f"{SHIFT} best ({pct(S)}): I_b / I_b,die, the die's barrier turning on later (> 1) or earlier")
@@ -441,20 +460,24 @@ def fig_models(arr, d, info, plt):
     cbb = fig.colorbar(ScalarMappable(nb_, cb), ax=ax, shrink=0.8, pad=0.04, extend="max")
     cbb.set_label(f"B best ({pct(B)}): its second barrier at {I_MAP * 1e6:.0f} uA (mV)")
     ax.legend(handles=handles, fontsize=7.5, loc="upper center", bbox_to_anchor=(0.5, -0.07), ncol=1, frameon=False)
-    share = blocks(image(fit, (fit.best == "B").astype(float)), BLOCK, np.nanmean)
-    im = show(bx, 100 * share, f"share of pixels where B (a second barrier) wins, {BLOCK} x {BLOCK} px blocks",
-              cmap=cmap(ORANGE, "Bshare"), vmin=0, vmax=100)
-    fig.colorbar(im, ax=bx, shrink=0.8, label="pixels with B best (%)")
+    # per block: the model that wins the most of its fitted pixels (blocks with < 5 fitted pixels stay white)
+    share = np.stack([blocks(image(fit, fit.best.eq(m).astype(float)), BLOCK, np.nanmean, min_n=5) for m in MODELS])
+    top = np.argmax(np.nan_to_num(share, nan=-1), axis=0)
+    blk = np.array([to_rgba(MODEL_COLOR[m]) for m in MODELS])[top]
+    blk[np.isnan(share[0])] = to_rgba(NOT_SWEPT)
+    show(bx, blk, f"the model that wins the most pixels of each {BLOCK} x {BLOCK} px block")
+    nblk = lambda m: int(((top == MODELS.index(m)) & ~np.isnan(share[0])).sum())
+    bx.legend(handles=[Patch(color=MODEL_COLOR[m], label=f"{m} ({nblk(m)} blocks)") for m in MODELS],
+              fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.07), ncol=len(MODELS), frameon=False)
     finish(fig, info, f"models_{arr}.png", plt)
 
 
 def kohm_ticks(cb, norm):
-    """Plain ticks for a kOhm colour bar on a symlog scale, at least 5 % of the bar apart."""
-    nice = [-1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 7, 10, 15, 20, 30, 50, 100]
+    """Plain ticks for a kOhm colour bar on a log scale, at least 6 % of the bar apart."""
+    nice = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 7, 10, 15, 20, 30, 50, 100]
     t = []
-    ends = (np.ceil(norm.vmin * 10) / 10, np.floor(norm.vmax * 10) / 10)          # rounded inward: on the bar
-    for v in [ends[0], *(v for v in nice if ends[0] < v < ends[1]), ends[1]]:
-        if not t or norm(v) - norm(t[-1]) > 0.05:
+    for v in [round(norm.vmin, 2), *(v for v in nice if norm.vmin < v < norm.vmax), round(norm.vmax, 1)]:
+        if norm.vmin <= v <= norm.vmax and (not t or norm(v) - norm(t[-1]) > 0.06):
             t.append(v)
     cb.set_ticks(t)
     cb.set_ticklabels([f"{v:g}" for v in t])
@@ -462,53 +485,41 @@ def kohm_ticks(cb, norm):
 
 
 def fig_r2(arr, d, info, plt, eff=False):
-    """The resistance of each pixel's winning model on one scale (A, B and G2 alike), with a black line where the
-    die's-barrier model stops winning most of a block. Left every pixel, right block medians.
-    eff=False: R2. A pixel whose R2 sits on its lower limit (-R_die) is grey: a fit stopped at a bound.
+    """The resistance of each pixel's winning model on one log scale for A, B and G2 alike, green low to red high.
+    Left every pixel, right 8 x 8 px block medians.
+    eff=False: R2. Grey: R2 <= 0, no resistor on top of the die's (at -R_die the total resistor is 0).
     eff=True: B pixels show B's effective resistance at I_MAP, R2 + a2 / (I_MAP + I_b2), its barrier included."""
-    from matplotlib.colors import SymLogNorm, to_rgba
-    from matplotlib.lines import Line2D
+    from matplotlib.colors import LogNorm, to_rgba
     from matplotlib.patches import Patch
     lk, fit = look(d), d[d.best.notna()]
     r = (fit.best_R2 / 1e3).to_numpy(copy=True)
     B = fit.best.eq("B").to_numpy()
     if eff:
         r[B] = (fit.B_R2[B] + fit.B_a2[B] / (I_MAP + 10 ** fit.B_lgIb2[B])).to_numpy() / 1e3
-        stuck = np.zeros(len(fit), bool)
-    else:
-        stuck = fit.best_limit.fillna("").str.contains("R2 low").to_numpy()
-    lo, hi = np.nanpercentile(r[~stuck], [2, 98])
-    # linear below 1 kOhm (a quarter of a decade wide, so the few values near -R_die don't take half the bar), log above
-    norm = SymLogNorm(linthresh=1.0, linscale=0.25, vmin=lo, vmax=hi, base=10)
-    cm = cmap(WARM, "r")
+    pos = r > 0                                                       # a log scale holds positive values only
+    on_limit = fit.best_limit.fillna("").str.contains("R2 low").to_numpy() & ~pos
+    norm = LogNorm(*np.nanpercentile(r[pos], [0.5, 99.5]))            # the whole range, without the last 0.5 %
+    cm = plt.get_cmap(TRAFFIC)
     col = np.tile(to_rgba(LIMIT), (len(fit), 1))
-    col[~stuck] = cm(norm(np.clip(r[~stuck], lo, hi)))
-    rgba = image(fit, col, lk["gap"])
+    col[pos] = cm(norm(np.clip(r[pos], norm.vmin, norm.vmax)))
+    rgba = image(fit, col)
     rgba[np.isnan(rgba[..., 0])] = to_rgba(NOT_SWEPT)
-    share = blocks(image(fit, fit.best.eq(SHIFT).astype(float)), BLOCK, np.nanmean, min_n=5)   # the G2 share per block
-    xs = np.arange(N // BLOCK) * BLOCK + BLOCK / 2 - 0.5
-    what = (f"R2 of A and {SHIFT}, and for B its effective resistance at {I_MAP * 1e6:.0f} uA, R2 + a2 / (I + I_b2)"
+    what = (f"R2 of A and {SHIFT}; for B its effective resistance at {I_MAP * 1e6:.0f} uA, R2 + a2 / ({I_MAP * 1e6:.0f} uA + I_b2)"
             if eff else f"R2 of each pixel's winner (A, B or {SHIFT})")
-    fig, (ax, bx) = plt.subplots(1, 2, figsize=(16, 8.4))
+    fig, (ax, bx) = plt.subplots(1, 2, figsize=(16, 9.6))
     show(ax, rgba, f"{arr}: {what}")
-    im = show(bx, blocks(image(fit[~stuck], r[~stuck]), lk["B"]), f"{arr}: the same, {lk['B']} x {lk['B']} px block medians"
-              + (" (grey pixels left out)" if stuck.any() else ""), cmap=cm, norm=norm)
-    line = np.nanmin(share) < 0.5 < np.nanmax(share)
-    if line:
-        for a in (ax, bx):
-            a.contour(xs, xs, share, levels=[0.5], colors="#0b0b0b", linewidths=1.6)
-    handles = [Line2D([], [], color="#0b0b0b", lw=1.6 if line else 0,
-                      label=f"{SHIFT} wins in half of a {BLOCK} x {BLOCK} px block (inside the line: more)" if line else
-                      f"no line: {SHIFT} wins in more than half of every {BLOCK} x {BLOCK} px block")]
-    if stuck.any():
-        handles.insert(0, Patch(color=LIMIT, label=f"R2 on its lower limit -R_die ({stuck.sum()} pixels, "
-                                                   f"{100 * stuck.mean():.1f} %): a fit stopped at a bound"))
-    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.07), fontsize=8, frameon=False)
+    im = show(bx, blocks(image(fit[pos], r[pos]), lk["B"], min_n=3), f"{arr}: the same, {lk['B']} x {lk['B']} px block "
+              "medians" + (" (grey pixels left out)" if (~pos).any() else ""), cmap=cm, norm=norm)
+    if (~pos).any():
+        ax.legend(handles=[Patch(color=LIMIT, label=f"R2 <= 0: no resistor on top of the die's ({(~pos).sum()} pixels, "
+                                 f"{100 * (~pos).mean():.1f} %);\n{on_limit.sum()} of them on the lower limit -R_die: the "
+                                 "total resistor R_die + R2 is 0" + ("" if eff else ", and B's barrier carries the resistance"))],
+                  loc="upper center", bbox_to_anchor=(0.5, -0.07), fontsize=8, frameon=False)
     for a in (ax, bx):
-        cb = fig.colorbar(im, ax=a, shrink=0.8, extend="both", label="kOhm on top of the die's resistance")
+        cb = fig.colorbar(im, ax=a, shrink=0.8, extend="both", label="kOhm on top of the die's resistance (log)")
         kohm_ticks(cb, norm)
     fig.suptitle(f"{arr}, sweep {info['run'][:11]}: the resistance on top of the die's {info['R_D'] / 1e3:.2f} kOhm, "
-                 "one scale for all models (log above 1 kOhm, linear below)"
+                 "one log scale for all models"
                  + ("\nwhere B's barrier carries the resistance, its own R2 sits on or near -R_die: the effective "
                     "resistance includes the barrier" if eff else "")
                  + lk["note"].replace("; ", "\n"), fontsize=9.5)
@@ -532,9 +543,9 @@ def fig_shift(arr, d, info, a_band, plt):
                        TwoSlopeNorm(1.0, 1 - a_band, 1 + a_band), DIVERGING, "a / a_die", "neither"))
     panels.append((fit.best_rms_mV, "fit quality: rms of the best model",
                    Normalize(0, float(np.nanpercentile(fit.best_rms_mV, 95))), ["#f9f9f7"] + GREY[1:], "rms (mV)", "max"))
-    fig, axs = plt.subplots(1, len(panels), figsize=(6.6 * len(panels), 7.2), squeeze=False)
+    fig, axs = plt.subplots(1, len(panels), figsize=(6.6 * len(panels), 8.8), squeeze=False)
     for ax, (v, t, norm, cols, lab, ext) in zip(axs.flat, panels):
-        im = show(ax, image(fit, v, lk["gap"]), t, cmap=cmap(cols, "m"), norm=norm)
+        im = show(ax, image(fit, v), t, cmap=cmap(cols, "m"), norm=norm)
         cb = fig.colorbar(im, ax=ax, shrink=0.8, label=lab, extend=ext)
         if norm is ns:
             plain_ticks(cb, ns)
@@ -599,11 +610,12 @@ def summary(nb, dd, infos, comp):
     S = SHIFT
     L = [f"# Every pixel through the method notebook (method_maps.py, {date.today()})", "",
          f"The notebook's section 9 on every swept pixel, with the models {', '.join(MODELS)} of its EXTRA: the die's "
-         "excess comes off, each model is fitted to what is left, and the simplest model within RMS_FACTOR of the "
-         "lowest rms wins. Same code, same settings:",
+         f"excess comes off, and each model is fitted to what is left. The winner: the lowest rms, unless a model with "
+         f"fewer parameters comes within {RMS_FACTOR:g} x of it (the notebook uses {nb['RMS_FACTOR_NOTEBOOK']:g}). "
+         "Otherwise the notebook's code and settings:",
          f"n_R = {nb['N_R']:.3f}, I0 = {nb['I0'] * 1e6:.3f} uA, the die {1e3 * nb['A_D']:.1f} mV / "
          f"{1e6 * 10 ** nb['LGIB_D']:.2f} uA / {nb['R_D'] / 1e3:.2f} kOhm (a / I_b / R, IMAX {nb['IMAX'] * 1e6:.0f} uA), "
-         f"RMS_FACTOR {nb['RMS_FACTOR']}, A_BAND {nb['A_BAND']}. Models: "
+         f"A_BAND {nb['A_BAND']}. Models: "
          + "; ".join(f"{m} = {s['eq']}" for m, s in subset(nb).items()) + ".", "",
          f"A pixel whose I_b equals the die's (and, in G2, whose slope does too) has no barrier term left: it is model A, "
          f"and A wins it with fewer parameters. So {S} wins only where the turn-on really moved.", "",
@@ -669,10 +681,10 @@ def summary(nb, dd, infos, comp):
           "best (the winning model), best_rms_mV, best_limit, best_R2 (Ohm); per model <M>_rms_mV, its parameters in SI "
           "units (a, a2 in V; lgIb, lgIb2 = log10 of the current in A; R2 in Ohm) and <M>_limit; "
           f"{S}_Ib_ratio, {S}_dPhi_meV, " + ("G2_a_ratio, " if S == "G2" else "") + "B_Ib2_uA, B_n_b, B_V_map_mV, B_Phi_eV.",
-          f"- `models_<array>.png`: the best model per pixel: A grey, {S} blue by I_b / I_b,die, B orange by its second "
-          f"barrier at {I_MAP * 1e6:.0f} uA; right, the share of B per {BLOCK} x {BLOCK} block.",
-          f"- `R2_<array>.png`: R2 of each pixel's winner (A, B or {S}) on one scale, grey where R2 sits on its lower "
-          f"limit (-R_die), a black line where {S} stops winning most of a {BLOCK} x {BLOCK} block; right, block medians.",
+          f"- `models_<array>.png`: the winner per pixel: A grey, {S} blue by I_b / I_b,die, B on a traffic light by its "
+          f"second barrier at {I_MAP * 1e6:.0f} uA; right, the model that wins most pixels of each {BLOCK} x {BLOCK} px block.",
+          f"- `R2_<array>.png`: R2 of each pixel's winner (A, B or {S}) on one log scale, green low to red high, grey "
+          f"where R2 <= 0; right, {BLOCK} x {BLOCK} px block medians.",
           f"- `R2_Beff_<array>.png`: the same, but B pixels show B's effective resistance at {I_MAP * 1e6:.0f} uA, "
           "R2 + a2 / (I + I_b2): where B's barrier carries the resistance, its own R2 sits on or near -R_die.",
           f"- `{S}_<array>.png`: {S} fitted to every pixel: its I_b, " + ("its slope, " if S == "G2" else "")
@@ -704,6 +716,7 @@ def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")      # the model names hold Greek letters
     replot = "--replot" in sys.argv[1:]          # figures and summary only, from the CSVs of the last fit run
     nb, plt = notebook()
+    nb["RMS_FACTOR_NOTEBOOK"], nb["RMS_FACTOR"] = nb["RMS_FACTOR"], RMS_FACTOR    # the notebook's pick_best: ours
     print(f"notebook: {NB.name}, I0 {nb['I0'] * 1e6:.3f} uA, n_R {nb['N_R']:.3f}, models fitted {list(subset(nb))}")
     if not replot:
         check_against_notebook(nb)
@@ -714,12 +727,12 @@ def main() -> int:
     dd, infos = {}, (json.loads((OUT / "fits_info.json").read_text()) if replot else {})
     for arr in SWEEPS:
         if replot:
-            d = pd.read_csv(OUT / f"{arr}_models.csv", low_memory=False)
+            d = choose(pd.read_csv(OUT / f"{arr}_models.csv", low_memory=False), nb)   # the winner with today's rule
         else:
             d, info = pixel_fits(nb, arr)
-            infos[arr] = dict(info, rms_factor=nb["RMS_FACTOR"])
-            d.to_csv(OUT / f"{arr}_models.csv", index=False, float_format="%.5g")
+            infos[arr] = dict(info, rms_factor=RMS_FACTOR)
             (OUT / "fits_info.json").write_text(json.dumps(infos, indent=1), encoding="utf-8")
+        d.to_csv(OUT / f"{arr}_models.csv", index=False, float_format="%.5g")
         print(f"{arr}: {len(d)} pixels, {d.best.notna().sum()} fitted; best: "
               + ", ".join(f"{m} {n}" for m, n in d.best.value_counts().items()))
         dd[arr], info = d, dict(infos[arr], eqs=equations(nb), R_D=nb["R_D"])

@@ -118,7 +118,8 @@ interpolated; Array38 scaled) to `results/comparisons/drivers/` (`transistor.csv
 notebook's section 9 (`MODELS`) to every pixel of each array's full sweep and writes the maps of the
 winning model, R2, I_b and the slope, with the models' equations, to
 `results/comparisons/bond_resistance/models/`. It first checks that it gives the notebook's own
-numbers for the notebook's Array38 pixels. With joblib, 3 worker processes (~35 min), else serial.
+numbers for the notebook's Array38 pixels. The winner: the lowest rms, unless a simpler model comes
+within 1.1 x (`RMS_FACTOR`; the notebook uses 2). With joblib, 3 worker processes (~35 min), else serial.
 `--replot` redraws the figures from the CSVs only.
 
 ### `bond_resistance.py` — the bond resistance of every pixel, over time
