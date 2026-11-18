@@ -58,7 +58,7 @@ SHIFT = next(m for m in MODELS if m.startswith("G"))    # the die's-barrier mode
 RMS_FACTOR = 1.1     # the winner: the lowest rms, unless a model with fewer parameters comes within this factor of
 #                      it (the notebook's pick_best with this factor; the notebook itself uses 2)
 
-# colours: blue = the die's barrier (G2), grey = A, red = B; resistance in 5 classes of 20 % of the pixels each
+# colours: blue = the die's barrier (G2), grey = A, red = B; resistance in classes of 20 % of the pixels, the tails by value
 BLUE = ["#cde2fb", "#86b6ef", "#3987e5", "#256abf", "#104281", "#0d366b"]
 GREY = ["#e1e0d9", "#c3c2b7", "#898781", "#52514e", "#0b0b0b"]
 ORANGE = ["#fbe0d3", "#f4a77f", "#eb6834", "#c9501f", "#8f3412"]    # line colour only (Array38 in transistor.png)
@@ -75,7 +75,10 @@ FULL = {"A": rf"$V_{{ex}} = {_DIE} + {_R}$",
         "G": r"$V_{ex} = a_{die}\," + _LN.format(Ib=r"\mathbf{I_b}") + rf" + {_R}$",
         "G2": r"$V_{ex} = \mathbf{a}\," + _LN.format(Ib=r"\mathbf{I_b}") + rf" + {_R}$"}
 WIN_BLOCK = 4        # px: the blocks of the map of the winning model
-CLASSES = ["#7b3294", "#2c7bb6", "#1a9641", "#e66101", "#d7191c"]   # resistance: 5 classes of 20 % of the pixels each
+# resistance: purple to orange 20 % of the pixels each; red, dark red: TAIL x and TAIL**2 x the 80 % edge;
+# below 1/TAIL x the 20 % edge grey (LIMIT), above the last edge black (TOP)
+CLASSES = ["#7b3294", "#2c7bb6", "#1a9641", "#e66101", "#d7191c", "#67001f"]
+TOP, TAIL = "#000000", 2
 B_RAMP = ["#f4a582", "#d6604d", "#b2182b", "#67001f"]                # B's second barrier: strong reds, no pale end
 
 
@@ -481,26 +484,29 @@ def fig_models(arr, d, info, plt):
 
 
 def classes(v):
-    """Five classes of the values, each with 20 % of them: the edges (min, 20 %, ..., max) and the BoundaryNorm."""
+    """The class edges and the BoundaryNorm: the 20, 40, 60 and 80 % points of the values, then by value
+    1/TAIL x the 20 % edge below and TAIL, TAIL**2 x the 80 % edge above. Outside the edges: under / over."""
     from matplotlib.colors import BoundaryNorm
-    edges = np.unique(np.nanpercentile(v, np.linspace(0, 100, len(CLASSES) + 1)))
+    q = np.nanpercentile(v, [20, 40, 60, 80])
+    edges = np.r_[q[0] / TAIL, q, q[-1] * TAIL, q[-1] * TAIL ** 2]
     return edges, BoundaryNorm(edges, len(edges) - 1)
 
 
 def class_bar(fig, ax, norm, edges, cm, label):
-    """A colour bar with one equal segment per class, its edges labelled in kOhm."""
+    """A colour bar with one equal segment per class, its edges labelled in kOhm, the open ends as triangles."""
     from matplotlib.cm import ScalarMappable
-    cb = fig.colorbar(ScalarMappable(norm, cm), ax=ax, shrink=0.8, spacing="uniform", ticks=edges, label=label)
+    cb = fig.colorbar(ScalarMappable(norm, cm), ax=ax, shrink=0.8, spacing="uniform", ticks=edges, label=label,
+                      extend="both", extendfrac="auto")
     cb.set_ticklabels([f"{v:.3g}" for v in edges])
     cb.ax.minorticks_off()
     return cb
 
 
 def fig_r2(arr, d, info, plt, eff=False):
-    """The resistance of each pixel's winning model, for A, B and G2 alike, in five colours that hold 20 % of the
-    pixels each (purple lowest, red highest). Left every pixel, right 8 x 8 px block medians in the same classes.
-    eff=False: R2. Grey: R2 on its lower limit (below 1 Ohm), no resistor on top of the die's.
-    eff=True: B pixels show B's effective resistance at I_MAP, R2 + a2 / (I_MAP + I_b2), its barrier included."""
+    """The resistance of each pixel's winning model, for A, B and G2 alike. Purple to orange hold 20 % of the pixels
+    each. The tails go by value: red up to TAIL x the 80 % edge, dark red up to TAIL**2 x, black above, grey below
+    1/TAIL x the 20 % edge (R2 on its lower limit 0 included). Left every pixel, right 8 x 8 px block medians.
+    eff=False: R2. eff=True: B pixels show B's effective resistance at I_MAP, R2 + a2 / (I_MAP + I_b2)."""
     from matplotlib.colors import ListedColormap, to_rgba
     from matplotlib.patches import Patch
     lk, fit = look(d), d[d.best.notna()]
@@ -508,30 +514,34 @@ def fig_r2(arr, d, info, plt, eff=False):
     B = fit.best.eq("B").to_numpy()
     if eff:
         r[B] = (fit.B_R2[B] + fit.B_a2[B] / (I_MAP + 10 ** fit.B_lgIb2[B])).to_numpy() / 1e3
-    pos = r > 1e-3                                                    # below 1 Ohm: R2 on its lower limit 0, grey
-    edges, norm = classes(r[pos])
-    cm = ListedColormap(CLASSES[:len(edges) - 1])
-    col = np.tile(to_rgba(LIMIT), (len(fit), 1))
-    col[pos] = cm(norm(r[pos]))
-    rgba = image(fit, col)
+    edges, norm = classes(r)
+    cm = ListedColormap(CLASSES).with_extremes(under=LIMIT, over=TOP)
+    rgba = image(fit, cm(norm(r)))
     rgba[np.isnan(rgba[..., 0])] = to_rgba(NOT_SWEPT)
-    blk = blocks(image(fit[pos], r[pos]), lk["B"], min_n=3)
+    blk = blocks(image(fit, r), lk["B"], min_n=3)
     brgba = cm(norm(np.nan_to_num(blk, nan=edges[0])))
     brgba[np.isnan(blk)] = to_rgba(NOT_SWEPT)
+    # the legend: every class with its real share (the classes of BoundaryNorm: 0 under, len(edges) over)
+    n = np.bincount(np.digitize(r[~np.isnan(r)], edges), minlength=len(edges) + 1)
+    at = lambda v: f"{v:.3g}"
+    names = ([f"below {at(edges[0])}"] + [f"{at(a)}-{at(b)}" for a, b in zip(edges[:-1], edges[1:])]
+             + [f"above {at(edges[-1])}"])
+    lab = [f"{s} kOhm: {k} px ({100 * k / n.sum():.1f} %)" for s, k in zip(names, n)]
+    lab[0] += f", {int((r <= 1e-3).sum())} with R2 on its limit 0"
+    lab[-1] += f", {int(fit.best_limit.fillna('').str.contains('R2 high').sum())} on R2's upper limit (fit fails)"
+    ax_cols = [LIMIT] + CLASSES + [TOP]
     what = (f"R2 of A and {SHIFT}; for B its effective resistance at {I_MAP * 1e6:.0f} uA, R2 + a2 / ({I_MAP * 1e6:.0f} uA + I_b2)"
             if eff else f"R2 of each pixel's winner (A, B or {SHIFT})")
     fig, (ax, bx) = plt.subplots(1, 2, figsize=(16, 9.6))
     show(ax, rgba, f"{arr}: {what}")
-    show(bx, brgba, f"{arr}: the same, {lk['B']} x {lk['B']} px block medians, in the classes of the pixels"
-         + (" (grey pixels left out)" if (~pos).any() else ""))
-    if (~pos).any():
-        ax.legend(handles=[Patch(color=LIMIT, label=f"R2 on its lower limit (below 1 Ohm): no resistor on top of the "
-                                 f"die's ({(~pos).sum()} pixels, {100 * (~pos).mean():.1f} %)")],
-                  loc="upper center", bbox_to_anchor=(0.5, -0.07), fontsize=8, frameon=False)
+    show(bx, brgba, f"{arr}: the same, {lk['B']} x {lk['B']} px block medians, in the classes of the pixels")
+    ax.legend(handles=[Patch(color=c, label=s) for c, s in zip(ax_cols, lab)], ncol=2,
+              loc="upper center", bbox_to_anchor=(0.5, -0.07), fontsize=8, frameon=False)
     for a in (ax, bx):
-        class_bar(fig, a, norm, edges, cm, "kOhm on top of the die's resistance: each colour holds 20 % of the pixels")
-    fig.suptitle(f"{arr}, sweep {info['run'][:11]}: the resistance on top of the die's {info['R_D'] / 1e3:.2f} kOhm, "
-                 f"in five classes of 20 % of the pixels each (the edges are this array's)"
+        class_bar(fig, a, norm, edges, cm, "kOhm on top of the die's resistance (purple to orange: 20 % each)")
+    fig.suptitle(f"{arr}, sweep {info['run'][:11]}: the resistance on top of the die's {info['R_D'] / 1e3:.2f} kOhm. "
+                 f"Purple to orange: 20 % of the pixels each (the edges are this array's).\nThe tails by value: red up to "
+                 f"{TAIL} x and dark red up to {TAIL ** 2} x the 80 % edge, black above, grey below 1/{TAIL} x the 20 % edge"
                  + ("\nB pixels with their barrier's share included: below its turn-on B's barrier acts as a resistor "
                     "a2 / I_b2, so R2 alone leaves it out" if eff else
                     "\nwhere B wins, its barrier holds part of the resistance (a2 / I_b2 below its turn-on): R2 alone leaves "
@@ -697,9 +707,10 @@ def summary(nb, dd, infos, comp):
           f"{S}_Ib_ratio, {S}_dPhi_meV, " + ("G2_a_ratio, " if S == "G2" else "") + "B_Ib2_uA, B_n_b, B_V_map_mV, B_Phi_eV.",
           f"- `models_<array>.png`: the winner per pixel: A grey, {S} blue by I_b / I_b,die, B on a red ramp by its "
           f"second barrier at {I_MAP * 1e6:.0f} uA; right, the model that wins most pixels of each {WIN_BLOCK} x {WIN_BLOCK} px block.",
-          f"- `R2_<array>.png`: R2 of each pixel's winner (A, B or {S}) in five colours of 20 % of the pixels each "
-          f"(purple lowest, red highest; the edges are on the colour bar), grey where R2 is on its limit 0; right, {BLOCK} x {BLOCK} px "
-          "block medians in the same classes.",
+          f"- `R2_<array>.png`: R2 of each pixel's winner (A, B or {S}): purple to orange 20 % of the pixels each; the "
+          f"tails by value: red up to {TAIL} x and dark red up to {TAIL ** 2} x the 80 % edge, black above, grey below "
+          f"1/{TAIL} x the 20 % edge (R2 on its limit 0 included). The edges are on the colour bar, the share of each "
+          f"class in the legend. Right, {BLOCK} x {BLOCK} px block medians in the same classes.",
           f"- `R2_Beff_<array>.png`: the same, but B pixels show B's effective resistance at {I_MAP * 1e6:.0f} uA, "
           "R2 + a2 / (I + I_b2): below its turn-on B's barrier acts as a resistor a2 / I_b2, which R2 alone leaves out.",
           f"- `{S}_<array>.png`: {S} fitted to every pixel: its I_b, " + ("its slope, " if S == "G2" else "")
