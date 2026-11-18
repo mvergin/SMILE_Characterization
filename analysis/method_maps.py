@@ -49,7 +49,7 @@ ANCHOR_MAX = 1.5     # a pixel's lowest light must lie within this factor of I0.
 N_MIN = 5            # fit points per pixel at least: two more than the most parameters a model has (B, G2)
 I_MAP = 30e-6        # B's second barrier is shown as the voltage it adds at this current (all pixels reach it)
 V_REL = -1.4         # the bias of the fast scans in bond_resistance/, for the comparison with R_best and R_local
-BLOCK = 8            # px: the blocks of the block maps (the winning model, block medians)
+BLOCK = 4            # px: the blocks of the block maps (the winning model, the R2 block medians)
 N = 512              # pixels per side
 JOBS, CHUNK = 3, 1000    # worker processes and pixels per task: the fits take ~30 ms per pixel. 3, not 8: memory
 MODELS = ("A", "B", "G2")    # the models of the notebook's EXTRA fitted here, by their letter: a resistor, a second
@@ -74,7 +74,6 @@ FULL = {"A": rf"$V_{{ex}} = {_DIE} + {_R}$",
         "B": rf"$V_{{ex}} = {_DIE} + \mathbf{{a_2}}\," + _LN.format(Ib=r"\mathbf{I_{b2}}") + rf" + {_R}$",
         "G": r"$V_{ex} = a_{die}\," + _LN.format(Ib=r"\mathbf{I_b}") + rf" + {_R}$",
         "G2": r"$V_{ex} = \mathbf{a}\," + _LN.format(Ib=r"\mathbf{I_b}") + rf" + {_R}$"}
-WIN_BLOCK = 4        # px: the blocks of the map of the winning model
 # resistance: purple to orange 20 % of the pixels each; red, dark red: TAIL x and TAIL**2 x the 80 % edge;
 # below 1/TAIL x the 20 % edge grey (LIMIT), above the last edge black (TOP)
 CLASSES = ["#7b3294", "#2c7bb6", "#1a9641", "#e66101", "#d7191c", "#67001f"]
@@ -162,7 +161,7 @@ def export_transistor(nb, plt):
         a.grid(alpha=0.3)
         a.legend(fontsize=7)
     fig.tight_layout()
-    fig.savefig(DRIVERS / "transistor.png", dpi=150)
+    fig.savefig(DRIVERS / "transistor.png", dpi=300)
     plt.close(fig)
 
     codes = P["codes"]
@@ -438,7 +437,7 @@ def finish(fig, info, name, plt):
     """The models in full at the foot of the figure (fitted parameters bold, limits, the rule), then save."""
     fig.text(0.01, 0.008, info["eqs"], fontsize=8, ha="left", va="bottom", color="#3a3936", linespacing=1.55)
     fig.tight_layout(rect=(0, 0.17, 1, 1))
-    fig.savefig(OUT / name, dpi=150)
+    fig.savefig(OUT / name, dpi=300)
     plt.close(fig)
 
 
@@ -472,11 +471,11 @@ def fig_models(arr, d, info, plt):
     cbb.set_label(f"B best ({pct(B)}): its second barrier at {I_MAP * 1e6:.0f} uA (mV)")
     ax.legend(handles=handles, fontsize=7.5, loc="upper center", bbox_to_anchor=(0.5, -0.07), ncol=1, frameon=False)
     # per block: the model that wins the most of its fitted pixels (blocks without a fitted pixel stay white)
-    share = np.stack([blocks(image(fit, fit.best.eq(m).astype(float)), WIN_BLOCK, np.nanmean, min_n=1) for m in MODELS])
+    share = np.stack([blocks(image(fit, fit.best.eq(m).astype(float)), BLOCK, np.nanmean, min_n=1) for m in MODELS])
     top = np.argmax(np.nan_to_num(share, nan=-1), axis=0)
     blk = np.array([to_rgba(MODEL_COLOR[m]) for m in MODELS])[top]
     blk[np.isnan(share[0])] = to_rgba(NOT_SWEPT)
-    show(bx, blk, f"the model that wins the most pixels of each {WIN_BLOCK} x {WIN_BLOCK} px block")
+    show(bx, blk, f"the model that wins the most pixels of each {BLOCK} x {BLOCK} px block")
     nblk = lambda m: int(((top == MODELS.index(m)) & ~np.isnan(share[0])).sum())
     bx.legend(handles=[Patch(color=MODEL_COLOR[m], label=f"{m} ({nblk(m)} blocks)") for m in MODELS],
               fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.07), ncol=len(MODELS), frameon=False)
@@ -518,7 +517,7 @@ def fig_r2(arr, d, info, plt, eff=False):
     cm = ListedColormap(CLASSES).with_extremes(under=LIMIT, over=TOP)
     rgba = image(fit, cm(norm(r)))
     rgba[np.isnan(rgba[..., 0])] = to_rgba(NOT_SWEPT)
-    blk = blocks(image(fit, r), lk["B"], min_n=3)
+    blk = blocks(image(fit, r), lk["B"], min_n=1)                  # every block with a fitted pixel shows
     brgba = cm(norm(np.nan_to_num(blk, nan=edges[0])))
     brgba[np.isnan(blk)] = to_rgba(NOT_SWEPT)
     # the legend: every class with its real share (the classes of BoundaryNorm: 0 under, len(edges) over)
@@ -619,7 +618,7 @@ def fig_absolute_vs_relative(dd, plt):
             rows.append(dict(array=arr, against=col.replace("_kOhm", ""), n=len(q), spearman=rho, zero_point_kOhm=zero,
                              median_relative=q[col].median(), median_absolute=q.R_abs.median()))
     fig.tight_layout()
-    fig.savefig(OUT / "absolute_vs_relative.png", dpi=150)
+    fig.savefig(OUT / "absolute_vs_relative.png", dpi=300)
     plt.close(fig)
     return pd.DataFrame(rows)
 
@@ -706,7 +705,7 @@ def summary(nb, dd, infos, comp):
           "units (a, a2 in V; lgIb, lgIb2 = log10 of the current in A; R2 in Ohm) and <M>_limit; "
           f"{S}_Ib_ratio, {S}_dPhi_meV, " + ("G2_a_ratio, " if S == "G2" else "") + "B_Ib2_uA, B_n_b, B_V_map_mV, B_Phi_eV.",
           f"- `models_<array>.png`: the winner per pixel: A grey, {S} blue by I_b / I_b,die, B on a red ramp by its "
-          f"second barrier at {I_MAP * 1e6:.0f} uA; right, the model that wins most pixels of each {WIN_BLOCK} x {WIN_BLOCK} px block.",
+          f"second barrier at {I_MAP * 1e6:.0f} uA; right, the model that wins most pixels of each {BLOCK} x {BLOCK} px block.",
           f"- `R2_<array>.png`: R2 of each pixel's winner (A, B or {S}): purple to orange 20 % of the pixels each; the "
           f"tails by value: red up to {TAIL} x and dark red up to {TAIL ** 2} x the 80 % edge, black above, grey below "
           f"1/{TAIL} x the 20 % edge (R2 on its limit 0 included). The edges are on the colour bar, the share of each "
