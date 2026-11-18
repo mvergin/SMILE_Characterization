@@ -240,10 +240,13 @@ def subset(nb):
 def equations(nb):
     """The models in full for the figures: the fitted parameters bold, their limits, the die's fixed numbers, the rule."""
     par = {k: v for s in subset(nb).values() for k, v in s["par"].items()}
-    lim = [r"$R_2$: " + f"{par['R2'][1] / 1e3:+.2f} to {par['R2'][2] / 1e3:.0f} kOhm"
-           + r" (lower limit $-R_{die}$: the total resistor $R_{die} + R_2$ stays $\geq 0$)"]
+    lo = par["R2"][1]
+    lim = [r"$R_2$: " + f"{lo / 1e3:g} to {par['R2'][2] / 1e3:.0f} kOhm"
+           + (" (no pixel below the die)" if lo >= 0 else r" (the total resistor $R_{die} + R_2$ stays $\geq 0$)")]
     if "a2" in par:
-        lim.append(r"$a_2$: " + f"{1e3 * par['a2'][1]:.1f} mV (kT/q: n_b >= 1) to {par['a2'][2]:g} V")
+        VT = nb["VT"]
+        lim.append(r"$a_2$: " + f"{1e3 * par['a2'][1]:.1f} to {1e3 * par['a2'][2]:.0f} mV "
+                   f"(n_b = a2 / (kT/q) from {par['a2'][1] / VT:.0f} to {par['a2'][2] / VT:.0f}: one barrier)")
     if "a" in par:
         lim.append(r"$a$: " + f"{1e3 * par['a'][1]:.1f} to {1e3 * par['a'][2]:.1f} mV (a_die +-{100 * nb['A_BAND']:.0f} %)")
     lim.append(r"$I_b$, $I_{b2}$: from $I_0$ to the pixel's highest fitted current")
@@ -294,7 +297,7 @@ def fit_rows(f, arr, keys, I, P, sP, V, ok, v_led, light, anchor):
                  V_LED=v_led[a:b], light=light[a:b])
         c["V_j"] = f["junction_from_light"](c)                                # eq. (9)
         c["V_ex"] = np.where(c["ok"], c["V_LED"] - c["V_j"], np.nan)          # eq. (12)
-        c["fit_I"], c["fit_V"] = f["points"](c)
+        c["fit_I"], c["fit_V"] = f["points"](c, f["IMAX"])                # up to IMAX (as the die) and the knee
         row["n"] = len(c["fit_I"])
         if row["n"] < N_MIN:
             row["skip"] = f"fewer than {N_MIN} points"
@@ -344,7 +347,7 @@ def pixel_fits(nb, arr, sample=None, seed=0):
                 light=(P > 5 * sP) & (I > 0))                                 # section 5
     cols["anchor"] = cols["light"] & ok & (P >= nb["ANCHOR_SIGMA"] * sP)      # eq. (11)
     # the notebook's functions travel to the worker processes with what they use (joblib pickles them)
-    f = {k: nb[k] for k in ("I0", "junction_from_light", "points", "V_DIE", "fit_extra")}
+    f = {k: nb[k] for k in ("I0", "IMAX", "junction_from_light", "points", "V_DIE", "fit_extra")}
     f["EXTRA"] = subset(nb)                                                   # only the models of MODELS
     keys = sw[["X", "Y"]].to_numpy()
     del sw                                                                    # the arrays hold all that is needed
@@ -496,7 +499,7 @@ def class_bar(fig, ax, norm, edges, cm, label):
 def fig_r2(arr, d, info, plt, eff=False):
     """The resistance of each pixel's winning model, for A, B and G2 alike, in five colours that hold 20 % of the
     pixels each (purple lowest, red highest). Left every pixel, right 8 x 8 px block medians in the same classes.
-    eff=False: R2. Grey: R2 <= 0, no resistor on top of the die's (at -R_die the total resistor is 0).
+    eff=False: R2. Grey: R2 on its lower limit (below 1 Ohm), no resistor on top of the die's.
     eff=True: B pixels show B's effective resistance at I_MAP, R2 + a2 / (I_MAP + I_b2), its barrier included."""
     from matplotlib.colors import ListedColormap, to_rgba
     from matplotlib.patches import Patch
@@ -505,8 +508,7 @@ def fig_r2(arr, d, info, plt, eff=False):
     B = fit.best.eq("B").to_numpy()
     if eff:
         r[B] = (fit.B_R2[B] + fit.B_a2[B] / (I_MAP + 10 ** fit.B_lgIb2[B])).to_numpy() / 1e3
-    pos = r > 0                                                       # R2 <= 0: grey, no resistor on top of the die's
-    on_limit = fit.best_limit.fillna("").str.contains("R2 low").to_numpy() & ~pos
+    pos = r > 1e-3                                                    # below 1 Ohm: R2 on its lower limit 0, grey
     edges, norm = classes(r[pos])
     cm = ListedColormap(CLASSES[:len(edges) - 1])
     col = np.tile(to_rgba(LIMIT), (len(fit), 1))
@@ -523,16 +525,17 @@ def fig_r2(arr, d, info, plt, eff=False):
     show(bx, brgba, f"{arr}: the same, {lk['B']} x {lk['B']} px block medians, in the classes of the pixels"
          + (" (grey pixels left out)" if (~pos).any() else ""))
     if (~pos).any():
-        ax.legend(handles=[Patch(color=LIMIT, label=f"R2 <= 0: no resistor on top of the die's ({(~pos).sum()} pixels, "
-                                 f"{100 * (~pos).mean():.1f} %);\n{on_limit.sum()} of them on the lower limit -R_die: the "
-                                 "total resistor R_die + R2 is 0" + ("" if eff else ", and B's barrier carries the resistance"))],
+        ax.legend(handles=[Patch(color=LIMIT, label=f"R2 on its lower limit (below 1 Ohm): no resistor on top of the "
+                                 f"die's ({(~pos).sum()} pixels, {100 * (~pos).mean():.1f} %)")],
                   loc="upper center", bbox_to_anchor=(0.5, -0.07), fontsize=8, frameon=False)
     for a in (ax, bx):
         class_bar(fig, a, norm, edges, cm, "kOhm on top of the die's resistance: each colour holds 20 % of the pixels")
     fig.suptitle(f"{arr}, sweep {info['run'][:11]}: the resistance on top of the die's {info['R_D'] / 1e3:.2f} kOhm, "
                  f"in five classes of 20 % of the pixels each (the edges are this array's)"
-                 + ("\nwhere B's barrier carries the resistance, its own R2 sits on or near -R_die: the effective "
-                    "resistance includes the barrier" if eff else "")
+                 + ("\nB pixels with their barrier's share included: below its turn-on B's barrier acts as a resistor "
+                    "a2 / I_b2, so R2 alone leaves it out" if eff else
+                    "\nwhere B wins, its barrier holds part of the resistance (a2 / I_b2 below its turn-on): R2 alone leaves "
+                    "it out, compare R2_Beff")
                  + lk["note"].replace("; ", "\n"), fontsize=9.5)
     finish(fig, info, f"R2_Beff_{arr}.png" if eff else f"R2_{arr}.png", plt)
 
@@ -695,10 +698,10 @@ def summary(nb, dd, infos, comp):
           f"- `models_<array>.png`: the winner per pixel: A grey, {S} blue by I_b / I_b,die, B on a red ramp by its "
           f"second barrier at {I_MAP * 1e6:.0f} uA; right, the model that wins most pixels of each {WIN_BLOCK} x {WIN_BLOCK} px block.",
           f"- `R2_<array>.png`: R2 of each pixel's winner (A, B or {S}) in five colours of 20 % of the pixels each "
-          f"(purple lowest, red highest; the edges are on the colour bar), grey where R2 <= 0; right, {BLOCK} x {BLOCK} px "
+          f"(purple lowest, red highest; the edges are on the colour bar), grey where R2 is on its limit 0; right, {BLOCK} x {BLOCK} px "
           "block medians in the same classes.",
           f"- `R2_Beff_<array>.png`: the same, but B pixels show B's effective resistance at {I_MAP * 1e6:.0f} uA, "
-          "R2 + a2 / (I + I_b2): where B's barrier carries the resistance, its own R2 sits on or near -R_die.",
+          "R2 + a2 / (I + I_b2): below its turn-on B's barrier acts as a resistor a2 / I_b2, which R2 alone leaves out.",
           f"- `{S}_<array>.png`: {S} fitted to every pixel: its I_b, " + ("its slope, " if S == "G2" else "")
           + "and the rms of the best model.",
           "- `absolute_vs_relative.png`: the absolute excess against R_best and R_local.",
